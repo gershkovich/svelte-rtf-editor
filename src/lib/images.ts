@@ -26,6 +26,28 @@ export const DEFAULT_MAX_IMAGE_EDGE = 1600;
  */
 export const DEFAULT_MAX_IMAGE_BYTES = 512 * 1024;
 
+/**
+ * Width, in px, a newly inserted picture is displayed at unless the editor
+ * column is narrower. 624px × 15 twips = 9360 twips = 6.5in, the text width of
+ * a Letter page with 1in margins — so pictures arrive sized to the page they
+ * will be printed or filed on rather than to the width of the browser window.
+ */
+export const DEFAULT_MAX_IMAGE_DISPLAY_WIDTH = 624;
+
+/**
+ * Width a picture is first shown at: the smallest of its own size, the editor's
+ * column, and the page cap. Limits that are absent or zero are ignored, and an
+ * image is never enlarged beyond its natural size.
+ */
+export function initialDisplayWidth(
+	naturalWidth: number,
+	columnWidth: number,
+	maxDisplayWidth: number
+): number {
+	const limits = [naturalWidth, columnWidth, maxDisplayWidth].filter((value) => value > 0);
+	return limits.length > 0 ? Math.round(Math.min(...limits)) : 0;
+}
+
 /** Successive reductions tried when a picture will not fit the byte budget. */
 const SIZE_LADDER = [1, 0.8, 0.64, 0.5];
 

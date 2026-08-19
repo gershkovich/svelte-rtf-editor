@@ -15,6 +15,60 @@
 		setTimeout(() => (editorCopied = false), 1500);
 	}
 
+	// ── Payload measurement ───────────────────────────────────────────────────
+	// What an embedded picture actually costs: RTF stores it as hex, two
+	// characters per byte, and the whole document has to fit the transport
+	// (an HL7 OBX-5 field, in our case).
+
+	interface ImageStat {
+		n: number;
+		format: string;
+		pixels: string;
+		displayed: string;
+		onPage: string;
+		bytes: number;
+	}
+
+	let imageStats: ImageStat[] = $state([]);
+	let rtfChars = $state(0);
+	let measured = $state(false);
+
+	/** Decoded byte length of a base64 data URL. */
+	function base64Bytes(dataUrl: string): number {
+		const comma = dataUrl.indexOf(',');
+		if (comma < 0) return 0;
+		const body = dataUrl.slice(comma + 1);
+		const padding = body.endsWith('==') ? 2 : body.endsWith('=') ? 1 : 0;
+		return Math.max(0, Math.floor((body.length * 3) / 4) - padding);
+	}
+
+	function measureImages() {
+		if (!editorRef) return;
+		// Measure the live images so naturalWidth/Height are already resolved.
+		const imgs = Array.from(document.querySelectorAll<HTMLImageElement>('.ink-content img'));
+		imageStats = imgs.map((img, i) => {
+			const src = img.getAttribute('src') || '';
+			const match = src.match(/^data:image\/([a-z+]+);base64,/i);
+			// \picwgoal is twips: px × 15. A Letter page with 1in margins has 6.5in
+			// of text width, so anything past that overflows the page it lands on.
+			const px = parseFloat(img.style.width) || img.naturalWidth || 0;
+			const inches = (px * 15) / 1440;
+			return {
+				n: i + 1,
+				format: match ? match[1].toUpperCase() : 'not embedded',
+				pixels: `${img.naturalWidth || '?'} × ${img.naturalHeight || '?'}`,
+				displayed: img.style.width || 'auto',
+				onPage: inches ? `${inches.toFixed(1)}in${inches > 6.5 ? ' ⚠' : ''}` : '—',
+				bytes: base64Bytes(src)
+			};
+		});
+		rtfChars = editorRef.getRTF().length;
+		measured = true;
+	}
+
+	const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
+	const totalImageBytes = $derived(imageStats.reduce((sum, s) => sum + s.bytes, 0));
+
 	// ── Test cases ────────────────────────────────────────────────────────────
 	const cases: { label: string; rtf: string }[] = [
 		{
@@ -82,6 +136,15 @@
 	.pane + .pane { border-left: 1px solid #ddd; }
 	pre { margin: 0; white-space: pre-wrap; font-size: 0.75rem; color: #444; }
 	.rendered { font-family: serif; }
+
+	.payload { margin-top: 1rem; padding: 0.75rem 1rem; background: #f8f8f8; border: 1px solid #ddd; border-radius: 4px; font-size: 0.8rem; }
+	.payload table { border-collapse: collapse; width: 100%; margin-bottom: 0.6rem; }
+	.payload th, .payload td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid #e4e4e4; font-variant-numeric: tabular-nums; }
+	.payload th { font-weight: 600; color: #555; }
+	.payload-total { margin: 0 0 0.4rem; }
+	.payload-note { margin: 0; color: #666; font-size: 0.75rem; }
+	.payload-empty { margin: 0 0 0.4rem; color: #666; }
+	.payload code { background: #eee; padding: 1px 4px; border-radius: 3px; }
 </style>
 
 <h1>RTF Dev Harness</h1>
@@ -90,6 +153,7 @@
 	<span>Editor</span>
 	<span>
 		<button onclick={() => editorRef?.importRtf()}>Import RTF</button>
+		<button onclick={measureImages}>Measure payload</button>
 		<button class:copied={editorCopied} onclick={copyEditorRtf}>
 			{editorCopied ? 'Copied!' : 'Copy RTF'}
 		</button>
@@ -97,6 +161,55 @@
 </h2>
 <div class="editor-wrap">
 	<InkEditor bind:this={editorRef} autosave={false} storageKey="dev-harness" minHeight="20vh" />
+
+	{#if measured}
+		<div class="payload">
+			{#if imageStats.length === 0}
+				<p class="payload-empty">No images in the document.</p>
+			{:else}
+				<table>
+					<thead>
+						<tr>
+							<th>#</th>
+							<th>Format</th>
+							<th>Stored pixels</th>
+							<th>Displayed at</th>
+							<th>On page</th>
+							<th>Encoded</th>
+							<th>Hex in RTF</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each imageStats as s}
+							<tr>
+								<td>{s.n}</td>
+								<td>{s.format}</td>
+								<td>{s.pixels}</td>
+								<td>{s.displayed}</td>
+								<td>{s.onPage}</td>
+								<td>{kb(s.bytes)}</td>
+								<td>{kb(s.bytes * 2)}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			{/if}
+			<p class="payload-total">
+				<strong>Whole document: {rtfChars.toLocaleString()} characters</strong>
+				— this is what one OBX-5 has to carry.
+				{#if imageStats.length > 0}
+					Pictures account for {kb(totalImageBytes * 2)} of it.
+				{/if}
+			</p>
+			<p class="payload-note">
+				Stored pixels are capped by <code>maxImageEdge</code> (1600) and the encoded size by
+				<code>maxImageBytes</code> (512 KB). "Displayed at" is the editor resize — it changes
+				<code>\picwgoal</code> only, never the payload. "On page" is that width in inches as
+				the receiver will draw it; ⚠ marks anything wider than the 6.5in text column of a
+				Letter page.
+			</p>
+		</div>
+	{/if}
 </div>
 
 <h2><span>Parser test cases</span></h2>

@@ -13,6 +13,11 @@
 	 *   readonly      — If true, editor is not editable. Default: false.
 	 *   maxImageEdge  — Longest edge (px) an inserted image is scaled down to.
 	 *                   0 keeps the original dimensions. Default: 1600.
+	 *   maxImageDisplayWidth
+	 *                 — Width (px) a newly inserted image is displayed at, unless
+	 *                   the editor column is narrower. Defaults to 624 — 6.5in of
+	 *                   page at 96 dpi — so pictures arrive sized to the page
+	 *                   rather than to the browser window. 0 fills the column.
 	 *   maxImageBytes — Encoded byte ceiling per inserted image. Pictures over it
 	 *                   are re-encoded (and shrunk if needed) until they fit,
 	 *                   which is what bounds the RTF payload — it costs two hex
@@ -48,8 +53,10 @@
 		urlToImageSrc,
 		isSafeImageUrl,
 		stripExtension,
+		initialDisplayWidth,
 		DEFAULT_MAX_IMAGE_EDGE,
-		DEFAULT_MAX_IMAGE_BYTES
+		DEFAULT_MAX_IMAGE_BYTES,
+		DEFAULT_MAX_IMAGE_DISPLAY_WIDTH
 	} from '../images.js';
 
 	interface ChangePayload {
@@ -70,6 +77,7 @@
 		readonly?: boolean;
 		maxImageEdge?: number;
 		maxImageBytes?: number;
+		maxImageDisplayWidth?: number;
 		onchange?: (payload: ChangePayload) => void;
 		onsave?: (payload: { html: string }) => void;
 		onimport?: (payload: { html: string }) => void;
@@ -87,6 +95,7 @@
 		readonly = false,
 		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
 		maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
+		maxImageDisplayWidth = DEFAULT_MAX_IMAGE_DISPLAY_WIDTH,
 		onchange,
 		onsave,
 		onimport
@@ -466,12 +475,17 @@
 		return { img, after };
 	}
 
-	/** Scale a freshly inserted image down to the editor width, never up. */
+	/**
+	 * Size a freshly inserted image: the smallest of its natural width, the
+	 * editor column and the page cap, never larger. The page cap is what keeps
+	 * \picwgoal inside the width of the page the document lands on — a browser
+	 * -wide picture would be written as 12in and overflow it. The user can still
+	 * enlarge it deliberately with the resize handles.
+	 */
 	function fitImage(img: HTMLImageElement): void {
-		const natural = img.naturalWidth;
-		if (!natural) return;
-		const max = contentWidth();
-		img.style.width = `${Math.round(max > 0 ? Math.min(natural, max) : natural)}px`;
+		const width = initialDisplayWidth(img.naturalWidth, contentWidth(), maxImageDisplayWidth);
+		if (!width) return;
+		img.style.width = `${width}px`;
 		img.style.height = 'auto';
 		overlayRef?.reposition();
 	}

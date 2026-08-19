@@ -127,6 +127,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `readonly`      | `boolean`  | `false`                      | Disable editing                                           |
 | `maxImageEdge`  | `number`   | `1600`                       | Longest edge (px) an inserted image is scaled down to; `0` keeps full size |
 | `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; oversized pictures are re-encoded until they fit. `0` disables |
+| `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
 
 #### Callback props
 
@@ -226,6 +227,7 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
   - `maxImageBytes` (512 KB, so roughly 1 MB of document per image) is the ceiling that actually matters. A picture over it is re-encoded until it fits: a PNG is tried as PNG first so screenshots and diagrams stay sharp, falls back to JPEG only when it is too heavy *and* has no transparency to lose, then steps down through 80%, 64% and 50% of the target size. Whichever candidate fits first is kept.
 
   Set either to `0` to disable it.
+- **Page fit**: a newly inserted picture is displayed at `maxImageDisplayWidth` (624 px) rather than filling the editor. RTF records the display size in twips — 624 px × 15 = 9360 twips = 6.5 in, the text width of a Letter page with 1 in margins — so pictures arrive sized to the page they will be printed or filed on, not to the width of the browser window. Resize handles still go up to the full column width when a picture deserves it.
 
 ### Sending RTF over a transport
 

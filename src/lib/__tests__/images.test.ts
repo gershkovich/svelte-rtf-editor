@@ -7,8 +7,10 @@ import {
 	stripExtension,
 	scaledSize,
 	dataUrlByteLength,
+	initialDisplayWidth,
 	DEFAULT_MAX_IMAGE_EDGE,
-	DEFAULT_MAX_IMAGE_BYTES
+	DEFAULT_MAX_IMAGE_BYTES,
+	DEFAULT_MAX_IMAGE_DISPLAY_WIDTH
 } from '../images.js';
 
 /** Parse an HTML string into a div element (requires happy-dom environment). */
@@ -272,6 +274,32 @@ describe('image source validation', () => {
 
 	it('defaults the cap to 1600px', () => {
 		expect(DEFAULT_MAX_IMAGE_EDGE).toBe(1600);
+	});
+
+	it('first shows a picture at the page width, not the browser width', () => {
+		// A wide editor column must not produce a picture wider than the page.
+		expect(initialDisplayWidth(2400, 1200, DEFAULT_MAX_IMAGE_DISPLAY_WIDTH)).toBe(624);
+	});
+
+	it('never enlarges a small picture to fill the page', () => {
+		expect(initialDisplayWidth(400, 1200, 624)).toBe(400);
+	});
+
+	it('yields to a column narrower than the page cap', () => {
+		expect(initialDisplayWidth(2400, 500, 624)).toBe(500);
+	});
+
+	it('ignores limits that are absent', () => {
+		expect(initialDisplayWidth(2400, 0, 624)).toBe(624); // editor not laid out yet
+		expect(initialDisplayWidth(2400, 900, 0)).toBe(900); // page cap disabled
+		expect(initialDisplayWidth(0, 0, 0)).toBe(0);
+	});
+
+	it('keeps the default display width inside a Letter page text column', () => {
+		// \picwgoal is twips: 624px × 15 = 9360 = 6.5in, the text width of a
+		// Letter page with 1in margins.
+		expect(DEFAULT_MAX_IMAGE_DISPLAY_WIDTH * 15).toBe(9360);
+		expect((DEFAULT_MAX_IMAGE_DISPLAY_WIDTH * 15) / 1440).toBe(6.5);
 	});
 
 	it('measures the encoded size of a data URL without decoding it', () => {
