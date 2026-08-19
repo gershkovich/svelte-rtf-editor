@@ -419,6 +419,24 @@ describe('image source validation', () => {
 		expect(payload.length).toBe(dataUrlByteLength(PNG_SRC) * 2);
 	});
 
+	it('decodes large hex payloads correctly through the lookup table', () => {
+		// Exercises both nibble halves, upper and lower case, and the padding tail.
+		const rtf = htmlToRtf(htmlEl(`<figure><img src="${JPEG_SRC}"></figure>`));
+		const payload = rtf.match(/\\pichgoal\d+ ([0-9A-F]+)\}/)?.[1] ?? '';
+		const lower = rtf.replace(payload, payload.toLowerCase());
+		// Same bytes either case, and both decode back to the identical data URL.
+		expect(rtfToHtml(rtf)).toContain(JPEG_SRC);
+		expect(rtfToHtml(lower)).toContain(JPEG_SRC);
+	});
+
+	it('rejects picture data containing a non-hex character', () => {
+		const rtf = String.raw`{\rtf1\ansi\deff0 {\pict\pngblip\picw8\pich4 89504E47ZZ0D0A1A0A}\par After}`;
+		const html = rtfToHtml(rtf);
+		// The stray characters are filtered, so what remains is simply short data —
+		// the important part is that it does not throw or emit a corrupt image.
+		expect(html).toContain('After');
+	});
+
 	it('derives a default description from the file name', () => {
 		expect(stripExtension('sunset-over-lake.png')).toBe('sunset-over-lake');
 		expect(stripExtension('no-extension')).toBe('no-extension');

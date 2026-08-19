@@ -83,37 +83,58 @@ const TWIPS_PER_PX = 15;
 /** A paragraph made up of nothing but pictures is rendered as a <figure>. */
 const IMAGE_ONLY_PARAGRAPH = /^(?:<img\b[^>]*>\s*)+$/;
 
+/** Nibble value of each hex digit's char code; -1 for anything else. */
+const HEX_NIBBLE = (() => {
+	const table = new Int8Array(128).fill(-1);
+	for (let i = 0; i < 10; i++) table[48 + i] = i; // '0'–'9'
+	for (let i = 0; i < 6; i++) {
+		table[97 + i] = 10 + i; // 'a'–'f'
+		table[65 + i] = 10 + i; // 'A'–'F'
+	}
+	return table;
+})();
+
 /** Hex picture data → base64, without depending on btoa/Buffer. */
 function hexToBase64(hex: string): string {
 	const byteCount = hex.length >> 1;
-	// Pictures run to hundreds of thousands of characters — collect and join
-	// rather than concatenating once per output character.
-	const out: string[] = [];
+	// A multi-MB picture runs to millions of digits, so this reads char codes
+	// against a lookup table rather than slicing and parsing per byte, and
+	// collects into an array rather than concatenating per output character.
+	const out: string[] = new Array(Math.ceil(byteCount / 3) * 4);
+	let written = 0;
 	let buffer = 0;
 	let bits = 0;
 
 	for (let i = 0; i < byteCount; i++) {
-		const byte = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-		if (Number.isNaN(byte)) return '';
-		buffer = (buffer << 8) | byte;
+		const hi = HEX_NIBBLE[hex.charCodeAt(i * 2)] ?? -1;
+		const lo = HEX_NIBBLE[hex.charCodeAt(i * 2 + 1)] ?? -1;
+		if (hi < 0 || lo < 0) return '';
+		buffer = (buffer << 8) | ((hi << 4) | lo);
 		bits += 8;
 		while (bits >= 6) {
 			bits -= 6;
-			out.push(B64_ALPHABET[(buffer >> bits) & 0x3f]);
+			out[written++] = B64_ALPHABET[(buffer >> bits) & 0x3f];
 		}
 	}
 
 	if (bits > 0) {
-		out.push(B64_ALPHABET[(buffer << (6 - bits)) & 0x3f]);
+		out[written++] = B64_ALPHABET[(buffer << (6 - bits)) & 0x3f];
 	}
-	while (out.length % 4 !== 0) out.push('=');
+	while (written % 4 !== 0) out[written++] = '=';
 
+	out.length = written;
 	return out.join('');
 }
 
 /**
  * Render a {\pict …} group as an <img> with a data URL. Returns '' for picture
  * formats a browser cannot display (metafiles, device-dependent bitmaps).
+ *
+ * Only hexadecimal picture data is read. RTF also allows \binN, where the next
+ * N bytes are raw binary — rare outside of Word's own output, and it cannot
+ * survive readRtfFile() reading the document as text anyway. Such a picture is
+ * skipped rather than mis-decoded: \bin is not a recognised control word here,
+ * so its bytes fall through the tokenizer and the hex filter discards them.
  */
 function renderPicture(group: RtfGroup): string {
 	let mime = '';

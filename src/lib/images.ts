@@ -286,21 +286,28 @@ export async function fileToImageSrc(file: File, limits: ImageLimits = {}): Prom
  * survive export; when the fetch is blocked (CORS, offline) the original URL is
  * kept and the image still displays — it just exports as a text placeholder.
  */
-export async function urlToImageSrc(url: string, limits: ImageLimits = {}): Promise<string> {
+export async function urlToImageSrc(
+	url: string,
+	limits: ImageLimits = {}
+): Promise<{ src: string; embedded: boolean }> {
 	const value = url.trim();
 	if (value.startsWith('data:image/')) {
-		return toRtfSafeDataUrl(value, limits);
+		return { src: await toRtfSafeDataUrl(value, limits), embedded: true };
 	}
 
+	// A picture that could not be inlined still displays, but it leaves the
+	// document as a text placeholder instead of picture data. The caller is told
+	// so it can say as much, rather than letting the image vanish at export.
 	try {
 		const response = await fetch(value, { mode: 'cors' });
-		if (!response.ok) return value;
+		if (!response.ok) return { src: value, embedded: false };
 		const blob = await response.blob();
-		if (!blob.type.startsWith('image/')) return value;
+		if (!blob.type.startsWith('image/')) return { src: value, embedded: false };
 		const dataUrl = await readFileAsDataUrl(blob);
-		return toRtfSafeDataUrl(dataUrl, limits);
+		const src = await toRtfSafeDataUrl(dataUrl, limits);
+		return { src, embedded: src.startsWith('data:') };
 	} catch {
-		return value;
+		return { src: value, embedded: false };
 	}
 }
 

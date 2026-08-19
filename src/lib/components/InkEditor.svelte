@@ -390,10 +390,14 @@
 
 		insertingImages = true;
 		try {
-			const src = await urlToImageSrc(url, imageLimits());
+			const { src, embedded } = await urlToImageSrc(url, imageLimits());
 			restoreSelection();
 			editorEl?.focus();
 			finishInsert(insertFigure(src, alt || caption, caption));
+			// It displays either way, but only embedded bytes reach the RTF.
+			if (!embedded) {
+				showError('That image could not be embedded — it will export as a placeholder');
+			}
 		} finally {
 			insertingImages = false;
 		}
@@ -676,10 +680,11 @@
 		if (mod && e.key === 's') { e.preventDefault(); autoSaveNow(); }
 
 		// Moving the caret leaves the picture behind, so drop its selection frame.
+		// Deliberately falls through: these keys still have their normal meaning,
+		// including Tab inside a <pre> below.
 		if (selectedImage && (e.key.startsWith('Arrow') || e.key === 'Enter' || e.key === 'Escape' ||
 			e.key === 'Home' || e.key === 'End' || e.key === 'PageUp' || e.key === 'PageDown')) {
 			selectedImage = null;
-			return;
 		}
 
 		// Backspace/Delete removes a selected image — but not while the caret is
