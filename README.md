@@ -233,8 +233,9 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
 
 `htmlToRtf` output is written to survive being carried inside another format — an HL7 `OBX-5` field, a JSON string, a CSV cell:
 
-- **One line.** The document contains no CR or LF anywhere, including inside picture data, so nothing downstream can mistake part of it for a record separator.
+- **One line.** The document contains no CR or LF anywhere — not in picture data, and not in text either: a newline inside text content is collapsed to the space a browser would have rendered (RTF readers ignore raw CR/LF, so `Hello\nworld` used to render as "Helloworld"). `<pre>` blocks keep their line structure as `\line`.
 - **Uppercase hex.** Picture bytes are written as uppercase hex, so a PNG begins with the `89504E470D0A1A0A` signature that receivers commonly match on.
+- **Format read from the bytes.** `\pngblip` vs `\jpegblip` is decided by sniffing the image's leading bytes, never by its declared MIME type — an operating system assigns `File.type` from the file extension, so a WebP saved as `.png` claims to be PNG. Bytes that are neither PNG nor JPEG are re-encoded on insert, or exported as a text placeholder rather than as a blip whose declared type contradicts its content.
 - **Sized for the pipe.** `maxImageBytes` bounds each picture, and the payload is roughly twice that in hex. Lower it to fit a field-length limit.
 
 Some receivers require the whole field on one unbroken line when it carries an image — that is why the writer emits no line breaks at all, rather than wrapping picture data the way many RTF writers do.

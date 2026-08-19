@@ -14,9 +14,6 @@
  * what actually bounds the payload.
  */
 
-/** Image types that can be written into RTF as-is. */
-const RTF_NATIVE_TYPES = ['image/png', 'image/jpeg'];
-
 /** Longest edge, in px, an inserted picture is scaled down to. */
 export const DEFAULT_MAX_IMAGE_EDGE = 1600;
 
@@ -79,6 +76,50 @@ export function scaledSize(width: number, height: number, maxEdge: number): Pixe
 interface PixelSize {
 	width: number;
 	height: number;
+}
+
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/** Decode the first few bytes of a base64 payload — enough to identify a format. */
+function decodePrefix(base64: string, byteCount: number): Uint8Array {
+	const bytes: number[] = [];
+	let buffer = 0;
+	let bits = 0;
+	for (let i = 0; i < base64.length && bytes.length < byteCount; i++) {
+		const value = B64_ALPHABET.indexOf(base64[i]);
+		if (value < 0) continue;
+		buffer = (buffer << 6) | value;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			bytes.push((buffer >> bits) & 0xff);
+		}
+	}
+	return new Uint8Array(bytes);
+}
+
+/**
+ * The image format a data URL actually holds, read from its leading bytes.
+ * The declared MIME type is not trustworthy: an operating system assigns
+ * `File.type` from the file extension, so a WebP saved as `.png` claims to be
+ * PNG, and a server can send the wrong `Content-Type`. Writing such bytes into
+ * RTF as `\pngblip` produces a picture nothing can decode, so the format is
+ * decided here and mislabelled images are pushed through the canvas re-encode.
+ */
+export function sniffImageType(dataUrl: string): 'image/png' | 'image/jpeg' | null {
+	const comma = dataUrl.indexOf(',');
+	if (comma < 0) return null;
+	const b = decodePrefix(dataUrl.slice(comma + 1, comma + 33), 8);
+
+	if (
+		b.length >= 8 &&
+		b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+		b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a
+	) {
+		return 'image/png';
+	}
+	if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+	return null;
 }
 
 /** Decoded byte length of a base64 data URL, without decoding it. */
@@ -158,15 +199,13 @@ function loadImage(src: string): Promise<HTMLImageElement> {
  * their first frame. Falls back to the original data URL when the runtime
  * cannot rasterise, so nothing is lost if the conversion is unavailable.
  */
-export async function toRtfSafeDataUrl(
-	dataUrl: string,
-	mimeType: string,
-	limits: ImageLimits = {}
-): Promise<string> {
+export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}): Promise<string> {
 	const { maxEdge = DEFAULT_MAX_IMAGE_EDGE, maxBytes = DEFAULT_MAX_IMAGE_BYTES } = limits;
-	const mime = mimeType.toLowerCase();
-	const isJpeg = mime === 'image/jpeg';
-	const isNative = RTF_NATIVE_TYPES.includes(mime);
+	// The bytes decide the format, not the declared type — a mislabelled image
+	// must not take the early return that hands the original bytes back.
+	const actual = sniffImageType(dataUrl);
+	const isJpeg = actual === 'image/jpeg';
+	const isNative = actual !== null;
 	if (!canRasterize()) return dataUrl;
 
 	try {
@@ -239,7 +278,7 @@ export async function fileToImageSrc(file: File, limits: ImageLimits = {}): Prom
 	if (!dataUrl.startsWith('data:image/')) {
 		throw new Error(`${file.name || 'File'} is not an image`);
 	}
-	return toRtfSafeDataUrl(dataUrl, file.type || '', limits);
+	return toRtfSafeDataUrl(dataUrl, limits);
 }
 
 /**
@@ -250,8 +289,7 @@ export async function fileToImageSrc(file: File, limits: ImageLimits = {}): Prom
 export async function urlToImageSrc(url: string, limits: ImageLimits = {}): Promise<string> {
 	const value = url.trim();
 	if (value.startsWith('data:image/')) {
-		const mime = value.slice(5, value.indexOf(';'));
-		return toRtfSafeDataUrl(value, mime, limits);
+		return toRtfSafeDataUrl(value, limits);
 	}
 
 	try {
@@ -260,7 +298,7 @@ export async function urlToImageSrc(url: string, limits: ImageLimits = {}): Prom
 		const blob = await response.blob();
 		if (!blob.type.startsWith('image/')) return value;
 		const dataUrl = await readFileAsDataUrl(blob);
-		return toRtfSafeDataUrl(dataUrl, blob.type, limits);
+		return toRtfSafeDataUrl(dataUrl, limits);
 	} catch {
 		return value;
 	}

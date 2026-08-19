@@ -84,10 +84,18 @@ function colorKey(c: RGB): string {
 // ── RTF text escaping ──
 
 function escapeRtf(text: string): string {
+	// RTF readers ignore raw CR/LF, so a newline inside text content rendered as
+	// nothing ("Hello\nworld" → "Helloworld") while still emitting bytes that a
+	// CR-terminated transport treats as a record separator. Collapsing a run to
+	// the single space a browser would have shown is both safer and more
+	// faithful. Text is never split on newlines after this point, so <pre>
+	// content must be divided into lines before it gets here.
+	const source = text.replace(/[\r\n]+/g, ' ');
+
 	let out = '';
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		const code = text.charCodeAt(i);
+	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
+		const code = source.charCodeAt(i);
 
 		if (ch === '\\') out += '\\\\';
 		else if (ch === '{') out += '\\{';
@@ -149,6 +157,24 @@ function bytesToHex(bytes: Uint8Array): string {
 	const parts: string[] = new Array(bytes.length);
 	for (let i = 0; i < bytes.length; i++) parts[i] = HEX_BYTE[bytes[i]];
 	return parts.join('');
+}
+
+/**
+ * Picture format according to the bytes themselves, not the label they arrived
+ * with. A file named .png can hold WebP — operating systems assign the MIME
+ * type from the extension — and writing those bytes as \pngblip produces a
+ * picture no reader can decode.
+ */
+function sniffBytes(b: Uint8Array): 'png' | 'jpeg' | null {
+	if (
+		b.length >= 8 &&
+		b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+		b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a
+	) {
+		return 'png';
+	}
+	if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg';
+	return null;
 }
 
 /** Read the intrinsic size out of the PNG IHDR chunk. */
@@ -216,12 +242,20 @@ function displaySize(el: HTMLElement, natural: PixelSize): PixelSize {
  */
 function pictureRtf(el: HTMLElement): string {
 	const src = el.getAttribute('src') || '';
-	const m = src.match(/^data:image\/(png|jpe?g);base64,([\s\S]+)$/i);
+	// Accept any image data URL and let the bytes decide the format — the label
+	// is not trustworthy, and a correctly-labelled PNG is not the only way to
+	// arrive at PNG bytes.
+	const m = src.match(/^data:image\/[a-z0-9.+-]+;base64,([\s\S]+)$/i);
 	if (!m) return '';
 
-	const isPng = m[1].toLowerCase() === 'png';
-	const bytes = base64ToBytes(m[2]);
+	const bytes = base64ToBytes(m[1]);
 	if (!bytes || bytes.length === 0) return '';
+
+	const format = sniffBytes(bytes);
+	// Neither PNG nor JPEG: RTF cannot carry it, so fall back to the placeholder
+	// rather than emitting a blip whose declared type contradicts its content.
+	if (!format) return '';
+	const isPng = format === 'png';
 
 	const natural = (isPng ? pngSize(bytes) : jpegSize(bytes)) ?? { w: 0, h: 0 };
 	const size = displaySize(el, natural);
@@ -304,7 +338,11 @@ export function htmlToRtf(editorEl: HTMLElement): string {
 		body +
 		'}';
 
-	return rtf;
+	// Backstop for the single-line guarantee. escapeRtf already collapses CR/LF
+	// out of every text path, so this should never have anything to do — but the
+	// document is worthless to a CR-terminated transport if one slips through,
+	// and no newline carries meaning in the output.
+	return rtf.replace(/[\r\n]+/g, ' ');
 }
 
 function addColor(colorStr: string | null | undefined, colorMap: Map<string, RGB>): void {
@@ -330,7 +368,10 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 		if (node.nodeType === Node.TEXT_NODE) {
 			const text = node.textContent || '';
 			if (ctx.inPre) {
-				rtf += escapeRtf(text).replace(/\n/g, '\\line ');
+				// Split before escaping — escapeRtf collapses newlines, so the
+				// line structure a <pre> block depends on has to become \line
+				// first. Handles CR, LF and CRLF alike.
+				rtf += text.split(/\r\n|\r|\n/).map(escapeRtf).join('\\line ');
 			} else {
 				rtf += escapeRtf(text);
 			}

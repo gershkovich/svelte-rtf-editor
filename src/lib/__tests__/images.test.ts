@@ -8,6 +8,7 @@ import {
 	scaledSize,
 	dataUrlByteLength,
 	initialDisplayWidth,
+	sniffImageType,
 	DEFAULT_MAX_IMAGE_EDGE,
 	DEFAULT_MAX_IMAGE_BYTES,
 	DEFAULT_MAX_IMAGE_DISPLAY_WIDTH
@@ -236,6 +237,103 @@ describe('transport-safe RTF', () => {
 		const rtf = htmlToRtf(htmlEl('<p>First</p><p>Second</p>'));
 		expect(rtf).toContain('\\par ');
 		expect(rtfToHtml(rtf)).toContain('Second');
+	});
+});
+
+// ── Newlines never reach the output ───────────────────────────────────────────
+
+describe('no CR or LF in the document', () => {
+	const hasNewline = (rtf: string) => /[\r\n]/.test(rtf);
+
+	it('collapses newlines inside text content', () => {
+		// Pretty-printed HTML, whitespace between blocks, and Windows line endings
+		// all put raw newlines into text nodes.
+		const el = htmlEl('<p>Hello\nworld</p>\n<p>second</p>\r\n<p>third\rline</p>');
+		const rtf = htmlToRtf(el);
+		expect(hasNewline(rtf)).toBe(false);
+		// RTF ignores raw CR/LF, so leaving them in rendered "Helloworld".
+		expect(rtf).toContain('Hello world');
+		expect(rtf).toContain('third line');
+	});
+
+	it('collapses newlines in headings, list items and table cells', () => {
+		const rtf = htmlToRtf(
+			htmlEl(
+				'<h1>A\nheading</h1><ul><li>one\ntwo</li></ul>' +
+					'<table><tr><td>cell\ntext</td></tr></table>'
+			)
+		);
+		expect(hasNewline(rtf)).toBe(false);
+		expect(rtf).toContain('A heading');
+		expect(rtf).toContain('cell text');
+	});
+
+	it('collapses newlines in captions, link text and hrefs', () => {
+		const rtf = htmlToRtf(
+			htmlEl(
+				`<figure><img src="${PNG_SRC}"><figcaption>Fig 1\nthe sample</figcaption></figure>` +
+					'<p><a href="https://example.com/a">link\ntext</a></p>'
+			)
+		);
+		expect(hasNewline(rtf)).toBe(false);
+		expect(rtf).toContain('Fig 1 the sample');
+	});
+
+	it('keeps <pre> line structure as \\line rather than raw newlines', () => {
+		const rtf = htmlToRtf(htmlEl('<pre>first\nsecond\r\nthird\rfourth</pre>'));
+		expect(hasNewline(rtf)).toBe(false);
+		expect(rtf.match(/\\line /g)?.length).toBe(3);
+		expect(rtfToHtml(rtf)).toContain('first');
+		expect(rtfToHtml(rtf)).toContain('fourth');
+	});
+
+	it('survives content loaded from a pretty-printed HTML string', () => {
+		const el = htmlEl(`
+			<h2>Report</h2>
+			<p>Some findings.</p>
+			<figure><img src="${PNG_SRC}"><figcaption>A picture</figcaption></figure>
+			<p>More text.</p>
+		`);
+		expect(hasNewline(htmlToRtf(el))).toBe(false);
+	});
+});
+
+// ── The bytes decide the picture format ───────────────────────────────────────
+
+describe('mislabelled images', () => {
+	// A RIFF/WEBP header carrying an image/png label, as an OS assigning
+	// File.type from a .png extension would produce.
+	const WEBP_AS_PNG = 'data:image/png;base64,UklGRiQAAABXRUJQVlA4IA==';
+	const JPEG_AS_PNG = `data:image/png;base64,${JPEG_10x6}`;
+	const PNG_AS_WEBP = `data:image/webp;base64,${PNG_8x4}`;
+
+	it('reads the format from the bytes, not the label', () => {
+		expect(sniffImageType(PNG_SRC)).toBe('image/png');
+		expect(sniffImageType(JPEG_SRC)).toBe('image/jpeg');
+		expect(sniffImageType(JPEG_AS_PNG)).toBe('image/jpeg');
+		expect(sniffImageType(PNG_AS_WEBP)).toBe('image/png');
+		expect(sniffImageType(WEBP_AS_PNG)).toBeNull();
+		expect(sniffImageType('not a data url')).toBeNull();
+	});
+
+	it('writes JPEG bytes as \\jpegblip even when labelled PNG', () => {
+		const rtf = htmlToRtf(htmlEl(`<figure><img src="${JPEG_AS_PNG}"></figure>`));
+		expect(rtf).toContain('{\\pict\\jpegblip');
+		expect(rtf).not.toContain('\\pngblip');
+		expect(rtf).toContain('FFD8FF');
+	});
+
+	it('writes PNG bytes as \\pngblip even when labelled WebP', () => {
+		const rtf = htmlToRtf(htmlEl(`<figure><img src="${PNG_AS_WEBP}"></figure>`));
+		expect(rtf).toContain('{\\pict\\pngblip');
+		expect(rtf).toContain('89504E470D0A1A0A');
+	});
+
+	it('refuses to emit a blip for bytes RTF cannot carry', () => {
+		// Better a visible placeholder than a \pngblip full of WebP.
+		const rtf = htmlToRtf(htmlEl(`<figure><img src="${WEBP_AS_PNG}" alt="logo"></figure>`));
+		expect(rtf).not.toContain('\\pict');
+		expect(rtf).toContain('[Image: logo]');
 	});
 });
 
