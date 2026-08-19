@@ -126,6 +126,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `minHeight`     | `string`   | `'40vh'`                     | CSS `min-height` of the editing area                      |
 | `readonly`      | `boolean`  | `false`                      | Disable editing                                           |
 | `maxImageEdge`  | `number`   | `1600`                       | Longest edge (px) an inserted image is scaled down to; `0` keeps full size |
+| `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; oversized pictures are re-encoded until they fit. `0` disables |
 
 #### Callback props
 
@@ -220,7 +221,11 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
 - **RTF import** decodes `\pict` PNG and JPEG data (including pictures wrapped in `{\*\shppict}`) back into images at their stored size. Picture formats a browser cannot display — metafiles and device-dependent bitmaps — are skipped.
 - **Formats**: PNG and JPEG are embedded as-is. Anything else (GIF, WebP, SVG, …) is re-encoded to PNG when inserted, since RTF carries no other bitmap types. Animated images keep their first frame.
 - **Images added by address** are fetched and inlined so they survive export. When the fetch is blocked (CORS or offline) the address is kept and the picture still displays, but it exports as an `[Image: …]` placeholder instead of picture data.
-- **Size**: pictures are scaled down to `maxImageEdge` (1600 px by default) as they are inserted. RTF stores picture data as hexadecimal — two characters per byte — so an embedded image costs twice its file size in the document. Resizing an image in the editor changes its display size only; this cap is what bounds the payload. Set `maxImageEdge={0}` to embed originals untouched.
+- **Size**: RTF stores picture data as hexadecimal — two characters per byte — so an embedded image costs twice its file size in the document. Resizing an image in the editor changes its display size only; two caps applied at insert time are what bound the payload:
+  - `maxImageEdge` (1600 px) scales the picture down so neither edge exceeds it.
+  - `maxImageBytes` (512 KB, so roughly 1 MB of document per image) is the ceiling that actually matters. A picture over it is re-encoded until it fits: a PNG is tried as PNG first so screenshots and diagrams stay sharp, falls back to JPEG only when it is too heavy *and* has no transparency to lose, then steps down through 80%, 64% and 50% of the target size. Whichever candidate fits first is kept.
+
+  Set either to `0` to disable it.
 
 ### Sending RTF over a transport
 
@@ -228,7 +233,9 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
 
 - **One line.** The document contains no CR or LF anywhere, including inside picture data, so nothing downstream can mistake part of it for a record separator.
 - **Uppercase hex.** Picture bytes are written as uppercase hex, so a PNG begins with the `89504E470D0A1A0A` signature that receivers commonly match on.
-- **Sized for the pipe.** Lower `maxImageEdge` to fit a field-length limit; budget roughly two characters per encoded image byte.
+- **Sized for the pipe.** `maxImageBytes` bounds each picture, and the payload is roughly twice that in hex. Lower it to fit a field-length limit.
+
+Some receivers require the whole field on one unbroken line when it carries an image — that is why the writer emits no line breaks at all, rather than wrapping picture data the way many RTF writers do.
 
 Escaping for the carrying format is the integration layer's job, not the editor's. For HL7 v2 that means escaping the whole string's delimiters — `\` → `\E\`, `|` → `\F\`, `^` → `\S\`, `&` → `\T\`, `~` → `\R\` — because ordinary typed text ("Smith & Jones") reaches the RTF unescaped.
 

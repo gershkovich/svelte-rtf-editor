@@ -2,7 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { rtfToHtml } from '../rtf-parser.js';
 import { htmlToRtf } from '../rtf-writer.js';
 import { htmlToMarkdown } from '../utils.js';
-import { isSafeImageUrl, stripExtension, scaledSize, DEFAULT_MAX_IMAGE_EDGE } from '../images.js';
+import {
+	isSafeImageUrl,
+	stripExtension,
+	scaledSize,
+	dataUrlByteLength,
+	DEFAULT_MAX_IMAGE_EDGE,
+	DEFAULT_MAX_IMAGE_BYTES
+} from '../images.js';
 
 /** Parse an HTML string into a div element (requires happy-dom environment). */
 function htmlEl(html: string): HTMLElement {
@@ -265,6 +272,25 @@ describe('image source validation', () => {
 
 	it('defaults the cap to 1600px', () => {
 		expect(DEFAULT_MAX_IMAGE_EDGE).toBe(1600);
+	});
+
+	it('measures the encoded size of a data URL without decoding it', () => {
+		// The 8×4 PNG is 125 bytes; base64 pads it to 168 characters.
+		expect(dataUrlByteLength(PNG_SRC)).toBe(125);
+		expect(dataUrlByteLength('data:image/png;base64,')).toBe(0);
+		expect(dataUrlByteLength('not a data url')).toBe(0);
+	});
+
+	it('budgets bytes so one picture costs about 1 MB of RTF', () => {
+		// Every byte becomes two hex characters in the \pict payload.
+		expect(DEFAULT_MAX_IMAGE_BYTES).toBe(512 * 1024);
+		expect(DEFAULT_MAX_IMAGE_BYTES * 2).toBeLessThanOrEqual(1024 * 1024);
+	});
+
+	it('the hex payload really is twice the encoded size', () => {
+		const rtf = htmlToRtf(htmlEl(`<figure><img src="${PNG_SRC}"></figure>`));
+		const payload = rtf.match(/\\pichgoal\d+ ([0-9A-F]+)\}/)?.[1] ?? '';
+		expect(payload.length).toBe(dataUrlByteLength(PNG_SRC) * 2);
 	});
 
 	it('derives a default description from the file name', () => {

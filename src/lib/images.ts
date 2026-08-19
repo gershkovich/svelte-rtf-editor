@@ -20,8 +20,24 @@ const RTF_NATIVE_TYPES = ['image/png', 'image/jpeg'];
 /** Longest edge, in px, an inserted picture is scaled down to. */
 export const DEFAULT_MAX_IMAGE_EDGE = 1600;
 
-/** Quality used when re-encoding JPEG source images. */
-const JPEG_QUALITY = 0.85;
+/**
+ * Encoded bytes an inserted picture is kept under. Each byte becomes two hex
+ * characters in the RTF, so this default costs about 1 MB of document per image.
+ */
+export const DEFAULT_MAX_IMAGE_BYTES = 512 * 1024;
+
+/** Successive reductions tried when a picture will not fit the byte budget. */
+const SIZE_LADDER = [1, 0.8, 0.64, 0.5];
+
+/** JPEG qualities tried at each size, best first. */
+const QUALITY_LADDER = [0.85, 0.7];
+
+export interface ImageLimits {
+	/** Longest edge in px; 0 or undefined leaves the dimensions alone. */
+	maxEdge?: number;
+	/** Encoded byte ceiling; 0 or undefined leaves the payload unbounded. */
+	maxBytes?: number;
+}
 
 /**
  * Size an image is reduced to so neither edge exceeds `maxEdge`, keeping the
@@ -41,6 +57,32 @@ export function scaledSize(width: number, height: number, maxEdge: number): Pixe
 interface PixelSize {
 	width: number;
 	height: number;
+}
+
+/** Decoded byte length of a base64 data URL, without decoding it. */
+export function dataUrlByteLength(dataUrl: string): number {
+	const comma = dataUrl.indexOf(',');
+	if (comma < 0) return 0;
+	const body = dataUrl.slice(comma + 1);
+	const padding = body.endsWith('==') ? 2 : body.endsWith('=') ? 1 : 0;
+	return Math.max(0, Math.floor((body.length * 3) / 4) - padding);
+}
+
+/**
+ * Whether any pixel is not fully opaque. Only consulted when a PNG has to be
+ * considered for JPEG re-encoding, since that would flatten transparency.
+ */
+function hasTransparency(ctx: CanvasRenderingContext2D, width: number, height: number): boolean {
+	try {
+		const { data } = ctx.getImageData(0, 0, width, height);
+		for (let i = 3; i < data.length; i += 4) {
+			if (data[i] < 255) return true;
+		}
+		return false;
+	} catch {
+		// Assume transparency rather than risk flattening it away.
+		return true;
+	}
 }
 
 /** Whether this runtime can rasterise to a canvas (it cannot under happy-dom/SSR). */
@@ -97,10 +139,12 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 export async function toRtfSafeDataUrl(
 	dataUrl: string,
 	mimeType: string,
-	maxEdge = DEFAULT_MAX_IMAGE_EDGE
+	limits: ImageLimits = {}
 ): Promise<string> {
-	const isJpeg = mimeType.toLowerCase() === 'image/jpeg';
-	const isNative = RTF_NATIVE_TYPES.includes(mimeType.toLowerCase());
+	const { maxEdge = DEFAULT_MAX_IMAGE_EDGE, maxBytes = DEFAULT_MAX_IMAGE_BYTES } = limits;
+	const mime = mimeType.toLowerCase();
+	const isJpeg = mime === 'image/jpeg';
+	const isNative = RTF_NATIVE_TYPES.includes(mime);
 	if (!canRasterize()) return dataUrl;
 
 	try {
@@ -110,32 +154,70 @@ export async function toRtfSafeDataUrl(
 		if (!width || !height) return dataUrl;
 
 		const target = scaledSize(width, height, maxEdge);
-		// Already embeddable and within the cap — leave the original bytes alone
-		// rather than losing quality to a pointless re-encode.
-		if (isNative && target.width === width && target.height === height) return dataUrl;
+		const fits = (bytes: number) => !maxBytes || maxBytes <= 0 || bytes <= maxBytes;
+
+		// Already embeddable, within the pixel cap and within budget — leave the
+		// original bytes alone rather than losing quality to a pointless re-encode.
+		if (
+			isNative &&
+			target.width === width &&
+			target.height === height &&
+			fits(dataUrlByteLength(dataUrl))
+		) {
+			return dataUrl;
+		}
 
 		const canvas = document.createElement('canvas');
-		canvas.width = target.width;
-		canvas.height = target.height;
 		const ctx = canvas.getContext('2d');
 		if (!ctx) return dataUrl;
-		ctx.drawImage(img, 0, 0, target.width, target.height);
 
-		return isJpeg
-			? canvas.toDataURL('image/jpeg', JPEG_QUALITY)
-			: canvas.toDataURL('image/png');
+		let opaque: boolean | null = null;
+		let smallest = '';
+
+		// Shrink in steps until the encoded picture fits the budget. At each size a
+		// PNG source is tried as PNG first — screenshots and diagrams stay sharp and
+		// usually compress well — and only falls back to JPEG when PNG is too heavy
+		// and the image has no transparency to lose.
+		for (const scale of SIZE_LADDER) {
+			const w = Math.max(1, Math.round(target.width * scale));
+			const h = Math.max(1, Math.round(target.height * scale));
+			canvas.width = w;
+			canvas.height = h;
+			ctx.clearRect(0, 0, w, h);
+			ctx.drawImage(img, 0, 0, w, h);
+
+			const candidates: string[] = [];
+			if (!isJpeg) candidates.push(canvas.toDataURL('image/png'));
+			if (isJpeg || !fits(dataUrlByteLength(candidates[0] ?? ''))) {
+				if (opaque === null) opaque = !hasTransparency(ctx, w, h);
+				if (isJpeg || opaque) {
+					for (const quality of QUALITY_LADDER) {
+						candidates.push(canvas.toDataURL('image/jpeg', quality));
+					}
+				}
+			}
+
+			for (const candidate of candidates) {
+				const bytes = dataUrlByteLength(candidate);
+				if (fits(bytes)) return candidate;
+				if (!smallest || bytes < dataUrlByteLength(smallest)) smallest = candidate;
+			}
+		}
+
+		// Nothing fit — hand back the smallest we managed rather than the original.
+		return smallest || dataUrl;
 	} catch {
 		return dataUrl;
 	}
 }
 
 /** Read an image File into a data URL the RTF writer can embed. */
-export async function fileToImageSrc(file: File, maxEdge = DEFAULT_MAX_IMAGE_EDGE): Promise<string> {
+export async function fileToImageSrc(file: File, limits: ImageLimits = {}): Promise<string> {
 	const dataUrl = await readFileAsDataUrl(file);
 	if (!dataUrl.startsWith('data:image/')) {
 		throw new Error(`${file.name || 'File'} is not an image`);
 	}
-	return toRtfSafeDataUrl(dataUrl, file.type || '', maxEdge);
+	return toRtfSafeDataUrl(dataUrl, file.type || '', limits);
 }
 
 /**
@@ -143,11 +225,11 @@ export async function fileToImageSrc(file: File, maxEdge = DEFAULT_MAX_IMAGE_EDG
  * survive export; when the fetch is blocked (CORS, offline) the original URL is
  * kept and the image still displays — it just exports as a text placeholder.
  */
-export async function urlToImageSrc(url: string, maxEdge = DEFAULT_MAX_IMAGE_EDGE): Promise<string> {
+export async function urlToImageSrc(url: string, limits: ImageLimits = {}): Promise<string> {
 	const value = url.trim();
 	if (value.startsWith('data:image/')) {
 		const mime = value.slice(5, value.indexOf(';'));
-		return toRtfSafeDataUrl(value, mime, maxEdge);
+		return toRtfSafeDataUrl(value, mime, limits);
 	}
 
 	try {
@@ -156,7 +238,7 @@ export async function urlToImageSrc(url: string, maxEdge = DEFAULT_MAX_IMAGE_EDG
 		const blob = await response.blob();
 		if (!blob.type.startsWith('image/')) return value;
 		const dataUrl = await readFileAsDataUrl(blob);
-		return toRtfSafeDataUrl(dataUrl, blob.type, maxEdge);
+		return toRtfSafeDataUrl(dataUrl, blob.type, limits);
 	} catch {
 		return value;
 	}

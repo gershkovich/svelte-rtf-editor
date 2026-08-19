@@ -12,9 +12,12 @@
 	 *   minHeight     — CSS min-height of the editing area. Default: '40vh'.
 	 *   readonly      — If true, editor is not editable. Default: false.
 	 *   maxImageEdge  — Longest edge (px) an inserted image is scaled down to.
-	 *                   Bounds the embedded payload, which costs two characters
-	 *                   per byte in RTF. 0 keeps images at full size.
-	 *                   Default: 1600.
+	 *                   0 keeps the original dimensions. Default: 1600.
+	 *   maxImageBytes — Encoded byte ceiling per inserted image. Pictures over it
+	 *                   are re-encoded (and shrunk if needed) until they fit,
+	 *                   which is what bounds the RTF payload — it costs two hex
+	 *                   characters per byte. 0 disables. Default: 524288 (512 KB,
+	 *                   about 1 MB of document per image).
 	 *
 	 * Events (callback props):
 	 *   onchange      — Fires on content change with { html, text, wordCount, charCount }.
@@ -45,7 +48,8 @@
 		urlToImageSrc,
 		isSafeImageUrl,
 		stripExtension,
-		DEFAULT_MAX_IMAGE_EDGE
+		DEFAULT_MAX_IMAGE_EDGE,
+		DEFAULT_MAX_IMAGE_BYTES
 	} from '../images.js';
 
 	interface ChangePayload {
@@ -65,6 +69,7 @@
 		minHeight?: string;
 		readonly?: boolean;
 		maxImageEdge?: number;
+		maxImageBytes?: number;
 		onchange?: (payload: ChangePayload) => void;
 		onsave?: (payload: { html: string }) => void;
 		onimport?: (payload: { html: string }) => void;
@@ -81,6 +86,7 @@
 		minHeight = '40vh',
 		readonly = false,
 		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
+		maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
 		onchange,
 		onsave,
 		onimport
@@ -375,13 +381,18 @@
 
 		insertingImages = true;
 		try {
-			const src = await urlToImageSrc(url, maxImageEdge);
+			const src = await urlToImageSrc(url, imageLimits());
 			restoreSelection();
 			editorEl?.focus();
 			finishInsert(insertFigure(src, alt || caption, caption));
 		} finally {
 			insertingImages = false;
 		}
+	}
+
+	/** Caps applied to a picture as it is inserted. */
+	function imageLimits(): { maxEdge: number; maxBytes: number } {
+		return { maxEdge: maxImageEdge, maxBytes: maxImageBytes };
 	}
 
 	/** Width in px available to an image — the editor's content box. */
@@ -500,7 +511,7 @@
 		try {
 			for (const file of files) {
 				try {
-					const src = await fileToImageSrc(file, maxImageEdge);
+					const src = await fileToImageSrc(file, imageLimits());
 					restoreSelection();
 					editorEl?.focus();
 					// A single image takes the description typed in the dialog; a batch
