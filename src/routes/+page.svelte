@@ -5,8 +5,16 @@
 	import patientOrganWeights3 from '../../test-files/patient_organ_weights3.rtf?raw';
 
 	// ── Editor section ────────────────────────────────────────────────────────
-	let editorRef: { getRTF: () => string; importRtf: () => void } | null = $state(null);
+	let editorRef: {
+		getRTF: () => string;
+		getRtfSize: () => number;
+		importRtf: () => void;
+	} | null = $state(null);
 	let editorCopied = $state(false);
+
+	// Live estimate straight from the onchange payload — cheap enough to update
+	// on every keystroke, unlike the exact figure.
+	let liveEstimate = $state(0);
 
 	async function copyEditorRtf() {
 		if (!editorRef) return;
@@ -62,7 +70,8 @@
 				bytes: base64Bytes(src)
 			};
 		});
-		rtfChars = editorRef.getRTF().length;
+		// The exact figure, via the method a host app would call before sending.
+		rtfChars = editorRef.getRtfSize();
 		measured = true;
 	}
 
@@ -144,6 +153,8 @@
 	.payload-total { margin: 0 0 0.4rem; }
 	.payload-note { margin: 0; color: #666; font-size: 0.75rem; }
 	.payload-empty { margin: 0 0 0.4rem; color: #666; }
+	.drift { color: #666; }
+	.live-size { font-size: 0.75rem; font-weight: normal; color: #666; margin-right: 0.5rem; font-variant-numeric: tabular-nums; }
 	.payload code { background: #eee; padding: 1px 4px; border-radius: 3px; }
 </style>
 
@@ -153,6 +164,7 @@
 	<span>Editor</span>
 	<span>
 		<button onclick={() => editorRef?.importRtf()}>Import RTF</button>
+		<span class="live-size">~{liveEstimate.toLocaleString()} chars as RTF</span>
 		<button onclick={measureImages}>Measure payload</button>
 		<button class:copied={editorCopied} onclick={copyEditorRtf}>
 			{editorCopied ? 'Copied!' : 'Copy RTF'}
@@ -160,7 +172,13 @@
 	</span>
 </h2>
 <div class="editor-wrap">
-	<InkEditor bind:this={editorRef} autosave={false} storageKey="dev-harness" minHeight="20vh" />
+	<InkEditor
+		bind:this={editorRef}
+		autosave={false}
+		storageKey="dev-harness"
+		minHeight="20vh"
+		onchange={({ estimatedRtfBytes }) => (liveEstimate = estimatedRtfBytes)}
+	/>
 
 	{#if measured}
 		<div class="payload">
@@ -197,6 +215,11 @@
 			<p class="payload-total">
 				<strong>Whole document: {rtfChars.toLocaleString()} characters</strong>
 				— this is what one OBX-5 has to carry.
+				<span class="drift">
+					Live estimate was {liveEstimate.toLocaleString()}
+					({liveEstimate - rtfChars >= 0 ? '+' : ''}{(liveEstimate - rtfChars).toLocaleString()},
+					{rtfChars ? (Math.abs(liveEstimate - rtfChars) / rtfChars * 100).toFixed(2) : '0.00'}% off).
+				</span>
 				{#if imageStats.length > 0}
 					Pictures account for {kb(totalImageBytes * 2)} of it.
 				{/if}
