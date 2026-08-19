@@ -125,6 +125,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `showStatusBar` | `boolean`  | `true`                       | Show the word/character count bar                         |
 | `minHeight`     | `string`   | `'40vh'`                     | CSS `min-height` of the editing area                      |
 | `readonly`      | `boolean`  | `false`                      | Disable editing                                           |
+| `maxImageEdge`  | `number`   | `1600`                       | Longest edge (px) an inserted image is scaled down to; `0` keeps full size |
 
 #### Callback props
 
@@ -219,6 +220,17 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
 - **RTF import** decodes `\pict` PNG and JPEG data (including pictures wrapped in `{\*\shppict}`) back into images at their stored size. Picture formats a browser cannot display — metafiles and device-dependent bitmaps — are skipped.
 - **Formats**: PNG and JPEG are embedded as-is. Anything else (GIF, WebP, SVG, …) is re-encoded to PNG when inserted, since RTF carries no other bitmap types. Animated images keep their first frame.
 - **Images added by address** are fetched and inlined so they survive export. When the fetch is blocked (CORS or offline) the address is kept and the picture still displays, but it exports as an `[Image: …]` placeholder instead of picture data.
+- **Size**: pictures are scaled down to `maxImageEdge` (1600 px by default) as they are inserted. RTF stores picture data as hexadecimal — two characters per byte — so an embedded image costs twice its file size in the document. Resizing an image in the editor changes its display size only; this cap is what bounds the payload. Set `maxImageEdge={0}` to embed originals untouched.
+
+### Sending RTF over a transport
+
+`htmlToRtf` output is written to survive being carried inside another format — an HL7 `OBX-5` field, a JSON string, a CSV cell:
+
+- **One line.** The document contains no CR or LF anywhere, including inside picture data, so nothing downstream can mistake part of it for a record separator.
+- **Uppercase hex.** Picture bytes are written as uppercase hex, so a PNG begins with the `89504E470D0A1A0A` signature that receivers commonly match on.
+- **Sized for the pipe.** Lower `maxImageEdge` to fit a field-length limit; budget roughly two characters per encoded image byte.
+
+Escaping for the carrying format is the integration layer's job, not the editor's. For HL7 v2 that means escaping the whole string's delimiters — `\` → `\E\`, `|` → `\F\`, `^` → `\S\`, `&` → `\T\`, `~` → `\R\` — because ordinary typed text ("Smith & Jones") reaches the RTF unescaped.
 
 ---
 

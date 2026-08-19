@@ -11,6 +11,10 @@
 	 *   showStatusBar — Show the word/char count status bar. Default: true.
 	 *   minHeight     — CSS min-height of the editing area. Default: '40vh'.
 	 *   readonly      — If true, editor is not editable. Default: false.
+	 *   maxImageEdge  — Longest edge (px) an inserted image is scaled down to.
+	 *                   Bounds the embedded payload, which costs two characters
+	 *                   per byte in RTF. 0 keeps images at full size.
+	 *                   Default: 1600.
 	 *
 	 * Events (callback props):
 	 *   onchange      — Fires on content change with { html, text, wordCount, charCount }.
@@ -36,7 +40,13 @@
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
 	import { readRtfFile } from '../rtf-parser.js';
 	import { htmlToRtf } from '../rtf-writer.js';
-	import { fileToImageSrc, urlToImageSrc, isSafeImageUrl, stripExtension } from '../images.js';
+	import {
+		fileToImageSrc,
+		urlToImageSrc,
+		isSafeImageUrl,
+		stripExtension,
+		DEFAULT_MAX_IMAGE_EDGE
+	} from '../images.js';
 
 	interface ChangePayload {
 		html: string;
@@ -54,6 +64,7 @@
 		showStatusBar?: boolean;
 		minHeight?: string;
 		readonly?: boolean;
+		maxImageEdge?: number;
 		onchange?: (payload: ChangePayload) => void;
 		onsave?: (payload: { html: string }) => void;
 		onimport?: (payload: { html: string }) => void;
@@ -69,6 +80,7 @@
 		showStatusBar = true,
 		minHeight = '40vh',
 		readonly = false,
+		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
 		onchange,
 		onsave,
 		onimport
@@ -363,7 +375,7 @@
 
 		insertingImages = true;
 		try {
-			const src = await urlToImageSrc(url);
+			const src = await urlToImageSrc(url, maxImageEdge);
 			restoreSelection();
 			editorEl?.focus();
 			finishInsert(insertFigure(src, alt || caption, caption));
@@ -488,7 +500,7 @@
 		try {
 			for (const file of files) {
 				try {
-					const src = await fileToImageSrc(file);
+					const src = await fileToImageSrc(file, maxImageEdge);
 					restoreSelection();
 					editorEl?.focus();
 					// A single image takes the description typed in the dialog; a batch

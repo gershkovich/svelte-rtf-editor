@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { rtfToHtml } from '../rtf-parser.js';
 import { htmlToRtf } from '../rtf-writer.js';
 import { htmlToMarkdown } from '../utils.js';
-import { isSafeImageUrl, stripExtension } from '../images.js';
+import { isSafeImageUrl, stripExtension, scaledSize, DEFAULT_MAX_IMAGE_EDGE } from '../images.js';
 
 /** Parse an HTML string into a div element (requires happy-dom environment). */
 function htmlEl(html: string): HTMLElement {
@@ -33,14 +33,14 @@ describe('htmlToRtf pictures', () => {
 		const rtf = htmlToRtf(htmlEl(`<figure><img src="${PNG_SRC}" alt="chart"></figure>`));
 		expect(rtf).toContain('{\\pict\\pngblip');
 		// PNG signature 89 50 4e 47 leads the hex payload
-		expect(rtf).toContain('89504e47');
+		expect(rtf).toContain('89504E47');
 		expect(rtf).not.toContain('[Image:');
 	});
 
 	it('embeds a JPEG as \\jpegblip', () => {
 		const rtf = htmlToRtf(htmlEl(`<figure><img src="${JPEG_SRC}"></figure>`));
 		expect(rtf).toContain('{\\pict\\jpegblip');
-		expect(rtf).toContain('ffd8ff');
+		expect(rtf).toContain('FFD8FF');
 	});
 
 	it('reads the intrinsic size out of the image bytes', () => {
@@ -186,6 +186,50 @@ describe('image round-trip', () => {
 	});
 });
 
+// ── Transport-safe output (e.g. embedding in an HL7 OBX-5 field) ──────────────
+
+describe('transport-safe RTF', () => {
+	const doc = `<p>Before image RTF</p><figure><img src="${PNG_SRC}" style="width:100px"><figcaption>A caption</figcaption></figure><p>After image RTF</p>`;
+
+	it('writes picture data in uppercase hex', () => {
+		const rtf = htmlToRtf(htmlEl(doc));
+		expect(rtf).toContain('89504E470D0A1A0A'); // the PNG signature, as receivers match it
+
+		const payload = rtf.match(/\\pichgoal\d+ ([0-9A-Fa-f]+)\}/)?.[1];
+		expect(payload).toBeTruthy();
+		expect(payload).toBe(payload?.toUpperCase());
+	});
+
+	it('emits the whole document on a single line', () => {
+		const rtf = htmlToRtf(htmlEl(doc));
+		expect(rtf).not.toContain('\n');
+		expect(rtf).not.toContain('\r');
+	});
+
+	it('separates \\pichgoal from the hex data so the parameter cannot swallow it', () => {
+		const rtf = htmlToRtf(htmlEl(doc));
+		expect(rtf).toMatch(/\\pichgoal\d+ 89504E47/);
+		// A round-trip proves the delimiter is read the way it is written.
+		expect(rtfToHtml(rtf)).toContain(`<img src="${PNG_SRC}"`);
+	});
+
+	it('keeps tables and line breaks valid without newline separators', () => {
+		const rtf = htmlToRtf(
+			htmlEl('<table><tr><th>Organ</th><th>Weight</th></tr><tr><td>Heart</td><td>620 g</td></tr></table>')
+		);
+		expect(rtf).not.toContain('\n');
+		const html = rtfToHtml(rtf);
+		expect(html).toContain('Organ');
+		expect(html).toContain('620 g');
+	});
+
+	it('keeps text following a paragraph break separate from the control word', () => {
+		const rtf = htmlToRtf(htmlEl('<p>First</p><p>Second</p>'));
+		expect(rtf).toContain('\\par ');
+		expect(rtfToHtml(rtf)).toContain('Second');
+	});
+});
+
 // ── Insert-time helpers ───────────────────────────────────────────────────────
 
 describe('image source validation', () => {
@@ -199,6 +243,28 @@ describe('image source validation', () => {
 		expect(isSafeImageUrl('javascript:alert(1)')).toBe(false);
 		expect(isSafeImageUrl('data:text/html;base64,PHNjcmlwdD4=')).toBe(false);
 		expect(isSafeImageUrl('   ')).toBe(false);
+	});
+
+	it('scales an oversized image down to the longest-edge cap', () => {
+		expect(scaledSize(4000, 3000, 1600)).toEqual({ width: 1600, height: 1200 });
+		expect(scaledSize(3000, 4000, 1600)).toEqual({ width: 1200, height: 1600 });
+	});
+
+	it('never upscales an image that is already within the cap', () => {
+		expect(scaledSize(800, 600, 1600)).toEqual({ width: 800, height: 600 });
+		expect(scaledSize(1600, 900, 1600)).toEqual({ width: 1600, height: 900 });
+	});
+
+	it('treats a cap of zero as "no limit"', () => {
+		expect(scaledSize(4000, 3000, 0)).toEqual({ width: 4000, height: 3000 });
+	});
+
+	it('keeps at least one pixel on the short edge of an extreme panorama', () => {
+		expect(scaledSize(10000, 3, 1600).height).toBeGreaterThanOrEqual(1);
+	});
+
+	it('defaults the cap to 1600px', () => {
+		expect(DEFAULT_MAX_IMAGE_EDGE).toBe(1600);
 	});
 
 	it('derives a default description from the file name', () => {

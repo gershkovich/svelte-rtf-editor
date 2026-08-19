@@ -129,7 +129,7 @@ describe('InkEditor image insertion', () => {
 
 		const rtf = editor.getRTF();
 		expect(rtf.match(/\{\\pict\\pngblip/g)?.length).toBe(2);
-		expect(rtf).toContain('89504e47'); // PNG signature in the hex data
+		expect(rtf).toContain('89504E47'); // PNG signature in the hex data
 	});
 
 	it('inserts images dropped onto the editor', async () => {

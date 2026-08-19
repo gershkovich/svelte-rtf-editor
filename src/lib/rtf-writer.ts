@@ -111,7 +111,12 @@ const B64_LOOKUP = (() => {
 	return table;
 })();
 
-const HEX_BYTE: string[] = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+// Uppercase: the RTF spec treats picture data as case-insensitive, but
+// downstream consumers (HL7 interface engines, for one) sometimes match the
+// leading PNG signature literally as 89504E470D0A1A0A.
+const HEX_BYTE: string[] = Array.from({ length: 256 }, (_, i) =>
+	i.toString(16).padStart(2, '0').toUpperCase()
+);
 
 /** Decode base64 to bytes without depending on atob/Buffer (works in any runtime). */
 function base64ToBytes(b64: string): Uint8Array | null {
@@ -144,13 +149,6 @@ function bytesToHex(bytes: Uint8Array): string {
 	const parts: string[] = new Array(bytes.length);
 	for (let i = 0; i < bytes.length; i++) parts[i] = HEX_BYTE[bytes[i]];
 	return parts.join('');
-}
-
-/** RTF readers expect short lines — wrap the picture data at 128 chars. */
-function wrapHex(hex: string): string {
-	const lines: string[] = [];
-	for (let i = 0; i < hex.length; i += 128) lines.push(hex.substring(i, i + 128));
-	return lines.join('\n');
 }
 
 /** Read the intrinsic size out of the PNG IHDR chunk. */
@@ -232,11 +230,13 @@ function pictureRtf(el: HTMLElement): string {
 	const picw = natural.w || size.w;
 	const pich = natural.h || size.h;
 
+	// The space after \pichgoal is the control word's delimiter — without it the
+	// leading hex digits would be read as part of its numeric parameter.
 	return (
 		`{\\pict${isPng ? '\\pngblip' : '\\jpegblip'}` +
 		`\\picw${picw}\\pich${pich}` +
-		`\\picwgoal${Math.round(size.w * TWIPS_PER_PX)}\\pichgoal${Math.round(size.h * TWIPS_PER_PX)}\n` +
-		`${wrapHex(bytesToHex(bytes))}\n}`
+		`\\picwgoal${Math.round(size.w * TWIPS_PER_PX)}\\pichgoal${Math.round(size.h * TWIPS_PER_PX)} ` +
+		`${bytesToHex(bytes)}}`
 	);
 }
 
@@ -330,7 +330,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 		if (node.nodeType === Node.TEXT_NODE) {
 			const text = node.textContent || '';
 			if (ctx.inPre) {
-				rtf += escapeRtf(text).replace(/\n/g, '\\line\n');
+				rtf += escapeRtf(text).replace(/\n/g, '\\line ');
 			} else {
 				rtf += escapeRtf(text);
 			}
@@ -344,15 +344,15 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 		switch (tag) {
 			case 'h1':
-				rtf += `\\pard\\f1\\fs48\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par\n`;
+				rtf += `\\pard\\f1\\fs48\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
 				break;
 
 			case 'h2':
-				rtf += `\\pard\\f1\\fs36\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par\n`;
+				rtf += `\\pard\\f1\\fs36\\b ${walkChildren(el, ctx)}\\b0\\f0\\fs24\\par `;
 				break;
 
 			case 'h3':
-				rtf += `\\pard\\f0\\fs28\\b ${walkChildren(el, ctx)}\\b0\\fs24\\par\n`;
+				rtf += `\\pard\\f0\\fs28\\b ${walkChildren(el, ctx)}\\b0\\fs24\\par `;
 				break;
 
 			case 'p':
@@ -368,13 +368,13 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 					el.childNodes.length === 0 ||
 					(el.childNodes.length === 1 && el.childNodes[0].nodeName === 'BR');
 				if (isBlankLine) {
-					rtf += '\\par\n';
+					rtf += '\\par ';
 					break;
 				}
 				const inlineRtf = walkChildren(el, ctx);
 				const colorPrefix = getColorPrefix(el, ctx);
 				const colorSuffix = colorPrefix ? '\\cf0 ' : '';
-				rtf += `\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par\n`;
+				rtf += `\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
 				break;
 			}
 
@@ -400,41 +400,41 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 					cellRights[cellRights.length - 1] = PAGE_WIDTH; // snap last edge to avoid rounding drift
 
 					// Row definition
-					let rowRtf = '{\n\\trowd \\trgaph120\n';
+					let rowRtf = '{\\trowd\\trgaph120';
 					for (let ci = 0; ci < cells.length; ci++) {
 						if (isHeader) rowRtf += `\\clbrdrb\\brdrs`;
 						rowRtf += `\\cellx${cellRights[ci]}`;
 					}
-					rowRtf += '\n\\trkeep\\intbl\n{';
+					rowRtf += '\\trkeep\\intbl{';
 
 					// Cell bodies
 					const cellCtx = { ...ctx, inTableCell: true };
 					for (const cell of cells) {
 						const content = walkChildren(cell as HTMLElement, cellCtx);
-						rowRtf += `{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\n\\cell`;
+						rowRtf += `{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\\cell`;
 					}
-					rowRtf += '}\n\\intbl\\row}\n';
+					rowRtf += '}\\intbl\\row}';
 					rtf += rowRtf;
 				}
 				break;
 			}
 
 			case 'blockquote':
-				rtf += `\\pard\\li720\\i ${walkChildren(el, ctx)}\\i0\\par\n`;
+				rtf += `\\pard\\li720\\i ${walkChildren(el, ctx)}\\i0\\par `;
 				break;
 
 			case 'pre':
-				rtf += `\\pard\\f2\\fs20 ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs24\\par\n`;
+				rtf += `\\pard\\f2\\fs20 ${walkChildren(el, { ...ctx, inPre: true })}\\f0\\fs24\\par `;
 				break;
 
 			case 'hr':
-				rtf += `\\pard\\qc \\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\par\n`;
+				rtf += `\\pard\\qc \\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\emdash\\par `;
 				break;
 
 			case 'ul': {
 				const items = el.querySelectorAll(':scope > li');
 				items.forEach((li) => {
-					rtf += `\\pard\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par\n`;
+					rtf += `\\pard\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par `;
 				});
 				break;
 			}
@@ -443,7 +443,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				let counter = 1;
 				const items = el.querySelectorAll(':scope > li');
 				items.forEach((li) => {
-					rtf += `\\pard\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par\n`;
+					rtf += `\\pard\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par `;
 					counter++;
 				});
 				break;
@@ -510,11 +510,11 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				const caption = (el.querySelector('figcaption')?.textContent || '').trim();
 				const align = alignControl(el);
 
-				if (img) rtf += `\\pard${align} ${imageBody(img as HTMLElement)}\\par\n`;
+				if (img) rtf += `\\pard${align} ${imageBody(img as HTMLElement)}\\par `;
 				else rtf += walkChildren(el, ctx);
 
 				if (caption) {
-					rtf += `{\\*\\inkcap}\\pard${align}\\i ${escapeRtf(caption)}\\i0\\par\n`;
+					rtf += `{\\*\\inkcap}\\pard${align}\\i ${escapeRtf(caption)}\\i0\\par `;
 				}
 				break;
 			}
@@ -523,12 +523,12 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				// A picture directly under the editor root has no paragraph of its
 				// own; anywhere else it is inline content of the enclosing block.
 				const standalone = el.parentNode === ctx.root;
-				rtf += standalone ? `\\pard ${imageBody(el)}\\par\n` : imageBody(el);
+				rtf += standalone ? `\\pard ${imageBody(el)}\\par ` : imageBody(el);
 				break;
 			}
 
 			case 'br':
-				rtf += '\\line\n';
+				rtf += '\\line ';
 				break;
 
 			case 'span': {
