@@ -13,6 +13,7 @@ RTF viewer and rich-text editor components for **Svelte 5**.
 - **`InkEditor`** — Full rich-text editor that reads and writes RTF, built on `contenteditable`
   - Formatting toolbar: bold, italic, underline, strikethrough, font colour
   - Block-level controls: headings (H1–H3), paragraph, blockquote, code block
+  - Images: upload, paste or drag-and-drop, with a description below each picture, drag-to-resize and left/centre/right placement — embedded in the RTF, not linked
   - Import an RTF file from disk; export as RTF, HTML, or Markdown
   - Optional auto-save to `localStorage`
   - Word count and character count status bar
@@ -192,7 +193,32 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Ctrl+B`   | Bold              |
 | `Ctrl+I`   | Italic            |
 | `Ctrl+U`   | Underline         |
+| `Ctrl+K`   | Insert link       |
 | `Ctrl+S`   | Save (fires `onsave`) |
+| `Backspace` / `Delete` | Remove the selected image |
+
+---
+
+## Working with images
+
+Three ways to add a picture:
+
+- **Toolbar** — the image button opens a dialog where you can pick one or several files from disk, or paste an image address
+- **Paste** — paste an image straight from the clipboard (a screenshot, for example)
+- **Drag and drop** — drop image files anywhere in the editing area; they are inserted where you dropped them
+
+Each picture is inserted as a `<figure>` with a `<figcaption>` under it. Click the caption line and type to describe the image — the description travels with the picture through every export. Insert as many images as a document needs.
+
+Click an image to select it. A frame appears with corner handles you can drag to resize (the aspect ratio is kept and the width is capped at the editor's text width), buttons for 25% / 50% / 100% width, left / centre / right placement, a shortcut to its description, and a remove button.
+
+### How images are stored
+
+Images are held inline as base64 data URLs, so a document is self-contained — it auto-saves, exports and re-imports with the pictures intact, and needs no image server.
+
+- **RTF export** writes each picture as a real `\pict` group (`\pngblip` / `\jpegblip`) sized with `\picwgoal` / `\pichgoal`, so it opens with the images in Word, TextEdit and other RTF readers. The description follows as an italic line, tagged with an ignorable `{\*\inkcap}` destination that this library uses to re-attach it to the figure on import; other readers simply skip the tag.
+- **RTF import** decodes `\pict` PNG and JPEG data (including pictures wrapped in `{\*\shppict}`) back into images at their stored size. Picture formats a browser cannot display — metafiles and device-dependent bitmaps — are skipped.
+- **Formats**: PNG and JPEG are embedded as-is. Anything else (GIF, WebP, SVG, …) is re-encoded to PNG when inserted, since RTF carries no other bitmap types. Animated images keep their first frame.
+- **Images added by address** are fetched and inlined so they survive export. When the fetch is blocked (CORS or offline) the address is kept and the picture still displays, but it exports as an `[Image: …]` placeholder instead of picture data.
 
 ---
 

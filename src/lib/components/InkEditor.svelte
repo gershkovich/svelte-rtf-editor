@@ -32,9 +32,11 @@
 	import { onMount } from 'svelte';
 	import Toolbar from './Toolbar.svelte';
 	import Modal from './Modal.svelte';
+	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
 	import { readRtfFile } from '../rtf-parser.js';
 	import { htmlToRtf } from '../rtf-writer.js';
+	import { fileToImageSrc, urlToImageSrc, isSafeImageUrl, stripExtension } from '../images.js';
 
 	interface ChangePayload {
 		html: string;
@@ -74,6 +76,7 @@
 
 	// ── Internal state ──
 	let editorEl: HTMLDivElement | null = $state(null);
+	let contentWrapEl: HTMLDivElement | null = $state(null);
 	let wordCount: number = $state(0);
 	let charCount: number = $state(0);
 	let lastSaved: string = $state('');
@@ -93,7 +96,15 @@
 	let linkText: string = $state('');
 	let imageUrl: string = $state('');
 	let imageAlt: string = $state('');
+	let imageCaption: string = $state('');
 	let savedSelection: Range | null = $state(null);
+
+	// Image state
+	let imageInputEl: HTMLInputElement | null = $state(null);
+	let pendingImageFiles: File[] = $state([]);
+	let selectedImage: HTMLImageElement | null = $state(null);
+	let overlayRef: { reposition: () => void } | null = $state(null);
+	let insertingImages: boolean = $state(false);
 
 	// Import state
 	let fileInputEl: HTMLInputElement | null = $state(null);
@@ -111,6 +122,7 @@
 
 	export function setHTML(html: string): void {
 		if (editorEl) {
+			selectedImage = null;
 			editorEl.innerHTML = html;
 			updateCounts();
 			if (autosave) scheduleAutoSave();
@@ -129,6 +141,7 @@
 
 	export function clear(): void {
 		if (editorEl) {
+			selectedImage = null;
 			editorEl.innerHTML = '<p></p>';
 			try { localStorage.removeItem(storageKey); } catch (e) {}
 			updateCounts();
@@ -252,7 +265,12 @@
 		try {
 			localStorage.setItem(storageKey, editorEl.innerHTML);
 			lastSaved = `Saved ${new Date().toLocaleTimeString()}`;
-		} catch (e) {}
+		} catch (e) {
+			// Embedded images can push a document past the localStorage quota. Say
+			// so instead of showing a "Saved" that did not happen — onsave still
+			// fires so the host app can persist the content itself.
+			lastSaved = 'Too large to auto-save in this browser';
+		}
 		onsave?.({ html: editorEl.innerHTML });
 	}
 
@@ -264,6 +282,10 @@
 	// ── Input handler ──
 	function handleInput(): void {
 		updateToolbarState();
+		// Typing means the user is editing text, not the picture. Dropping the
+		// selection here keeps Backspace editing that text instead of deleting a
+		// still-selected image somewhere else in the document.
+		selectedImage = null;
 		fireChange();
 		if (autosave) scheduleAutoSave();
 	}
@@ -300,20 +322,284 @@
 		linkModalOpen = false;
 	}
 
-	// ── Image modal ──
+	// ── Images ──
 	function openImageModal(): void {
 		saveSelection();
 		imageUrl = '';
 		imageAlt = '';
+		imageCaption = '';
+		pendingImageFiles = [];
 		imageModalOpen = true;
 	}
 
-	function applyImage(): void {
-		if (!imageUrl) { imageModalOpen = false; return; }
-		restoreSelection();
-		editorEl?.focus();
-		document.execCommand('insertHTML', false, `<img src="${imageUrl}" alt="${imageAlt || ''}" />`);
+	function chooseImageFiles(): void {
+		imageInputEl?.click();
+	}
+
+	function handleImageFilesChosen(e: Event): void {
+		const input = e.target as HTMLInputElement;
+		pendingImageFiles = Array.from(input.files || []).filter((f) => f.type.startsWith('image/'));
+		input.value = '';
+	}
+
+	async function applyImage(): Promise<void> {
+		const files = pendingImageFiles;
+		const url = imageUrl.trim();
+		const caption = imageCaption.trim();
+		const alt = imageAlt.trim();
+
 		imageModalOpen = false;
+		pendingImageFiles = [];
+
+		if (files.length > 0) {
+			await insertImageFiles(files, caption, alt);
+			return;
+		}
+		if (!url) return;
+		if (!isSafeImageUrl(url)) {
+			showError('That image address is not supported');
+			return;
+		}
+
+		insertingImages = true;
+		try {
+			const src = await urlToImageSrc(url);
+			restoreSelection();
+			editorEl?.focus();
+			finishInsert(insertFigure(src, alt || caption, caption));
+		} finally {
+			insertingImages = false;
+		}
+	}
+
+	/** Width in px available to an image — the editor's content box. */
+	function contentWidth(): number {
+		if (!editorEl) return 0;
+		const styles = getComputedStyle(editorEl);
+		const padding = parseFloat(styles.paddingLeft || '0') + parseFloat(styles.paddingRight || '0');
+		return Math.max(0, editorEl.clientWidth - padding);
+	}
+
+	/** The direct child of the editor that contains the caret, if any. */
+	function caretBlock(): HTMLElement | null {
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !editorEl) return null;
+		let node: Node | null = sel.getRangeAt(0).startContainer;
+		if (!editorEl.contains(node)) return null;
+		while (node && node.parentNode !== editorEl) node = node.parentNode;
+		return node instanceof HTMLElement ? node : null;
+	}
+
+	function isEmptyBlock(el: HTMLElement): boolean {
+		if (el.querySelector('img, table, hr')) return false;
+		return (el.textContent || '').trim().length === 0;
+	}
+
+	function placeCaret(el: HTMLElement, atStart = true): void {
+		const range = document.createRange();
+		range.selectNodeContents(el);
+		range.collapse(atStart);
+		const sel = window.getSelection();
+		sel?.removeAllRanges();
+		sel?.addRange(range);
+		savedSelection = range.cloneRange();
+	}
+
+	/**
+	 * Insert a <figure><img><figcaption> block at the caret. Figures are block
+	 * level, so they are placed between top-level blocks rather than inside the
+	 * paragraph the caret happens to be in.
+	 */
+	function insertFigure(
+		src: string,
+		alt: string,
+		caption: string
+	): { img: HTMLImageElement; after: HTMLElement } | null {
+		if (!editorEl) return null;
+
+		const figure = document.createElement('figure');
+		const img = document.createElement('img');
+		img.src = src;
+		if (alt) img.alt = alt;
+		const figcaption = document.createElement('figcaption');
+		if (caption) figcaption.textContent = caption;
+		figure.append(img, figcaption);
+
+		const block = caretBlock();
+		if (block && isEmptyBlock(block)) block.replaceWith(figure);
+		else if (block) block.after(figure);
+		else editorEl.appendChild(figure);
+
+		// Guarantee somewhere to keep typing after the image.
+		let after = figure.nextElementSibling as HTMLElement | null;
+		if (!after || after.tagName === 'FIGURE') {
+			const p = document.createElement('p');
+			p.appendChild(document.createElement('br'));
+			figure.after(p);
+			after = p;
+		}
+
+		fitImageWhenLoaded(img);
+		return { img, after };
+	}
+
+	/** Scale a freshly inserted image down to the editor width, never up. */
+	function fitImage(img: HTMLImageElement): void {
+		const natural = img.naturalWidth;
+		if (!natural) return;
+		const max = contentWidth();
+		img.style.width = `${Math.round(max > 0 ? Math.min(natural, max) : natural)}px`;
+		img.style.height = 'auto';
+		overlayRef?.reposition();
+	}
+
+	function fitImageWhenLoaded(img: HTMLImageElement): void {
+		if (img.complete && img.naturalWidth) {
+			fitImage(img);
+			return;
+		}
+		img.addEventListener(
+			'load',
+			() => {
+				fitImage(img);
+				updateCounts();
+				fireChange();
+				if (autosave) scheduleAutoSave();
+			},
+			{ once: true }
+		);
+	}
+
+	function finishInsert(inserted: { img: HTMLImageElement; after: HTMLElement } | null): void {
+		if (!inserted) return;
+		placeCaret(inserted.after);
+		selectedImage = inserted.img;
+		updateCounts();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/** Insert one figure per file, in the order they were given. */
+	async function insertImageFiles(files: File[], caption = '', alt = ''): Promise<void> {
+		if (files.length === 0) return;
+		insertingImages = true;
+		let inserted: { img: HTMLImageElement; after: HTMLElement } | null = null;
+
+		try {
+			for (const file of files) {
+				try {
+					const src = await fileToImageSrc(file);
+					restoreSelection();
+					editorEl?.focus();
+					// A single image takes the description typed in the dialog; a batch
+					// gets empty captions the user fills in under each picture.
+					const isBatch = files.length > 1;
+					inserted = insertFigure(
+						src,
+						alt || caption || stripExtension(file.name),
+						isBatch ? '' : caption
+					);
+					if (inserted) placeCaret(inserted.after);
+				} catch (err) {
+					showError((err as Error).message || 'Could not insert the image');
+				}
+			}
+		} finally {
+			insertingImages = false;
+		}
+
+		finishInsert(inserted);
+	}
+
+	function showError(message: string): void {
+		importError = message;
+		setTimeout(() => (importError = ''), 4000);
+	}
+
+	// ── Image selection / editing ──
+	function handleContentClick(e: MouseEvent): void {
+		if (readonly) return;
+		const target = e.target as HTMLElement | null;
+		selectedImage = target?.tagName === 'IMG' ? (target as HTMLImageElement) : null;
+	}
+
+	function selectionInCaption(): boolean {
+		const node = window.getSelection()?.anchorNode;
+		if (!node) return false;
+		const el = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+		return !!el?.closest('figcaption');
+	}
+
+	function removeSelectedImage(): void {
+		if (!selectedImage) return;
+		const figure = selectedImage.closest('figure');
+		const next = (figure ?? selectedImage).nextElementSibling as HTMLElement | null;
+		(figure ?? selectedImage).remove();
+		selectedImage = null;
+		if (next) placeCaret(next);
+		updateCounts();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/** Put the caret in the image's description line, creating it if needed. */
+	function focusCaption(img: HTMLImageElement): void {
+		const figure = img.closest('figure');
+		if (!figure) return;
+		let caption = figure.querySelector('figcaption');
+		if (!caption) {
+			caption = document.createElement('figcaption');
+			figure.appendChild(caption);
+		}
+		editorEl?.focus();
+		placeCaret(caption as HTMLElement, false);
+	}
+
+	function handleImageEdited(): void {
+		updateCounts();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	function handleDragOver(e: DragEvent): void {
+		if (readonly) return;
+		if (Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault();
+	}
+
+	function handleDrop(e: DragEvent): void {
+		if (readonly) return;
+		const files = Array.from(e.dataTransfer?.files || []).filter((f) => f.type.startsWith('image/'));
+		if (files.length === 0) return;
+		e.preventDefault();
+		editorEl?.focus();
+		placeCaretAtPoint(e.clientX, e.clientY);
+		void insertImageFiles(files);
+	}
+
+	/** Move the caret under the pointer so a dropped image lands where it was dropped. */
+	function placeCaretAtPoint(x: number, y: number): void {
+		const doc = document as Document & {
+			caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+			caretRangeFromPoint?: (x: number, y: number) => Range | null;
+		};
+
+		let range: Range | null = null;
+		if (typeof doc.caretPositionFromPoint === 'function') {
+			const pos = doc.caretPositionFromPoint(x, y);
+			if (pos) {
+				range = document.createRange();
+				range.setStart(pos.offsetNode, pos.offset);
+				range.collapse(true);
+			}
+		} else if (typeof doc.caretRangeFromPoint === 'function') {
+			range = doc.caretRangeFromPoint(x, y);
+		}
+
+		if (!range || !editorEl?.contains(range.startContainer)) return;
+		const sel = window.getSelection();
+		sel?.removeAllRanges();
+		sel?.addRange(range);
+		savedSelection = range.cloneRange();
 	}
 
 	// ── Import RTF ──
@@ -328,6 +614,7 @@
 		try {
 			const html = await readRtfFile(file);
 			if (editorEl) {
+				selectedImage = null;
 				editorEl.innerHTML = html;
 				updateCounts();
 				fireChange();
@@ -335,8 +622,7 @@
 				onimport?.({ html });
 			}
 		} catch (err) {
-			importError = (err as Error).message || 'Failed to import RTF file';
-			setTimeout(() => (importError = ''), 4000);
+			showError((err as Error).message || 'Failed to import RTF file');
 		} finally {
 			importing = false;
 			if (fileInputEl) fileInputEl.value = '';
@@ -352,6 +638,21 @@
 		if (mod && e.key === 'k') { e.preventDefault(); openLinkModal(); }
 		if (mod && e.key === 's') { e.preventDefault(); autoSaveNow(); }
 
+		// Moving the caret leaves the picture behind, so drop its selection frame.
+		if (selectedImage && (e.key.startsWith('Arrow') || e.key === 'Enter' || e.key === 'Escape' ||
+			e.key === 'Home' || e.key === 'End' || e.key === 'PageUp' || e.key === 'PageDown')) {
+			selectedImage = null;
+			return;
+		}
+
+		// Backspace/Delete removes a selected image — but not while the caret is
+		// in its description, where those keys must edit text as usual.
+		if (selectedImage && !selectionInCaption() && (e.key === 'Backspace' || e.key === 'Delete')) {
+			e.preventDefault();
+			removeSelectedImage();
+			return;
+		}
+
 		if (e.key === 'Tab') {
 			const sel = window.getSelection();
 			if (sel?.anchorNode?.parentElement?.closest?.('pre')) {
@@ -362,6 +663,18 @@
 	}
 
 	function handlePaste(e: ClipboardEvent): void {
+		// clipboardData is only valid during the event — pull the files out first.
+		const files = Array.from(e.clipboardData?.items || [])
+			.filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+			.map((item) => item.getAsFile())
+			.filter((file): file is File => file !== null);
+
+		if (files.length > 0 && !readonly) {
+			e.preventDefault();
+			void insertImageFiles(files);
+			return;
+		}
+
 		const sel = window.getSelection();
 		if (sel?.anchorNode?.parentElement?.closest?.('pre')) {
 			e.preventDefault();
@@ -403,6 +716,16 @@
 	onchange={handleFileImport}
 />
 
+<!-- Hidden file input for image insertion (multiple images at once) -->
+<input
+	type="file"
+	accept="image/*"
+	multiple
+	class="ink-hidden-input"
+	bind:this={imageInputEl}
+	onchange={handleImageFilesChosen}
+/>
+
 <div class="ink-editor" style="--ink-min-height: {minHeight};">
 	{#if showToolbar && !readonly}
 		<Toolbar
@@ -415,19 +738,36 @@
 		/>
 	{/if}
 
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="ink-content"
-		contenteditable={!readonly}
-		spellcheck="true"
-		bind:this={editorEl}
-		oninput={handleInput}
-		onmouseup={updateToolbarState}
-		onkeyup={updateToolbarState}
-		onkeydown={handleKeydown}
-		onpaste={handlePaste}
-		data-placeholder={placeholder}
-	></div>
+	<div class="ink-content-wrap" bind:this={contentWrapEl}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class="ink-content"
+			contenteditable={!readonly}
+			spellcheck="true"
+			bind:this={editorEl}
+			oninput={handleInput}
+			onmouseup={updateToolbarState}
+			onkeyup={updateToolbarState}
+			onkeydown={handleKeydown}
+			onpaste={handlePaste}
+			onclick={handleContentClick}
+			ondragover={handleDragOver}
+			ondrop={handleDrop}
+			data-placeholder={placeholder}
+		></div>
+
+		{#if !readonly}
+			<ImageOverlay
+				bind:this={overlayRef}
+				target={selectedImage}
+				bounds={contentWrapEl}
+				maxWidth={contentWidth}
+				onchange={handleImageEdited}
+				onremove={removeSelectedImage}
+				oncaption={focusCaption}
+			/>
+		{/if}
+	</div>
 
 	{#if showStatusBar}
 		<div class="ink-status-bar">
@@ -456,16 +796,43 @@
 
 <!-- Image Modal -->
 <Modal title="Insert Image" open={imageModalOpen} onclose={() => (imageModalOpen = false)}>
-	<input
-		type="url"
-		placeholder="https://example.com/image.jpg"
-		bind:value={imageUrl}
-		onkeydown={(e) => e.key === 'Enter' && applyImage()}
-	/>
-	<input type="text" placeholder="Alt text (optional)" bind:value={imageAlt} />
+	<button class="ink-file-pick" onclick={chooseImageFiles}>
+		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+		{pendingImageFiles.length > 0
+			? `${pendingImageFiles.length} image${pendingImageFiles.length === 1 ? '' : 's'} selected`
+			: 'Choose images from this device'}
+	</button>
+
+	{#if pendingImageFiles.length > 0}
+		<p class="ink-file-list">{pendingImageFiles.map((f) => f.name).join(', ')}</p>
+	{/if}
+
+	{#if pendingImageFiles.length === 0}
+		<div class="ink-modal-or"><span>or paste an address</span></div>
+		<input
+			type="url"
+			placeholder="https://example.com/image.jpg"
+			bind:value={imageUrl}
+			onkeydown={(e) => e.key === 'Enter' && applyImage()}
+		/>
+	{/if}
+
+	{#if pendingImageFiles.length > 1}
+		<p class="ink-modal-hint">Add a description under each image after inserting.</p>
+	{:else}
+		<input type="text" placeholder="Description shown below the image (optional)" bind:value={imageCaption} />
+	{/if}
+	<input type="text" placeholder="Alt text for screen readers (optional)" bind:value={imageAlt} />
+
 	{#snippet actions()}
 		<button class="ink-btn-ghost" onclick={() => (imageModalOpen = false)}>Cancel</button>
-		<button class="ink-btn-primary" onclick={applyImage}>Insert</button>
+		<button
+			class="ink-btn-primary"
+			disabled={insertingImages || (pendingImageFiles.length === 0 && !imageUrl.trim())}
+			onclick={applyImage}
+		>
+			{insertingImages ? 'Inserting…' : 'Insert'}
+		</button>
 	{/snippet}
 </Modal>
 
@@ -484,6 +851,12 @@
 
 	.ink-editor {
 		width: 100%;
+	}
+
+	/* Anchors the image selection frame, which lives outside the
+	   contenteditable area so it never lands in the exported HTML. */
+	.ink-content-wrap {
+		position: relative;
 	}
 
 	/* ── Content Area ── */
@@ -603,8 +976,33 @@
 
 	.ink-content :global(img) {
 		max-width: 100%;
+		height: auto;
 		border-radius: var(--radius, 8px);
 		margin: 16px 0;
+	}
+
+	/* ── Figures (image + description) ── */
+	.ink-content :global(figure) {
+		margin: 20px 0;
+	}
+
+	.ink-content :global(figure img) {
+		margin: 0;
+		vertical-align: bottom;
+		cursor: pointer;
+	}
+
+	.ink-content :global(figcaption) {
+		margin-top: 8px;
+		font-size: 13px;
+		line-height: 1.5;
+		font-style: italic;
+		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-content :global(figcaption:empty)::before {
+		content: 'Add a description…';
+		opacity: 0.55;
 	}
 
 	.ink-content :global(hr) {
@@ -645,6 +1043,69 @@
 
 	:global(.ink-btn-primary:hover) {
 		background: var(--accent-hover, #be5524);
+	}
+
+	:global(.ink-btn-primary:disabled) {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* ── Image dialog ── */
+	.ink-file-pick {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		width: 100%;
+		padding: 14px;
+		margin-bottom: 12px;
+		border: 1px dashed var(--border-active, #c4b5a0);
+		border-radius: var(--radius-sm, 5px);
+		background: var(--surface, #f2f0ec);
+		font-family: 'DM Sans', sans-serif;
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--text, #2c2520);
+		cursor: pointer;
+		transition: all 150ms cubic-bezier(0.4, 0, 0.2, 1);
+	}
+
+	.ink-file-pick:hover {
+		border-color: var(--accent, #d4622b);
+		color: var(--accent, #d4622b);
+	}
+
+	.ink-file-list {
+		margin: -6px 0 12px;
+		font-size: 12px;
+		line-height: 1.5;
+		color: var(--text-muted, #8a7e72);
+		word-break: break-word;
+	}
+
+	.ink-modal-hint {
+		margin: 0 0 12px;
+		font-size: 12px;
+		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-modal-or {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin-bottom: 12px;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: var(--text-muted, #8a7e72);
+	}
+
+	.ink-modal-or::before,
+	.ink-modal-or::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: var(--border, #e5e2dc);
 	}
 
 	:global(.ink-btn-ghost) {

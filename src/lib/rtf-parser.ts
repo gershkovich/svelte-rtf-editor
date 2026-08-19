@@ -4,7 +4,8 @@
  * Parses RTF control words and groups into an HTML string.
  * Supports: bold, italic, underline, strikethrough, super/subscript,
  * font size, foreground color (\cf), highlight background color (\highlight),
- * color table, font table, paragraphs, bullet/numbered lists,
+ * color table, font table, paragraphs, bullet/numbered lists, tables,
+ * embedded pictures (\pict PNG/JPEG blips, with captions),
  * Unicode characters, hex escapes, and nested groups.
  *
  * \cb (character background) is silently ignored on import.
@@ -71,6 +72,96 @@ const HIGHLIGHT_COLORS: Record<number, string> = {
 	15: '#808080', // Dark Gray
 	16: '#c0c0c0', // Light Gray
 };
+
+// ── Picture helpers ──
+
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/** 1 px at 96 dpi = 15 twips. */
+const TWIPS_PER_PX = 15;
+
+/** A paragraph made up of nothing but pictures is rendered as a <figure>. */
+const IMAGE_ONLY_PARAGRAPH = /^(?:<img\b[^>]*>\s*)+$/;
+
+/** Hex picture data → base64, without depending on btoa/Buffer. */
+function hexToBase64(hex: string): string {
+	const byteCount = hex.length >> 1;
+	// Pictures run to hundreds of thousands of characters — collect and join
+	// rather than concatenating once per output character.
+	const out: string[] = [];
+	let buffer = 0;
+	let bits = 0;
+
+	for (let i = 0; i < byteCount; i++) {
+		const byte = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+		if (Number.isNaN(byte)) return '';
+		buffer = (buffer << 8) | byte;
+		bits += 8;
+		while (bits >= 6) {
+			bits -= 6;
+			out.push(B64_ALPHABET[(buffer >> bits) & 0x3f]);
+		}
+	}
+
+	if (bits > 0) {
+		out.push(B64_ALPHABET[(buffer << (6 - bits)) & 0x3f]);
+	}
+	while (out.length % 4 !== 0) out.push('=');
+
+	return out.join('');
+}
+
+/**
+ * Render a {\pict …} group as an <img> with a data URL. Returns '' for picture
+ * formats a browser cannot display (metafiles, device-dependent bitmaps).
+ */
+function renderPicture(group: RtfGroup): string {
+	let mime = '';
+	let picw = 0, pich = 0, wgoal = 0, hgoal = 0;
+	let scaleX = 100, scaleY = 100;
+	const hexParts: string[] = [];
+
+	for (const node of group.children) {
+		if (node.type === 'control') {
+			switch (node.word) {
+				case 'pngblip': mime = 'image/png'; break;
+				case 'jpegblip': mime = 'image/jpeg'; break;
+				case 'picw': picw = node.param ?? 0; break;
+				case 'pich': pich = node.param ?? 0; break;
+				case 'picwgoal': wgoal = node.param ?? 0; break;
+				case 'pichgoal': hgoal = node.param ?? 0; break;
+				case 'picscalex': scaleX = node.param ?? 100; break;
+				case 'picscaley': scaleY = node.param ?? 100; break;
+				default: break;
+			}
+		} else if (node.type === 'text') {
+			hexParts.push(node.value);
+		}
+		// Nested groups such as {\*\blipuid …} carry no picture data.
+	}
+
+	if (!mime) return '';
+
+	const hex = hexParts.join('').replace(/[^0-9a-fA-F]/g, '');
+	if (hex.length < 8) return '';
+
+	const base64 = hexToBase64(hex);
+	if (!base64) return '';
+
+	const widthPx = wgoal
+		? Math.round(wgoal / TWIPS_PER_PX)
+		: Math.round((picw * scaleX) / 100);
+	const heightPx = hgoal
+		? Math.round(hgoal / TWIPS_PER_PX)
+		: Math.round((pich * scaleY) / 100);
+
+	const styles: string[] = [];
+	if (widthPx > 0) styles.push(`width:${widthPx}px`);
+	if (widthPx > 0 && heightPx > 0) styles.push('height:auto');
+	const style = styles.length ? ` style="${styles.join(';')}"` : '';
+
+	return `<img src="data:${mime};base64,${base64}"${style} alt="">`;
+}
 
 // ── Tokenizer ──
 
@@ -161,14 +252,17 @@ function tokenize(rtf: string): Token[] {
 			// Skip bare newlines (they're not meaningful in RTF)
 			i++;
 		} else {
-			// Plain text - gather until next special char
-			let text = '';
-			while (i < len && rtf[i] !== '\\' && rtf[i] !== '{' && rtf[i] !== '}' && rtf[i] !== '\r' && rtf[i] !== '\n') {
-				text += rtf[i];
+			// Plain text — slice up to the next special char. Slicing rather than
+			// appending char-by-char keeps embedded picture data (which arrives as
+			// one very long text run) from being quadratic.
+			const start = i;
+			while (i < len) {
+				const c = rtf[i];
+				if (c === '\\' || c === '{' || c === '}' || c === '\r' || c === '\n') break;
 				i++;
 			}
-			if (text) {
-				tokens.push({ type: 'text', value: text });
+			if (i > start) {
+				tokens.push({ type: 'text', value: rtf.substring(start, i) });
 			}
 		}
 	}
@@ -269,10 +363,19 @@ export function rtfToHtml(rtfString: string): string {
 	let colorTable: string[] = [''];
 	let fontTable = new Map<number, string>();
 	let currentParagraph = '';
-	let paragraphs: string[] = [];
-	let paragraphAligns: string[] = [];
+	const paragraphs: string[] = [];
+	const paragraphAligns: string[] = [];
+	const paragraphCaptions: boolean[] = [];
 	let paragraphHasText = false;
 	let paragraphHasListMarker = false;
+	let paragraphIsCaption = false;
+
+	/** Append a finished paragraph, keeping the parallel metadata arrays in sync. */
+	function pushParagraph(html: string, align: string, isCaption = false): void {
+		paragraphs.push(html);
+		paragraphAligns.push(align);
+		paragraphCaptions.push(isCaption);
+	}
 
 	// Paragraph alignment (reset by \pard, affects cells and paragraphs)
 	let currentAlign = 'left';
@@ -382,7 +485,9 @@ export function rtfToHtml(rtfString: string): string {
 	const destinationWords = new Set([
 		'fonttbl', 'colortbl', 'stylesheet', 'info', 'header', 'footer',
 		'headerl', 'headerr', 'headerf', 'footerl', 'footerr', 'footerf',
-		'pict', 'object', 'fldinst', 'xmlnstbl', 'listtable', 'listoverridetable',
+		// \nonshppict duplicates the picture already carried by \*\shppict
+		'nonshppict',
+		'object', 'fldinst', 'xmlnstbl', 'listtable', 'listoverridetable',
 		'rsidtbl', 'generator', 'datafield', 'themedata', 'colorschememapping',
 		'latentstyles', 'datastore', 'mmathPr', 'author', 'operator',
 		'title', 'subject', 'doccomm', 'company', 'category', 'keywords'
@@ -410,26 +515,20 @@ export function rtfToHtml(rtfString: string): string {
 			html += '</tr>';
 		}
 		html += '</table>';
-		paragraphs.push(html);
-		paragraphAligns.push('left');
+		pushParagraph(html, 'left');
 		tableRows = [];
 	}
 
 	function flushParagraph() {
 		flushTable();
 		const trimmed = currentParagraph.trim();
-		if (!trimmed) {
-			if (!paragraphHasListMarker) {
-				paragraphs.push(currentParagraph);
-				paragraphAligns.push(currentAlign);
-			}
-		} else {
-			paragraphs.push(currentParagraph);
-			paragraphAligns.push(currentAlign);
+		if (trimmed || !paragraphHasListMarker) {
+			pushParagraph(currentParagraph, currentAlign, paragraphIsCaption);
 		}
 		currentParagraph = '';
 		paragraphHasText = false;
 		paragraphHasListMarker = false;
+		paragraphIsCaption = false;
 		currentAlign = 'left';
 	}
 
@@ -452,6 +551,16 @@ export function rtfToHtml(rtfString: string): string {
 				}
 
 				const firstCtrl = node.children.find((n) => n.type === 'control') as RtfControl | undefined;
+
+				if (firstCtrl?.word === 'pict') {
+					const img = renderPicture(node);
+					if (img) {
+						currentParagraph += img;
+						paragraphHasText = true;
+					}
+					continue;
+				}
+
 				if (firstCtrl && destinationWords.has(firstCtrl.word)) {
 					continue;
 				}
@@ -459,6 +568,20 @@ export function rtfToHtml(rtfString: string): string {
 				const hasStarDest = node.children.length >= 2 &&
 					node.children[0].type === 'control' && (node.children[0] as RtfControl).word === '*';
 				if (hasStarDest) {
+					const dest = node.children.find(
+						(n) => n.type === 'control' && n.word !== '*'
+					) as RtfControl | undefined;
+
+					// Word wraps pictures in {\*\shppict{\pict …}} — descend into it
+					// rather than dropping the picture with the rest of the ignorables.
+					if (dest?.word === 'shppict') {
+						stateStack.push(cloneState());
+						walk(node.children);
+						stateStack.pop();
+					} else if (dest?.word === 'inkcap') {
+						// Marks the paragraph that follows as a picture caption.
+						paragraphIsCaption = true;
+					}
 					continue;
 				}
 
@@ -625,8 +748,7 @@ export function rtfToHtml(rtfString: string): string {
 						break;
 					case 'page':
 						flushParagraph();
-						paragraphs.push('<hr>');
-						paragraphAligns.push('left');
+						pushParagraph('<hr>', 'left');
 						break;
 					case 'emspace':
 					case 'enspace':
@@ -723,6 +845,26 @@ export function rtfToHtml(rtfString: string): string {
 			rendered.push(trimmed);
 			continue;
 		}
+
+		// A paragraph tagged by {\*\inkcap} is the description of the figure above it.
+		if (paragraphCaptions[i]) {
+			const last = rendered.length - 1;
+			if (last >= 0 && rendered[last].startsWith('<figure') && !rendered[last].includes('<figcaption')) {
+				rendered[last] = rendered[last].replace(
+					'</figure>',
+					`<figcaption>${stripWrappingEm(trimmed)}</figcaption></figure>`
+				);
+				continue;
+			}
+		}
+
+		// A paragraph holding nothing but pictures becomes a figure, so it can carry
+		// a caption and be aligned/resized as a unit in the editor.
+		if (IMAGE_ONLY_PARAGRAPH.test(trimmed)) {
+			const alignAttr = align !== 'left' ? ` style="text-align:${align}"` : '';
+			rendered.push(`<figure${alignAttr}>${trimmed}</figure>`);
+			continue;
+		}
 		const sizeMatch = trimmed.match(/font-size:\s*([\d.]+)pt/);
 		if (sizeMatch) {
 			const pt = parseFloat(sizeMatch[1]);
@@ -745,6 +887,11 @@ export function rtfToHtml(rtfString: string): string {
 
 function stripSizeSpan(html: string): string {
 	return html.replace(/^<span style="[^"]*font-size:[^"]*">([\s\S]*)<\/span>$/, '$1');
+}
+
+/** Captions are written as italic text; <figcaption> supplies its own styling. */
+function stripWrappingEm(html: string): string {
+	return html.replace(/^<em>([\s\S]*)<\/em>$/, '$1');
 }
 
 export function readRtfFile(file: File): Promise<string> {

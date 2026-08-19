@@ -92,4 +92,22 @@
     .rtf-viewer :global(p:last-child) {
         margin-bottom: 0;
     }
+
+    /* Pictures decoded from \pict groups keep their stored width but never
+       overflow the viewer. */
+    .rtf-viewer :global(img) {
+        max-width: 100%;
+        height: auto;
+    }
+
+    .rtf-viewer :global(figure) {
+        margin: 1em 0;
+    }
+
+    .rtf-viewer :global(figcaption) {
+        margin-top: 0.4em;
+        font-size: 0.85em;
+        font-style: italic;
+        color: var(--text-muted, #8a7e72);
+    }
 </style>

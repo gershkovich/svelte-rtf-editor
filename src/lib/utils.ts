@@ -45,6 +45,18 @@ export function htmlToMarkdown(el: HTMLElement): string {
 			case 'img':
 				md += `![${(node as HTMLImageElement).alt || ''}](${(node as HTMLImageElement).src || ''})`;
 				break;
+			case 'figure': {
+				const img = (node as Element).querySelector('img');
+				const caption = ((node as Element).querySelector('figcaption')?.textContent || '').trim();
+				if (img) {
+					md += `![${img.getAttribute('alt') || caption}](${img.getAttribute('src') || ''})\n\n`;
+					if (caption) md += `*${caption}*\n\n`;
+				}
+				break;
+			}
+			case 'figcaption':
+				// Rendered by the enclosing <figure>.
+				break;
 			case 'blockquote':
 				md += `> ${inner.trim()}\n\n`;
 				break;
