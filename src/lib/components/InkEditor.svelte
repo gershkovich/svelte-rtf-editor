@@ -25,7 +25,8 @@
 	 *                   about 1 MB of document per image).
 	 *
 	 * Events (callback props):
-	 *   onchange      — Fires on content change with { html, text, wordCount, charCount }.
+	 *   onchange      — Fires on content change with
+	 *                   { html, text, wordCount, charCount, estimatedRtfBytes }.
 	 *   onsave        — Fires on auto-save or Ctrl+S with { html }.
 	 *   onimport      — Fires after a successful RTF import with { html }.
 	 *
@@ -35,6 +36,7 @@
 	 *   setHTML(html)  — Replaces editor content with the given HTML.
 	 *   getMarkdown()  — Returns Markdown conversion of current content.
 	 *   getRTF()       — Returns RTF conversion of current content.
+	 *   getRtfSize()   — Returns the exact byte size of that RTF.
 	 *   clear()        — Clears the editor (no confirm dialog).
 	 *   focus()        — Focuses the editor.
 	 *   exportFile(format) — Downloads as 'html', 'md', or 'rtf'.
@@ -47,7 +49,7 @@
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
 	import { readRtfFile } from '../rtf-parser.js';
-	import { htmlToRtf } from '../rtf-writer.js';
+	import { htmlToRtf, estimateRtfBytes } from '../rtf-writer.js';
 	import {
 		fileToImageSrc,
 		urlToImageSrc,
@@ -64,6 +66,11 @@
 		text: string;
 		wordCount: number;
 		charCount: number;
+		/**
+		 * Approximate size of this document as RTF. Pictures dominate it and are
+		 * counted exactly; see getRtfSize() for the precise figure.
+		 */
+		estimatedRtfBytes: number;
 	}
 
 	interface Props {
@@ -164,6 +171,18 @@
 	export function getRTF(): string {
 		if (!editorEl) return '';
 		return htmlToRtf(editorEl);
+	}
+
+	/**
+	 * Exact size of the RTF this document produces, in bytes. The output is
+	 * ASCII, so this is also its character count — the figure a transport with a
+	 * field-length limit cares about. Does the full conversion, including
+	 * hex-encoding every picture, so call it when a number is needed rather than
+	 * on every keystroke; the onchange payload carries an estimate for that.
+	 */
+	export function getRtfSize(): number {
+		if (!editorEl) return 0;
+		return htmlToRtf(editorEl).length;
 	}
 
 	export function clear(): void {
@@ -280,7 +299,8 @@
 			html: editorEl?.innerHTML || '',
 			text: editorEl?.innerText || '',
 			wordCount,
-			charCount
+			charCount,
+			estimatedRtfBytes: editorEl ? estimateRtfBytes(editorEl) : 0
 		});
 	}
 

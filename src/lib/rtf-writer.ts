@@ -291,6 +291,71 @@ function alignControl(el: HTMLElement): string {
 	return '\\ql';
 }
 
+/** Decoded byte length of a base64 payload, without decoding it. */
+function base64ByteLength(base64: string): number {
+	const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+	return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+/** Bytes of RTF header, font table and colour table that precede the body. */
+const RTF_PREAMBLE_BYTES = 200;
+
+/** Control words wrapping one \pict group. */
+const PICTURE_OVERHEAD_BYTES = 80;
+
+/**
+ * Control-word bytes the writer wraps around each kind of element — the opening
+ * and closing runs measured from walkChildren. Anything not listed costs
+ * nothing of its own beyond the text it contains.
+ */
+const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
+	p: 14,
+	div: 14,
+	h1: 32,
+	h2: 32,
+	h3: 32,
+	li: 35,
+	blockquote: 22,
+	pre: 27,
+	figure: 15,
+	figcaption: 29,
+	tr: 45,
+	td: 55,
+	th: 69 // a header cell also carries \clbrdrb\brdrs
+};
+
+/**
+ * Size htmlToRtf would produce, without doing the conversion.
+ *
+ * Useful for a live indicator — the exact figure requires hex-encoding every
+ * picture, which is too much work to repeat on each keystroke.
+ *
+ * Picture data, which dominates any document that has one, is counted exactly:
+ * two characters per byte. Everything else is approximated per element, which
+ * puts the error at a bounded number of bytes rather than a proportion — so it
+ * is negligible precisely when the number matters, and never more than a few
+ * hundred bytes even when it does not. The output is ASCII, so bytes and
+ * characters are the same number.
+ */
+export function estimateRtfBytes(editorEl: HTMLElement): number {
+	let total = RTF_PREAMBLE_BYTES;
+
+	for (const img of Array.from(editorEl.querySelectorAll('img'))) {
+		const src = img.getAttribute('src') || '';
+		const comma = src.indexOf(',');
+		// A picture that cannot be embedded costs only its placeholder text.
+		if (!src.startsWith('data:image/') || comma < 0) continue;
+		total += base64ByteLength(src.slice(comma + 1)) * 2 + PICTURE_OVERHEAD_BYTES;
+	}
+
+	total += (editorEl.textContent || '').length;
+	for (const el of Array.from(editorEl.querySelectorAll('*'))) {
+		total += BLOCK_OVERHEAD_BYTES[el.tagName.toLowerCase()] ?? 0;
+	}
+
+	return total;
+}
+
 // ── DOM walker / RTF generator ──
 
 export function htmlToRtf(editorEl: HTMLElement): string {

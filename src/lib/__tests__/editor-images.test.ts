@@ -15,6 +15,7 @@ interface EditorApi {
 	getHTML: () => string;
 	setHTML: (html: string) => void;
 	getRTF: () => string;
+	getRtfSize: () => number;
 	getMarkdown: () => string;
 }
 
@@ -299,6 +300,52 @@ describe('InkEditor image selection', () => {
 
 		expect(editor.getHTML()).not.toContain('ink-img-frame');
 		expect(editor.getHTML()).not.toContain('contenteditable');
+	});
+});
+
+describe('InkEditor size reporting', () => {
+	it('reports the exact byte size of the RTF', async () => {
+		pasteFiles([pngFile('scan.png')]);
+		await settle();
+
+		expect(editor.getRtfSize()).toBe(editor.getRTF().length);
+	});
+
+	it('grows by twice the picture bytes when an image is added', async () => {
+		const before = editor.getRtfSize();
+		pasteFiles([pngFile('scan.png')]);
+		await settle();
+
+		const growth = editor.getRtfSize() - before;
+		const pictureBytes = 125; // the 8x4 PNG fixture
+		expect(growth).toBeGreaterThanOrEqual(pictureBytes * 2);
+	});
+
+	it('reports an estimate on every change', async () => {
+		const seen: number[] = [];
+		const host2 = document.createElement('div');
+		document.body.appendChild(host2);
+		const ed = mount(InkEditor, {
+			target: host2,
+			props: {
+				autosave: false,
+				content: '<p>Report body</p>',
+				onchange: (payload: { estimatedRtfBytes: number }) => seen.push(payload.estimatedRtfBytes)
+			}
+		}) as unknown as EditorApi;
+		flushSync();
+
+		const content = host2.querySelector('.ink-content') as HTMLElement;
+		content.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+
+		expect(seen.length).toBeGreaterThan(0);
+		expect(seen[seen.length - 1]).toBeGreaterThan(0);
+		// Close to the real thing for a text-only document.
+		expect(Math.abs(seen[seen.length - 1] - ed.getRtfSize())).toBeLessThan(150);
+
+		unmount(ed as never);
+		host2.remove();
 	});
 });
 

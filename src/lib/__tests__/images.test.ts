@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { rtfToHtml } from '../rtf-parser.js';
-import { htmlToRtf } from '../rtf-writer.js';
+import { htmlToRtf, estimateRtfBytes } from '../rtf-writer.js';
 import { htmlToMarkdown } from '../utils.js';
 import {
 	isSafeImageUrl,
@@ -334,6 +334,59 @@ describe('mislabelled images', () => {
 		const rtf = htmlToRtf(htmlEl(`<figure><img src="${WEBP_AS_PNG}" alt="logo"></figure>`));
 		expect(rtf).not.toContain('\\pict');
 		expect(rtf).toContain('[Image: logo]');
+	});
+});
+
+// ── Size reporting ────────────────────────────────────────────────────────────
+
+describe('estimateRtfBytes', () => {
+	/** How far the estimate strays from the real conversion, in bytes. */
+	function drift(html: string): number {
+		const el = htmlEl(html);
+		return Math.abs(estimateRtfBytes(el) - htmlToRtf(el).length);
+	}
+
+	// The estimate approximates per element, so its error is bounded in bytes
+	// rather than in percent — negligible against a document carrying pictures.
+	const BOUND = 150;
+
+	it('tracks the real conversion for text, headings, quotes and code', () => {
+		expect(drift('<p>Findings.</p><p>More.</p>')).toBeLessThan(BOUND);
+		expect(drift('<h1>A</h1><h2>B</h2><h3>C</h3><blockquote>q</blockquote><pre>code</pre>'))
+			.toBeLessThan(BOUND);
+	});
+
+	it('tracks the real conversion for tables and lists', () => {
+		expect(
+			drift(
+				'<h1>Report</h1><p>Findings.</p>' +
+					'<table><tr><th>Organ</th><th>Weight</th></tr><tr><td>Heart</td><td>620 g</td></tr></table>' +
+					'<ul><li>one</li><li>two</li></ul>'
+			)
+		).toBeLessThan(BOUND);
+	});
+
+	it('tracks the real conversion for documents with pictures', () => {
+		expect(
+			drift(`<p>Findings.</p><figure><img src="${PNG_SRC}"><figcaption>A picture</figcaption></figure>`)
+		).toBeLessThan(BOUND);
+		expect(drift(`<figure><img src="${PNG_SRC}"></figure><figure><img src="${JPEG_SRC}"></figure>`))
+			.toBeLessThan(BOUND);
+	});
+
+	it('counts picture data exactly — two characters per byte', () => {
+		const withImage = estimateRtfBytes(htmlEl(`<figure><img src="${PNG_SRC}"></figure>`));
+		const without = estimateRtfBytes(htmlEl('<figure></figure>'));
+		expect(withImage - without).toBeGreaterThanOrEqual(dataUrlByteLength(PNG_SRC) * 2);
+	});
+
+	it('does not count pictures that will not be embedded', () => {
+		expect(estimateRtfBytes(htmlEl('<figure><img src="https://example.com/a.png"></figure>')))
+			.toBeLessThan(1000);
+	});
+
+	it('is a plain number for an empty document', () => {
+		expect(estimateRtfBytes(htmlEl(''))).toBeGreaterThan(0);
 	});
 });
 

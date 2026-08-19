@@ -133,7 +133,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 
 | Prop       | Payload                                      | Description                                 |
 |------------|----------------------------------------------|---------------------------------------------|
-| `onchange` | `{ html, text, wordCount, charCount }`       | Fired on every content change               |
+| `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change |
 | `onsave`   | `{ html }`                                   | Fired on auto-save or `Ctrl+S`              |
 | `onimport` | `{ html }`                                   | Fired after a successful RTF file import    |
 
@@ -145,6 +145,7 @@ editor.getText()          // → string  — plain text (no tags)
 editor.setHTML(html)      // → void    — replace content programmatically
 editor.getMarkdown()      // → string  — Markdown conversion of content
 editor.getRTF()           // → string  — RTF conversion of content
+editor.getRtfSize()       // → number  — exact byte size of that RTF
 editor.clear()            // → void    — clear the editor
 editor.focus()            // → void    — focus the editor
 editor.exportFile(format) // → void    — download as 'html' | 'md' | 'rtf'
@@ -156,13 +157,16 @@ editor.importRtf()        // → void    — open the file picker to import .rtf
 ## Utility functions
 
 ```ts
-import { rtfToHtml, htmlToRtf, readRtfFile, htmlToMarkdown, downloadFile } from 'svelte-rtf-editor';
+import {
+  rtfToHtml, htmlToRtf, estimateRtfBytes, readRtfFile, htmlToMarkdown, downloadFile
+} from 'svelte-rtf-editor';
 ```
 
 | Function                              | Description                                        |
 |---------------------------------------|----------------------------------------------------|
 | `rtfToHtml(rtf: string): string`      | Parse an RTF string and return an HTML string      |
 | `htmlToRtf(html: string): string`     | Convert an HTML string to RTF                      |
+| `estimateRtfBytes(el: HTMLElement): number` | Approximate RTF size of a DOM element without converting it |
 | `readRtfFile(file: File): Promise<string>` | Read a `.rtf` File object and return HTML     |
 | `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown   |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |
@@ -239,6 +243,27 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
 - **Sized for the pipe.** `maxImageBytes` bounds each picture, and the payload is roughly twice that in hex. Lower it to fit a field-length limit.
 
 Some receivers require the whole field on one unbroken line when it carries an image — that is why the writer emits no line breaks at all, rather than wrapping picture data the way many RTF writers do.
+
+### Knowing how big a document is
+
+The transport cares about the size of the finished RTF, and pictures make that unpredictable. Two ways to read it:
+
+```svelte
+<script>
+  let editor;
+  let size = 0;
+</script>
+
+<!-- an estimate on every change, cheap enough for a live indicator -->
+<InkEditor bind:this={editor} onchange={({ estimatedRtfBytes }) => (size = estimatedRtfBytes)} />
+
+<!-- the exact figure, when it is time to send -->
+<button onclick={() => console.log(editor.getRtfSize())}>Check size</button>
+```
+
+`getRtfSize()` does the full conversion — call it when a decision depends on it, not on every keystroke. `estimatedRtfBytes` counts picture data exactly (two characters per byte, which is what dominates) and approximates the rest, leaving an error of a few hundred bytes at most. The output is ASCII, so bytes and characters are the same number.
+
+The library reports the size and stops there; whether an oversized document may be sent is the host application's decision.
 
 Escaping for the carrying format is the integration layer's job, not the editor's. For HL7 v2 that means escaping the whole string's delimiters — `\` → `\E\`, `|` → `\F\`, `^` → `\S\`, `&` → `\T\`, `~` → `\R\` — because ordinary typed text ("Smith & Jones") reaches the RTF unescaped.
 
