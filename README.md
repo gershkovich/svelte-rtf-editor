@@ -232,6 +232,12 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Ctrl+K`   | Insert link       |
 | `Ctrl+S`   | Save (fires `onsave`) |
 | `Backspace` / `Delete` | Remove the selected image |
+| `Tab`      | Insert a tab (sent to RTF as `\tab`); two spaces in a code block |
+| `Shift+Tab` | Remove one tab from the start of the line |
+| `Esc`, then `Tab` / `Shift+Tab` | Move focus out of the editor |
+
+Tab stays in the editor so a line can be indented. To leave the editor from the keyboard, press
+`Esc` first. A readonly editor leaves Tab to the browser.
 
 ---
 

@@ -747,12 +747,123 @@
 			return;
 		}
 
-		if (e.key === 'Tab') {
-			const sel = window.getSelection();
-			if (sel?.anchorNode?.parentElement?.closest?.('pre')) {
-				e.preventDefault();
-				document.execCommand('insertHTML', false, '  ');
+		if (e.key === 'Tab') handleTab(e);
+		else tabLeavesEditor = e.key === 'Escape';
+	}
+
+	// ── Tab ──
+	// Tab types a tab, as in a word processor, so a pathologist can indent a line; before this it
+	// left the editor for the next control on the page. Escape, then Tab or Shift+Tab, still moves
+	// focus on, so the keyboard is never trapped here. A readonly editor keeps the browser's Tab.
+	let tabLeavesEditor = false;
+
+	function handleTab(e: KeyboardEvent): void {
+		if (readonly || e.ctrlKey || e.metaKey || e.altKey) return;
+		if (tabLeavesEditor) {
+			tabLeavesEditor = false;
+			return;
+		}
+		const sel = window.getSelection();
+		if (!sel || !sel.anchorNode || !editorEl?.contains(sel.anchorNode)) return;
+		e.preventDefault();
+
+		if (sel.anchorNode.parentElement?.closest?.('pre')) {
+			if (!e.shiftKey) document.execCommand('insertText', false, '  ');
+			return;
+		}
+		if (!e.shiftKey) {
+			insertTab(sel);
+			return;
+		}
+		// Shift+Tab takes one tab off the start of the line the caret is on, wherever the caret is
+		// on it, as a word processor outdents.
+		if (sel.isCollapsed) removeLeadingTab(sel);
+	}
+
+	/**
+	 * Type a tab, on the undo stack. Chromium and WebKit wrap it in <span style="white-space:pre">,
+	 * which the RTF writer sends as \tab. Firefox types spaces instead, so there the typing is
+	 * undone and the same span is inserted, with the caret put after it so the text that follows
+	 * is not typed inside it.
+	 */
+	function insertTab(sel: Selection): void {
+		document.execCommand('insertText', false, '\t');
+		if (textBeforeCaret(sel).endsWith('\t')) return;
+		document.execCommand('undo');
+		document.execCommand('insertHTML', false, '<span style="white-space:pre">\t</span>');
+		const node = sel.anchorNode;
+		const span = (node instanceof Element ? node : node?.parentElement)?.closest('span');
+		if (span && span.textContent === '\t' && editorEl?.contains(span)) {
+			const after = document.createRange();
+			after.setStartAfter(span);
+			after.collapse(true);
+			sel.removeAllRanges();
+			sel.addRange(after);
+		}
+	}
+
+	function textBeforeCaret(sel: Selection): string {
+		if (!editorEl || sel.rangeCount === 0) return '';
+		const range = sel.getRangeAt(0).cloneRange();
+		range.collapse(true);
+		range.setStart(editorEl, 0);
+		return range.toString();
+	}
+
+	const LINE_BLOCKS = 'p, div, li, td, th, h1, h2, h3, h4, h5, h6, blockquote';
+
+	/** The first tab of the caret's line, if the line starts with one: its text node and offset. */
+	function leadingTab(sel: Selection): { node: Text; offset: number } | null {
+		if (!editorEl || !sel.anchorNode) return null;
+		const anchorEl = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode.parentElement;
+		const found = anchorEl?.closest(LINE_BLOCKS);
+		const block = found && editorEl.contains(found) && found !== editorEl ? found : editorEl;
+		const caret = sel.getRangeAt(0);
+
+		// Walk the block's text and line breaks up to the caret. A <br>, or text in a different
+		// block from the text before it, starts a new line.
+		const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+		let lineStart: { node: Text; offset: number } | null = null;
+		let lineHasText = false;
+		let lastBlock: Element | null = null;
+		for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+			if (caret.comparePoint(n, 0) > 0) break;
+			if (n.nodeName === 'BR') {
+				lineStart = null;
+				lineHasText = false;
+				continue;
 			}
+			if (n.nodeType !== Node.TEXT_NODE) continue;
+			const textBlock = n.parentElement?.closest(LINE_BLOCKS) ?? block;
+			if (textBlock !== lastBlock) {
+				lastBlock = textBlock;
+				lineStart = null;
+				lineHasText = false;
+			}
+			if (!lineHasText) {
+				const text = (n as Text).data;
+				if (text.length === 0) continue;
+				lineHasText = true;
+				lineStart = text[0] === '\t' ? { node: n as Text, offset: 0 } : null;
+			}
+		}
+		return lineStart;
+	}
+
+	function removeLeadingTab(sel: Selection): void {
+		const tab = leadingTab(sel);
+		if (!tab) return;
+		const caret = sel.getRangeAt(0).cloneRange();
+		const range = document.createRange();
+		range.setStart(tab.node, tab.offset);
+		range.setEnd(tab.node, tab.offset + 1);
+		// Delete through execCommand so Ctrl+Z puts the tab back, then return the caret.
+		sel.removeAllRanges();
+		sel.addRange(range);
+		document.execCommand('delete');
+		if (caret.startContainer.isConnected) {
+			sel.removeAllRanges();
+			sel.addRange(caret);
 		}
 	}
 
@@ -848,6 +959,8 @@
 			onmouseup={updateToolbarState}
 			onkeyup={updateToolbarState}
 			onkeydown={handleKeydown}
+			onmousedown={() => (tabLeavesEditor = false)}
+			onblur={() => (tabLeavesEditor = false)}
 			onpaste={handlePaste}
 			onclick={handleContentClick}
 			ondragover={handleDragOver}

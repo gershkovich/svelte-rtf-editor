@@ -164,6 +164,29 @@ function escapeRtf(text: string): string {
 	return out;
 }
 
+/**
+ * Text with its tabs written as RTF's \tab when the screen shows them as tabs. Any other tab is
+ * passed through as before (1.5.3), unchanged by this.
+ */
+function escapeTabs(text: string, tabsShow: boolean): string {
+	if (!tabsShow || !text.includes('\t')) return escapeRtf(text);
+	return text.split('\t').map(escapeRtf).join('\\tab ');
+}
+
+/**
+ * Whether a text node's tabs show as tabs: it sits inside an element whose inline white-space
+ * keeps them. That is what the editor's Tab key inserts (Chromium's
+ * <span style="white-space:pre">\t</span>) and Safari's older Apple-tab-span.
+ */
+function showsTabs(node: Node): boolean {
+	for (let el = node.parentElement; el; el = el.parentElement) {
+		const ws = el.style?.whiteSpace;
+		if (ws) return ws === 'pre' || ws === 'pre-wrap' || ws === 'break-spaces';
+		if (el.classList?.contains('Apple-tab-span')) return true;
+	}
+	return false;
+}
+
 // ── Image helpers ──
 
 const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -434,6 +457,9 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	// Text at its escaped length: a character outside ASCII costs its \uN\'3f escape,
 	// six to nine bytes rather than one.
 	total += escapeRtf(editorEl.textContent || '').length;
+	// A tab that shows is written as "\tab " (5) and counted as 1; counting every tab that way
+	// can only overestimate.
+	total += ((editorEl.textContent || '').match(/\t/g)?.length ?? 0) * 4;
 	for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 		const tag = el.tagName.toLowerCase();
 		total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
@@ -635,14 +661,15 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// Whitespace between two blocks (the newline in "</p>\n<p>") shows as
 			// nothing in a browser. Written out, it became a space at the start of
 			// the next paragraph.
-			if (!ctx.inPre && COLLAPSIBLE_WHITESPACE.test(text) && besideBlock(node)) continue;
+			const tabsShow = ctx.inPre || showsTabs(node);
+			if (!tabsShow && COLLAPSIBLE_WHITESPACE.test(text) && besideBlock(node)) continue;
 			if (ctx.inPre) {
 				// Split before escaping — escapeRtf collapses newlines, so the
 				// line structure a <pre> block depends on has to become \line
 				// first. Handles CR, LF and CRLF alike.
-				rtf += text.split(/\r\n|\r|\n/).map(escapeRtf).join('\\line ');
+				rtf += text.split(/\r\n|\r|\n/).map((line) => escapeTabs(line, true)).join('\\line ');
 			} else {
-				rtf += escapeRtf(text);
+				rtf += escapeTabs(text, tabsShow);
 			}
 			continue;
 		}
