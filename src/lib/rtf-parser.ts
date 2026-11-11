@@ -96,6 +96,12 @@ const HEX_NIBBLE = (() => {
 	return table;
 })();
 
+/** A tab as the editor's Tab key inserts it (Chromium's own shape for a typed tab). */
+const TAB_HTML = '<span style="white-space:pre">\t</span>';
+
+/** A paragraph so far holding only a list marker: a bullet, or a number and a period. */
+const LIST_MARKER = /^(?:<[^>]+>)*\s*(?:\u2022|\d+\.)\s*(?:<\/[^>]+>)*$/;
+
 /** Hex picture data → base64, without depending on btoa/Buffer. */
 function hexToBase64(hex: string): string {
 	const byteCount = hex.length >> 1;
@@ -756,7 +762,11 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						paragraphHasText = true;
 						break;
 					case 'tab':
-						currentParagraph += '&emsp;';
+						// A real tab, in the shape the editor's Tab key inserts, so it shows as
+						// one and is written back as \tab (an em space came back as \u8195).
+						// After a list marker ("\bullet\tab", "1.\tab") the gap stays an em
+						// space: lists are read as plain lines, and a full tab there is too wide.
+						currentParagraph += LIST_MARKER.test(currentParagraph) ? '&emsp;' : TAB_HTML;
 						paragraphHasText = true;
 						break;
 					case 'pntext':
