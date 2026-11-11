@@ -1,6 +1,6 @@
 {
 	"name": "svelte-rtf-editor",
-	"version": "1.5.3",
+	"version": "1.6.0",
 	"description": "RTF viewer and rich-text editor components for Svelte 5",
 	"license": "MIT",
 	"homepage": "https://github.com/jcelano/svelte-rtf-editor#readme",
