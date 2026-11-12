@@ -472,6 +472,12 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// A paragraph a block writes inside a table cell also carries \intbl (6). A list
 		// writes one paragraph per item, so the item is counted, not the list.
 		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
+		// A paragraph's own formatting costs its controls, and a blank line after one restates
+		// \pard (5); counting both on every such paragraph can only overestimate.
+		if ((tag === 'p' || tag === 'div') && !el.closest('td, th')) {
+			const para = paragraphControls(el);
+			if (para || followsFormattedParagraph(el)) total += para.length + 6;
+		}
 		// Every cell in a row with a header cell carries \clbrdrb\brdrs.
 		if (tag === 'td' && el.parentElement?.querySelector(':scope > th')) total += 14;
 		// A figure with a caption and no picture writes its caption twice.
@@ -724,17 +730,22 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 						: `${restate}${inner}\\par `;
 					break;
 				}
+				// The paragraph's own indents, spacing, keep-with-next and tab stops, if it sets any.
+				const para = paragraphControls(el);
 				// A <p> with no children or only a single <br> is a blank line —
 				// emit a bare \par rather than \pard \line\par, which adds an extra line.
+				// A bare \par keeps the formatting of the paragraph before it, so a blank line after a
+				// formatted paragraph, or with formatting of its own, restates \pard.
 				if (isBlankLine(el)) {
-					rtf += afterLooseText ? '\\par \\par ' : '\\par ';
+					const reset = para || followsFormattedParagraph(el) ? `\\pard${para} ` : '';
+					rtf += `${afterLooseText ? '\\par ' : ''}${reset}\\par `;
 					break;
 				}
 				const colorIdx = colorIndexOf(el, ctx);
 				const inlineRtf = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
 				const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
 				const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
-				rtf += `${afterLooseText ? '\\par ' : ''}\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
+				rtf += `${afterLooseText ? '\\par ' : ''}\\pard${para} ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
 				break;
 			}
 
@@ -986,6 +997,67 @@ function withoutTrailingPar(content: string): string {
 	let slashes = 0;
 	for (let i = content.length - 6; i >= 0 && content[i] === '\\'; i--) slashes++;
 	return slashes % 2 === 0 ? content.slice(0, -5) : content;
+}
+
+// ── Paragraph formatting ──
+
+const TWIPS_PER_UNIT: Record<string, number> = { in: 1440, pt: 20, cm: 1440 / 2.54, px: TWIPS_PER_PX };
+
+/**
+ * A CSS length in whole twips, or null when it cannot be read: a unit other than in, pt, cm or px,
+ * a percentage, a keyword, or a negative value where one is not allowed.
+ */
+function lengthTwips(value: string | null | undefined, allowNegative = false): number | null {
+	const m = (value ?? '').trim().match(/^(-?\d+(?:\.\d+)?|-?\.\d+)(in|pt|cm|px)$/);
+	if (!m) return null;
+	const twips = Math.round(parseFloat(m[1]) * TWIPS_PER_UNIT[m[2]]);
+	if (twips < 0 && !allowNegative) return null;
+	return twips;
+}
+
+/**
+ * The RTF paragraph controls for a <p> or <div>'s own formatting, or '' when it sets none:
+ *
+ * | HTML                                             | RTF               |
+ * |--------------------------------------------------|-------------------|
+ * | data-rtf-tab-stops="1.75in" (comma-separated)    | \tx2520           |
+ * | margin-left: 1.75in                              | \li2520           |
+ * | text-indent: -1.75in                             | \fi-2520          |
+ * | margin-top: 5pt / margin-bottom: 5pt             | \sb100 / \sa100   |
+ * | break-after: avoid, or page-break-after: avoid   | \keepn            |
+ *
+ * CSS has no absolute tab stop, hence the data- attribute. A value that cannot be read writes
+ * nothing, and so does zero, which is what \pard already sets. Not written inside a table cell,
+ * where the cell declares its own paragraph.
+ */
+function paragraphControls(el: HTMLElement): string {
+	let out = '';
+	const stops = (el.getAttribute('data-rtf-tab-stops') ?? '')
+		.split(',')
+		.map((v) => lengthTwips(v))
+		.filter((t): t is number => t != null && t > 0);
+	for (const t of Array.from(new Set(stops)).sort((a, b) => a - b)) out += `\\tx${t}`;
+	const style = el.style;
+	if (!style) return out;
+	const li = lengthTwips(style.marginLeft);
+	if (li) out += `\\li${li}`;
+	const fi = lengthTwips(style.textIndent, true);
+	if (fi) out += `\\fi${fi}`;
+	const sb = lengthTwips(style.marginTop);
+	if (sb) out += `\\sb${sb}`;
+	const sa = lengthTwips(style.marginBottom);
+	if (sa) out += `\\sa${sa}`;
+	const keep = (prop: string) => style.getPropertyValue(prop).trim() === 'avoid';
+	if (keep('break-after') || keep('page-break-after')) out += '\\keepn';
+	return out;
+}
+
+/** Whether the nearest element before this one is a <p> or <div> with formatting of its own. */
+function followsFormattedParagraph(el: HTMLElement): boolean {
+	const prev = el.previousElementSibling as HTMLElement | null;
+	if (!prev) return false;
+	const tag = prev.tagName.toLowerCase();
+	return (tag === 'p' || tag === 'div') && paragraphControls(prev) !== '';
 }
 
 /** \intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
