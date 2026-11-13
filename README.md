@@ -214,9 +214,10 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 | `break-after: avoid` or `page-break-after: avoid` | `\keepn` |
 | `data-rtf-tab-stops="1.75in"` (comma-separated) | `\tx2520` |
 
-- Lengths in `in`, `pt`, `cm` or `px` (15 twips per px), rounded to whole twips. Only `text-indent` may be negative. A value the writer cannot read, or zero, writes nothing.
+- Lengths in `in`, `pt`, `cm`, `mm` or `px` (15 twips per px), rounded to whole twips. Only `text-indent` may be negative. A value the writer cannot read, or zero, writes nothing.
 - CSS has no absolute tab stop, hence the `data-` attribute. On screen, `white-space: pre-wrap; tab-size: 1.75in` with that hanging indent puts the browser's first stop at the same place, and `pre-wrap` makes the writer send the tab as `\tab`.
-- Inside a table cell the cell declares its own paragraph, and these are not written.
+- `margin-left` adds to the indent of the blocks around the paragraph (an indent pasted from a browser, or a `<div>` with a margin that holds paragraphs), and is written as one `\li`.
+- Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not spacing, tab stops or keep-with-next.
 - `rtfToHtml` does not yet read them back, so `RtfViewer` shows such a document without its indents.
 
 ## Theming
@@ -249,9 +250,13 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Ctrl+K`   | Insert link       |
 | `Ctrl+S`   | Save (fires `onsave`) |
 | `Backspace` / `Delete` | Remove the selected image |
-| `Tab`      | Insert a tab (sent to RTF as `\tab`); two spaces in a code block |
-| `Shift+Tab` | Remove one tab from the start of the line |
+| `Ctrl+]` / `Cmd+]` | Increase indent of the selected paragraphs by 0.5 in (RTF `\li720` per step) |
+| `Ctrl+[` / `Cmd+[` | Decrease indent |
+| `Tab`      | Insert a tab (sent to RTF as `\tab`); two spaces in a code block. With several lines selected, increase their indent |
+| `Shift+Tab` | Remove one tab from the start of the line. With several lines selected, decrease their indent |
 | `Esc`, then `Tab` / `Shift+Tab` | Move focus out of the editor |
+
+The toolbar's Increase indent and Decrease indent buttons do the same as `Ctrl+]` and `Ctrl+[`. Undo reverses an indent step until the next edit. Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
 
 Tab stays in the editor so a line can be indented. To leave the editor from the keyboard, press
 `Esc` first. A readonly editor leaves Tab to the browser.

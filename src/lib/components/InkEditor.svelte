@@ -180,6 +180,7 @@
 	export function setHTML(html: string): void {
 		if (editorEl) {
 			selectedImage = null;
+			indentUndo = [];
 			editorEl.innerHTML = html;
 			updateCounts();
 			if (autosave) scheduleAutoSave();
@@ -211,6 +212,7 @@
 	export function clear(): void {
 		if (editorEl) {
 			selectedImage = null;
+			indentUndo = [];
 			editorEl.innerHTML = '<p></p>';
 			try { localStorage.removeItem(storageKey); } catch (e) {}
 			updateCounts();
@@ -276,8 +278,197 @@
 			const sel = window.getSelection();
 			if (!sel || sel.isCollapsed) return;
 		}
+		if (cmd === 'indent' || cmd === 'outdent') {
+			indentBlocks(cmd);
+			return;
+		}
+		if (cmd === 'undo' && undoIndent()) return;
 		document.execCommand(cmd, false, value ?? undefined);
 		updateToolbarState();
+	}
+
+	// ── Indent ──
+	// Indent and Outdent move the paragraphs the selection touches by half an inch (48px, written
+	// to RTF as \li720) per press, as margin-left on each paragraph. The browser's own commands are
+	// not used: Chromium's Outdent strips the first paragraph to loose text ("one<br>"), and the
+	// browsers disagree on the markup. Only a style changes (and a line of loose text gets a
+	// paragraph of its own), so earlier typing stays undoable; the editor keeps its own undo for
+	// these steps until the next edit.
+	const INDENT_STEP_PX = 48;
+	const INDENT_TARGETS = 'p, div, h1, h2, h3, h4, h5, h6, pre, ul, ol, blockquote, figure';
+	/** CSS lengths a margin is written in, in px. */
+	const PX_PER_UNIT: Record<string, number> = { px: 1, pt: 96 / 72, in: 96, cm: 96 / 2.54, mm: 96 / 25.4 };
+
+	/** One block an Indent or Outdent changed, and how to put it back. */
+	interface IndentChange {
+		el: HTMLElement;
+		before: string | null;
+		after: string | null;
+		/** The block is a paragraph this step made around loose text, and the <br> that ended it. */
+		wrapped: { br: HTMLBRElement | null } | null;
+	}
+	let indentUndo: IndentChange[][] = [];
+
+	function indentBlocks(cmd: 'indent' | 'outdent'): void {
+		if (readonly || !editorEl) return;
+		editorEl.focus();
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !editorEl.contains(sel.anchorNode)) return;
+		const { anchorNode, anchorOffset, focusNode, focusOffset } = sel;
+		const wrapped = new Map<HTMLElement, HTMLBRElement | null>();
+		const targets = indentTargets(sel.getRangeAt(0), cmd, wrapped);
+		// Wrapping loose text moves the selected text nodes, which collapses the selection; put it
+		// back so the next press moves the same lines.
+		if (wrapped.size > 0 && anchorNode instanceof Text && focusNode instanceof Text && anchorNode.isConnected && focusNode.isConnected) {
+			sel.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+		}
+		const step: IndentChange[] = [];
+		for (const el of targets) {
+			const current = marginLeftPx(el);
+			const next = cmd === 'indent' ? current + INDENT_STEP_PX : Math.max(0, current - INDENT_STEP_PX);
+			if (next === current) continue;
+			const before = el.getAttribute('style');
+			el.style.marginLeft = next > 0 ? `${Math.round(next * 100) / 100}px` : '';
+			if (!el.getAttribute('style')) el.removeAttribute('style');
+			const br = wrapped.get(el);
+			step.push({ el, before, after: el.getAttribute('style'), wrapped: br === undefined ? null : { br } });
+		}
+		if (step.length === 0) return;
+		indentUndo.push(step);
+		indentChanged();
+	}
+
+	/** An element's left margin in px: its own, from the inline style, or 0. */
+	function marginLeftPx(el: HTMLElement): number {
+		const value = el.style.marginLeft.trim().toLowerCase();
+		if (!value) return 0;
+		const m = /^(-?\d*\.?\d+)(px|pt|in|cm|mm)$/.exec(value);
+		const px = m ? parseFloat(m[1]) * PX_PER_UNIT[m[2]] : parseFloat(getComputedStyle(el).marginLeft);
+		return Math.max(0, px || 0);
+	}
+
+	/**
+	 * The indent shape Chromium, WebKit and Gmail paste: a blockquote with a left margin and
+	 * border: none. A quotation keeps its border. The RTF writer reads it the same way.
+	 */
+	function isIndentBlockquote(el: Element): el is HTMLElement {
+		return el instanceof HTMLElement && el.tagName === 'BLOCKQUOTE' && el.style.borderLeftStyle === 'none';
+	}
+
+	/** Undo the last Indent or Outdent, if nothing has changed since. */
+	function undoIndent(): boolean {
+		const step = indentUndo.pop();
+		if (!step) return false;
+		// Content replaced or edited since (setHTML, an import, a link): the step no longer applies.
+		if (step.some(({ el, after }) => !el.isConnected || el.getAttribute('style') !== after)) {
+			indentUndo = [];
+			return false;
+		}
+		for (const { el, before, wrapped } of step) {
+			if (before === null) el.removeAttribute('style');
+			else el.setAttribute('style', before);
+			if (wrapped) {
+				if (wrapped.br) el.after(wrapped.br);
+				el.replaceWith(...Array.from(el.childNodes));
+			}
+		}
+		indentChanged();
+		return true;
+	}
+
+	function indentChanged(): void {
+		updateToolbarState();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/**
+	 * The blocks Indent moves: each line's paragraph, and a list, a quotation or a picture as a
+	 * whole. A line of loose text (typed straight into the editor or a table cell) is first given a
+	 * paragraph of its own, so the margin moves that line only. Outdent on a line with no margin
+	 * of its own moves the pasted indent around it (isIndentBlockquote) instead.
+	 */
+	function indentTargets(
+		range: Range,
+		cmd: 'indent' | 'outdent',
+		wrapped: Map<HTMLElement, HTMLBRElement | null>
+	): HTMLElement[] {
+		if (!editorEl) return [];
+		const root = editorEl;
+		const found: HTMLElement[] = [];
+		const add = (el: HTMLElement | null) => {
+			if (el && !found.includes(el)) found.push(el);
+		};
+		const blockFor = (node: Node): HTMLElement | null => {
+			if (node === root || !root.contains(node)) return null;
+			const el = node instanceof Element ? node : node.parentElement;
+			if (!el) return null;
+			const cell = el.closest('td, th');
+			const inScope = (b: Element | null | undefined): b is HTMLElement =>
+				b instanceof HTMLElement && b !== root && root.contains(b) && (!cell || cell.contains(b));
+			const item = el.closest('li');
+			const closest = el.closest(INDENT_TARGETS);
+			const block = inScope(item) ? item.parentElement : inScope(closest) ? closest : null;
+			if (cmd === 'outdent' && (!block || marginLeftPx(block) === 0)) {
+				for (let a = (block ?? el).parentElement; inScope(a); a = a.parentElement) {
+					if (isIndentBlockquote(a) && marginLeftPx(a) > 0) return a;
+				}
+				return block;
+			}
+			if (inScope(block)) return block;
+			if (cmd === 'outdent') return null;
+			const made = wrapLooseLine(node);
+			if (made) wrapped.set(made.p, made.br);
+			return made?.p ?? null;
+		};
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		const texts: Text[] = [];
+		for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+			if (!n.data.trim() || !range.intersectsNode(n)) continue;
+			// A selection that only touches a line's edge (dragged to the start of the next line)
+			// does not move that line.
+			if (n === range.endContainer && range.endOffset === 0 && !range.collapsed) continue;
+			if (n === range.startContainer && range.startOffset === n.length && !range.collapsed) continue;
+			texts.push(n);
+		}
+		if (texts.length === 0) add(blockFor(range.startContainer));
+		for (const t of texts) add(blockFor(t));
+		return found;
+	}
+
+	/**
+	 * Put the run of loose text and inline elements around a node into a <p>, and return it with
+	 * the <br> that ended the run, which the paragraph replaces.
+	 */
+	function wrapLooseLine(node: Node): { p: HTMLElement; br: HTMLBRElement | null } | null {
+		if (!editorEl || node === editorEl || !editorEl.contains(node)) return null;
+		let start: Node = node;
+		while (start.parentNode && start.parentNode !== editorEl && !(start.parentNode as Element).matches?.('td, th')) {
+			start = start.parentNode;
+		}
+		const parent = start.parentNode;
+		if (!parent || !editorEl.contains(parent)) return null;
+		const isBreak = (n: Node | null) =>
+			!n || (n instanceof Element && (n.matches(INDENT_TARGETS) || n.matches('br, table, hr')));
+		if (isBreak(start)) return null;
+		let first: Node = start;
+		while (!isBreak(first.previousSibling)) first = first.previousSibling!;
+		let last: Node = start;
+		while (!isBreak(last.nextSibling)) last = last.nextSibling!;
+		const p = document.createElement('p');
+		parent.insertBefore(p, first);
+		let n: Node | null = first;
+		while (n) {
+			const next: Node | null = n === last ? null : n.nextSibling;
+			p.appendChild(n);
+			n = next;
+		}
+		let br: HTMLBRElement | null = null;
+		if (p.nextSibling instanceof HTMLBRElement) {
+			br = p.nextSibling;
+			br.remove();
+		}
+		return { p, br };
 	}
 
 	// ── Block type ──
@@ -351,6 +542,7 @@
 
 	// ── Input handler ──
 	function handleInput(): void {
+		indentUndo = [];
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the
 		// selection here keeps Backspace editing that text instead of deleting a
@@ -379,6 +571,8 @@
 			return;
 		}
 		linkError = '';
+		// Inserting changes the document outside an input event: earlier indent steps no longer undo.
+		indentUndo = [];
 		restoreSelection();
 		editorEl?.focus();
 
@@ -504,6 +698,7 @@
 		caption: string
 	): { img: HTMLImageElement; after: HTMLElement } | null {
 		if (!editorEl) return null;
+		indentUndo = [];
 
 		const figure = document.createElement('figure');
 		const img = document.createElement('img');
@@ -708,6 +903,7 @@
 			const html = await readRtfFile(file, { fontSize });
 			if (editorEl) {
 				selectedImage = null;
+				indentUndo = [];
 				editorEl.innerHTML = html;
 				updateCounts();
 				fireChange();
@@ -730,6 +926,9 @@
 		if (mod && e.key === 'u') { e.preventDefault(); exec('underline'); }
 		if (mod && e.key === 'k') { e.preventDefault(); openLinkModal(); }
 		if (mod && e.key === 's') { e.preventDefault(); autoSaveNow(); }
+		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && undoIndent()) { e.preventDefault(); return; }
+		if (mod && e.key === ']') { e.preventDefault(); indentBlocks('indent'); return; }
+		if (mod && e.key === '[') { e.preventDefault(); indentBlocks('outdent'); return; }
 
 		// Moving the caret leaves the picture behind, so drop its selection frame.
 		// Deliberately falls through: these keys still have their normal meaning,
@@ -771,6 +970,12 @@
 			if (!e.shiftKey) document.execCommand('insertText', false, '  ');
 			return;
 		}
+		// Several lines selected: Tab and Shift+Tab indent and outdent them all, as a word
+		// processor does. Within one line, Tab types a tab.
+		if (selectionSpansLines(sel)) {
+			indentBlocks(e.shiftKey ? 'outdent' : 'indent');
+			return;
+		}
 		if (!e.shiftKey) {
 			insertTab(sel);
 			return;
@@ -808,6 +1013,16 @@
 		range.collapse(true);
 		range.setStart(editorEl, 0);
 		return range.toString();
+	}
+
+	/** Whether a selection runs across more than one paragraph or line. */
+	function selectionSpansLines(sel: Selection): boolean {
+		if (sel.isCollapsed || sel.rangeCount === 0 || !editorEl) return false;
+		const range = sel.getRangeAt(0);
+		const blockOf = (n: Node) =>
+			(n instanceof Element ? n : n.parentElement)?.closest(LINE_BLOCKS) ?? editorEl;
+		if (blockOf(range.startContainer) !== blockOf(range.endContainer)) return true;
+		return range.cloneContents().querySelector('br') !== null;
 	}
 
 	const LINE_BLOCKS = 'p, div, li, td, th, h1, h2, h3, h4, h5, h6, blockquote';
@@ -1145,6 +1360,18 @@
 		font-style: italic;
 		background: var(--accent-soft, #fdf0e9);
 		border-radius: 0 var(--radius-sm, 5px) var(--radius-sm, 5px) 0;
+	}
+
+	/* The indent Chromium, WebKit and Gmail paste (border: none) is an indent, not a quotation:
+	   the RTF writes it plain, so it shows plain here too. */
+	.ink-content :global(blockquote[style*='border: none']),
+	.ink-content :global(blockquote[style*='border:none']),
+	.ink-content :global(blockquote[style*='border-style: none']),
+	.ink-content :global(blockquote[style*='border-left: none']) {
+		font-style: normal;
+		color: inherit;
+		background: none;
+		border-radius: 0;
 	}
 
 	.ink-content :global(pre) {

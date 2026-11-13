@@ -96,6 +96,18 @@
 
 	<div class="toolbar-divider"></div>
 
+	<!-- Indent -->
+	<div class="toolbar-group">
+		<ToolbarButton title="Decrease indent (Ctrl+[)" onclick={() => exec('outdent')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="11" y1="10" x2="21" y2="10"/><line x1="11" y1="14" x2="21" y2="14"/><line x1="3" y1="19" x2="21" y2="19"/><polyline points="7 9 4 12 7 15"/></svg>
+		</ToolbarButton>
+		<ToolbarButton title="Increase indent (Ctrl+])" onclick={() => exec('indent')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="11" y1="10" x2="21" y2="10"/><line x1="11" y1="14" x2="21" y2="14"/><line x1="3" y1="19" x2="21" y2="19"/><polyline points="4 9 7 12 4 15"/></svg>
+		</ToolbarButton>
+	</div>
+
+	<div class="toolbar-divider"></div>
+
 	<!-- Insert -->
 	<div class="toolbar-group">
 		<ToolbarButton title="Insert link (Ctrl+K)" onclick={oninsertlink}>

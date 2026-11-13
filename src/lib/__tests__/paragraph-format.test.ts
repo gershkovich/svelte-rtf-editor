@@ -116,9 +116,43 @@ describe('the two-column report', () => {
 });
 
 describe('inside a table cell', () => {
-	it('the cell keeps its own paragraph, and the paragraph formatting is not written', () => {
+	it('the cell keeps its own paragraph: only the indent is written, as Indent sets it in a cell', () => {
 		const out = body('<table><tr><td><p style="margin-left: 1in; margin-top: 5pt" data-rtf-tab-stops="1in">x</p></td></tr></table>');
-		expect(out).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 x');
-		expect(out).not.toMatch(/\\li1440|\\sb100|\\tx1440/);
+		expect(out).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 \\pard\\intbl\\li1440 x');
+		expect(out).not.toMatch(/\\sb100|\\tx1440/);
+	});
+
+	it('a plain paragraph in a cell is written as before', () => {
+		expect(body('<table><tr><td><p>x</p></td></tr></table>')).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 x');
+	});
+});
+
+describe('alongside alignment and the indent of the blocks around it', () => {
+	it("one \\li: the paragraph's margin plus the pasted indent around it", () => {
+		expect(
+			body('<blockquote style="margin: 0 0 0 40px; border: none; padding: 0px;"><p style="margin-left: 1in; text-align: center;">x</p></blockquote>')
+		).toBe('\\pard\\qc\\li2040 x\\par }');
+	});
+
+	it('margins in mm are read too', () => {
+		expect(body('<p style="margin-left: 10mm;">x</p>')).toBe('\\pard\\li567 x\\par }');
+	});
+});
+
+describe('a <div> that holds paragraphs', () => {
+	it('carries its indent into them, without a blank line after', () => {
+		expect(body('<div style="margin-left: 1in;"><p>a</p><p>b</p></div>')).toBe('\\pard\\li1440 a\\par \\pard\\li1440 b\\par }');
+	});
+
+	it('an unformatted one no longer adds a blank line', () => {
+		expect(body('<div><p>a</p></div>')).toBe('\\pard a\\par }');
+	});
+});
+
+describe('loose text after a formatted paragraph', () => {
+	it('starts a plain paragraph instead of taking the hanging indent', () => {
+		expect(body('<p style="margin-left: 1.75in; text-indent: -1.75in;">label</p>more')).toBe(
+			'\\pard\\li2520\\fi-2520 label\\par \\pard more}'
+		);
 	});
 });

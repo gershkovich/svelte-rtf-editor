@@ -78,6 +78,8 @@ interface WalkContext {
 	script: 'super' | 'sub' | null;
 	/** Inside inline code, which already set the monospace font. */
 	mono: boolean;
+	/** Left indent of the enclosing indented blocks, in twips (\liN). */
+	indent: number;
 }
 
 interface PixelSize {
@@ -360,9 +362,10 @@ function imageBody(el: HTMLElement): string {
 	return `\\i [Image: ${escapeRtf(label)}]\\i0 `;
 }
 
-/** \ql / \qc / \qr for a figure's text-align. */
+/** \ql / \qc / \qr / \qj for a block's text-align. */
 function alignControl(el: HTMLElement): string {
-	const align = (el.style?.textAlign || '').toLowerCase();
+	// Firefox's Center writes <p align="center">, not a style.
+	const align = (el.style?.textAlign || el.getAttribute?.('align') || '').toLowerCase();
 	if (align === 'center') return '\\qc';
 	if (align === 'right') return '\\qr';
 	if (align === 'justify') return '\\qj';
@@ -460,6 +463,21 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	// A tab that shows is written as "\tab " (5) and counted as 1; counting every tab that way
 	// can only overestimate.
 	total += ((editorEl.textContent || '').match(/\t/g)?.length ?? 0) * 4;
+	// A block's alignment (\qc, 3) and left indent (\liN, up to 7) are written per paragraph,
+	// for every block inside an indented one too: count 12 for each block that could carry them.
+	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>('p, div, li, h1, h2, h3, h4, h5, h6, pre, blockquote'))) {
+		if (block.closest('[style*="margin"], [style*="text-align"], [align]')) total += 12;
+	}
+	// Each paragraph's formatting, worked out once: a blank line looks at the one before it.
+	const formatCache = new Map<Element, string>();
+	const ownFormat = (el: HTMLElement): string => {
+		let format = formatCache.get(el);
+		if (format === undefined) {
+			format = `${alignOf(el)}${paragraphControls(el, leftMarginTwips(el))}`;
+			formatCache.set(el, format);
+		}
+		return format;
+	};
 	for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 		const tag = el.tagName.toLowerCase();
 		total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
@@ -473,10 +491,12 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// writes one paragraph per item, so the item is counted, not the list.
 		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
 		// A paragraph's own formatting costs its controls, and a blank line after one restates
-		// \pard (5); counting both on every such paragraph can only overestimate.
+		// \pard (5); counting both on every such paragraph can only overestimate. The indent of
+		// the blocks around it is counted above.
 		if ((tag === 'p' || tag === 'div') && !el.closest('td, th')) {
-			const para = paragraphControls(el);
-			if (para || followsFormattedParagraph(el)) total += para.length + 6;
+			const para = ownFormat(el);
+			const prev = el.previousElementSibling;
+			if (para || (prev && formatCache.get(prev))) total += para.length + 6;
 		}
 		// Every cell in a row with a header cell carries \clbrdrb\brdrs.
 		if (tag === 'td' && el.parentElement?.querySelector(':scope > th')) total += 14;
@@ -623,7 +643,8 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 		size: bodySize,
 		color: 0,
 		script: null,
-		mono: false
+		mono: false,
+		indent: 0
 	});
 
 	const rtf =
@@ -669,6 +690,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// the next paragraph.
 			const tabsShow = ctx.inPre || showsTabs(node);
 			if (!tabsShow && COLLAPSIBLE_WHITESPACE.test(text) && besideBlock(node)) continue;
+			if (!ctx.inPre) rtf += restateAfterBlock(node, ctx);
 			if (ctx.inPre) {
 				// Split before escaping — escapeRtf collapses newlines, so the
 				// line structure a <pre> block depends on has to become \line
@@ -684,24 +706,26 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 		const el = node as HTMLElement;
 		const tag = el.tagName.toLowerCase();
+		// A picture directly under the root writes its own paragraph.
+		if (!isBlock(el) && !(tag === 'img' && el.parentNode === ctx.root)) rtf += restateAfterBlock(el, ctx);
 
 		switch (tag) {
 			// Heading sizes keep their ratio to the body (HEADING_SCALE).
 			case 'h1': {
 				const size = scaled(ctx, HEADING_SCALE.h1);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h2': {
 				const size = scaled(ctx, HEADING_SCALE.h2);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h3': {
 				const size = scaled(ctx, HEADING_SCALE.h3);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
@@ -716,9 +740,11 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				// the two lines run together.
 				const afterLooseText = followsInlineContent(el);
 				if (ctx.inTableCell) {
+					// Alignment or an indent needs a paragraph of its own, even as the cell's first.
+					const layout = paragraphLayout(el, ctx);
 					const restate = afterLooseText
-						? '\\par \\pard\\intbl '
-						: el.previousElementSibling ? '\\pard\\intbl ' : '';
+						? `\\par \\pard\\intbl${layout} `
+						: el.previousElementSibling || layout ? `\\pard\\intbl${layout} ` : '';
 					if (isBlankLine(el)) {
 						rtf += `${restate}\\par `;
 						break;
@@ -730,14 +756,30 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 						: `${restate}${inner}\\par `;
 					break;
 				}
-				// The paragraph's own indents, spacing, keep-with-next and tab stops, if it sets any.
-				const para = paragraphControls(el);
+				// A <div> that holds blocks (pasted content wraps paragraphs in one) is not a
+				// paragraph itself: each block inside writes its own \\pard, which would drop the
+				// div's indent, and the div's own \\par would add a blank line. Its left margin is
+				// carried into the blocks instead, and loose text in it gets a paragraph.
+				if (tag === 'div' && Array.from(el.children).some(isBlock)) {
+					const indent = ctx.indent + leftMarginTwips(el);
+					const colorIdx = colorIndexOf(el, ctx);
+					const inner = { ...ctx, indent, color: colorIdx ?? ctx.color };
+					const lead = startsWithInline(el) ? `\\pard${liControl(indent)} ` : '';
+					const tail = endsWithInline(el) ? '\\par ' : '';
+					const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
+					const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
+					rtf += `${afterLooseText ? '\\par ' : ''}${lead}${colorPrefix}${walkChildren(el, inner)}${colorSuffix}${tail}`;
+					break;
+				}
+				// The paragraph's alignment, indents, spacing, keep-with-next and tab stops, if it
+				// sets any.
+				const para = paragraphFormat(el, ctx);
 				// A <p> with no children or only a single <br> is a blank line —
 				// emit a bare \par rather than \pard \line\par, which adds an extra line.
 				// A bare \par keeps the formatting of the paragraph before it, so a blank line after a
 				// formatted paragraph, or with formatting of its own, restates \pard.
 				if (isBlankLine(el)) {
-					const reset = para || followsFormattedParagraph(el) ? `\\pard${para} ` : '';
+					const reset = para || followsFormattedParagraph(el, ctx) ? `\\pard${para} ` : '';
 					rtf += `${afterLooseText ? '\\par ' : ''}${reset}\\par `;
 					break;
 				}
@@ -790,13 +832,26 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 			}
 
-			case 'blockquote':
-				rtf += `\\pard${inCell(ctx)}\\li720\\i ${walkChildren(el, { ...ctx, italic: true })}${ctx.italic ? '' : '\\i0'}\\par `;
+			case 'blockquote': {
+				// The browser's Indent wraps the lines in a blockquote with a left margin and
+				// border: none (Chromium, WebKit, Gmail): that is an indent, not a quotation, so it
+				// is not italic. A quotation is indented half an inch, plus any margin of its own.
+				// Either way the blocks inside carry the indent, and loose text gets a paragraph.
+				const quote = !isIndentBlockquote(el);
+				const indent = ctx.indent + leftMarginTwips(el) + (quote ? 720 : 0);
+				const inner = { ...ctx, indent, italic: ctx.italic || quote };
+				const lead = startsWithInline(el) ? `\\pard${inCell(ctx)}${liControl(indent)}` : '';
+				const tail = endsWithInline(el) ? '\\par ' : '';
+				const content = walkChildren(el, inner);
+				const italicOn = quote && !ctx.italic;
+				const italicOff = italicOn ? (tail ? '\\i0' : '\\i0 ') : '';
+				rtf += `${lead}${italicOn ? '\\i ' : lead ? ' ' : ''}${content}${italicOff}${tail}`;
 				break;
+			}
 
 			case 'pre': {
 				const size = scaled(ctx, PRE_SCALE);
-				rtf += `\\pard${inCell(ctx)}\\f1\\fs${size} ${walkChildren(el, { ...ctx, inPre: true, size })}\\f0\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${liControl(ctx.indent + leftMarginTwips(el))}\\f1\\fs${size} ${walkChildren(el, { ...ctx, inPre: true, size })}\\f0\\fs${ctx.size}\\par `;
 				break;
 			}
 
@@ -806,8 +861,9 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 			case 'ul': {
 				const items = el.querySelectorAll(':scope > li');
-				items.forEach((li) => {
-					rtf += `\\pard${inCell(ctx)}\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par `;
+				const li = liControl(ctx.indent + leftMarginTwips(el) + 720);
+				items.forEach((item) => {
+					rtf += `\\pard${inCell(ctx)}${li}\\fi-360\\bullet\\tab ${walkChildren(item, ctx)}\\par `;
 				});
 				break;
 			}
@@ -815,8 +871,9 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			case 'ol': {
 				let counter = 1;
 				const items = el.querySelectorAll(':scope > li');
-				items.forEach((li) => {
-					rtf += `\\pard${inCell(ctx)}\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par `;
+				const li = liControl(ctx.indent + leftMarginTwips(el) + 720);
+				items.forEach((item) => {
+					rtf += `\\pard${inCell(ctx)}${li}\\fi-360 ${counter}.\\tab ${walkChildren(item, ctx)}\\par `;
 					counter++;
 				});
 				break;
@@ -888,7 +945,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			case 'figure': {
 				const img = el.querySelector('img');
 				const caption = (el.querySelector('figcaption')?.textContent || '').trim();
-				const align = alignControl(el);
+				const align = `${alignControl(el)}${liControl(ctx.indent + leftMarginTwips(el))}`;
 
 				if (img) rtf += `\\pard${inCell(ctx)}${align} ${imageBody(img as HTMLElement)}\\par `;
 				else rtf += walkChildren(el, ctx);
@@ -988,6 +1045,31 @@ function followsInlineContent(el: HTMLElement): boolean {
 	return prev.nodeType === Node.ELEMENT_NODE && !isBlock(prev);
 }
 
+/** Blocks whose last paragraph always carries an indent or alignment of its own. */
+const FORMATTED_BLOCK_TAGS = new Set(['ul', 'ol', 'blockquote', 'figure', 'hr']);
+
+/**
+ * Loose text or an inline element right after a block has no paragraph of its own, and would
+ * keep that block's alignment and indent (a centered line's \qc, a list's \li). Start a plain
+ * one, at the indent of the blocks around it. After a block with no formatting of its own,
+ * nothing is written, as before.
+ */
+function restateAfterBlock(node: Node, ctx: WalkContext): string {
+	let prev = node.previousSibling;
+	while (prev && prev.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(prev.textContent || '')) {
+		prev = prev.previousSibling;
+	}
+	if (!isBlock(prev)) return '';
+	const block = prev as HTMLElement;
+	const tag = block.tagName.toLowerCase();
+	const formatted =
+		FORMATTED_BLOCK_TAGS.has(tag) ||
+		(['p', 'div'].includes(tag) && (ctx.inTableCell ? paragraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '') ||
+		(['h1', 'h2', 'h3'].includes(tag) && paragraphLayout(block, ctx) !== '') ||
+		(tag === 'pre' && ctx.indent + leftMarginTwips(block) > 0);
+	return formatted ? `\\pard${inCell(ctx)}${liControl(ctx.indent)} ` : '';
+}
+
 /**
  * The cell's own \par ends its last paragraph, so that paragraph's mark is dropped. Only a
  * real control word: "\par " preceded by an odd run of backslashes is escaped text.
@@ -1001,18 +1083,62 @@ function withoutTrailingPar(content: string): string {
 
 // ── Paragraph formatting ──
 
-const TWIPS_PER_UNIT: Record<string, number> = { in: 1440, pt: 20, cm: 1440 / 2.54, px: TWIPS_PER_PX };
+const TWIPS_PER_UNIT: Record<string, number> = { in: 1440, pt: 20, cm: 1440 / 2.54, mm: 144 / 2.54, px: TWIPS_PER_PX };
 
 /**
- * A CSS length in whole twips, or null when it cannot be read: a unit other than in, pt, cm or px,
- * a percentage, a keyword, or a negative value where one is not allowed.
+ * A CSS length in whole twips, or null when it cannot be read: a unit other than in, pt, cm, mm or
+ * px, a percentage, a keyword, or a negative value where one is not allowed.
  */
 function lengthTwips(value: string | null | undefined, allowNegative = false): number | null {
-	const m = (value ?? '').trim().match(/^(-?\d+(?:\.\d+)?|-?\.\d+)(in|pt|cm|px)$/);
+	const m = (value ?? '').trim().toLowerCase().match(/^(-?\d+(?:\.\d+)?|-?\.\d+)(in|pt|cm|mm|px)$/);
 	if (!m) return null;
 	const twips = Math.round(parseFloat(m[1]) * TWIPS_PER_UNIT[m[2]]);
 	if (twips < 0 && !allowNegative) return null;
 	return twips;
+}
+
+/**
+ * An element's own left margin in twips, from its inline style: what the browser's Indent sets
+ * (Firefox puts margin-left on the paragraph; Chromium and WebKit on a wrapping blockquote).
+ * Units a reader cannot pin to a length (%, em) count as none.
+ */
+function leftMarginTwips(el: HTMLElement): number {
+	return lengthTwips(el.style?.marginLeft) ?? 0;
+}
+
+/**
+ * The indent shape Chromium, WebKit and Gmail write: a blockquote with border: none, where a
+ * quotation keeps its border. The editor's Indent reads it the same way.
+ */
+function isIndentBlockquote(el: HTMLElement): boolean {
+	return el.style?.borderLeftStyle === 'none';
+}
+
+/** \liN for a left indent in twips, or nothing when there is none. */
+function liControl(twips: number): string {
+	return twips > 0 ? `\\li${twips}` : '';
+}
+
+/** \qc, \qr or \qj; left is the default and is not written. */
+function alignOf(el: HTMLElement): string {
+	const align = alignControl(el);
+	return align === '\\ql' ? '' : align;
+}
+
+/**
+ * A heading's, or a paragraph's inside a table cell: its alignment, and \liN for the indent of
+ * the blocks around it plus its own margin.
+ */
+function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
+	return `${alignOf(el)}${liControl(ctx.indent + leftMarginTwips(el))}`;
+}
+
+/**
+ * A <p> or <div>'s formatting outside a table cell: its alignment, then paragraphControls with the
+ * indent of the blocks around it plus its own margin.
+ */
+function paragraphFormat(el: HTMLElement, ctx: WalkContext): string {
+	return `${alignOf(el)}${paragraphControls(el, ctx.indent + leftMarginTwips(el))}`;
 }
 
 /**
@@ -1021,7 +1147,7 @@ function lengthTwips(value: string | null | undefined, allowNegative = false): n
  * | HTML                                             | RTF               |
  * |--------------------------------------------------|-------------------|
  * | data-rtf-tab-stops="1.75in" (comma-separated)    | \tx2520           |
- * | margin-left: 1.75in                              | \li2520           |
+ * | margin-left: 1.75in (the left indent, given)     | \li2520           |
  * | text-indent: -1.75in                             | \fi-2520          |
  * | margin-top: 5pt / margin-bottom: 5pt             | \sb100 / \sa100   |
  * | break-after: avoid, or page-break-after: avoid   | \keepn            |
@@ -1030,17 +1156,16 @@ function lengthTwips(value: string | null | undefined, allowNegative = false): n
  * nothing, and so does zero, which is what \pard already sets. Not written inside a table cell,
  * where the cell declares its own paragraph.
  */
-function paragraphControls(el: HTMLElement): string {
+function paragraphControls(el: HTMLElement, leftTwips: number): string {
 	let out = '';
 	const stops = (el.getAttribute('data-rtf-tab-stops') ?? '')
 		.split(',')
 		.map((v) => lengthTwips(v))
 		.filter((t): t is number => t != null && t > 0);
 	for (const t of Array.from(new Set(stops)).sort((a, b) => a - b)) out += `\\tx${t}`;
+	out += liControl(leftTwips);
 	const style = el.style;
 	if (!style) return out;
-	const li = lengthTwips(style.marginLeft);
-	if (li) out += `\\li${li}`;
 	const fi = lengthTwips(style.textIndent, true);
 	if (fi) out += `\\fi${fi}`;
 	const sb = lengthTwips(style.marginTop);
@@ -1053,11 +1178,30 @@ function paragraphControls(el: HTMLElement): string {
 }
 
 /** Whether the nearest element before this one is a <p> or <div> with formatting of its own. */
-function followsFormattedParagraph(el: HTMLElement): boolean {
+function followsFormattedParagraph(el: HTMLElement, ctx: WalkContext): boolean {
 	const prev = el.previousElementSibling as HTMLElement | null;
 	if (!prev) return false;
 	const tag = prev.tagName.toLowerCase();
-	return (tag === 'p' || tag === 'div') && paragraphControls(prev) !== '';
+	return (tag === 'p' || tag === 'div') && paragraphFormat(prev, ctx) !== '';
+}
+
+/** Whether a container's first (or last) content is loose text or an inline element, not a block. */
+function startsWithInline(el: HTMLElement): boolean {
+	return edgeIsInline(el, 'first');
+}
+
+function endsWithInline(el: HTMLElement): boolean {
+	return edgeIsInline(el, 'last');
+}
+
+function edgeIsInline(el: HTMLElement, edge: 'first' | 'last'): boolean {
+	const nodes = Array.from(el.childNodes);
+	if (edge === 'last') nodes.reverse();
+	for (const n of nodes) {
+		if (n.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(n.textContent || '')) continue;
+		return !isBlock(n);
+	}
+	return false;
 }
 
 /** \intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
