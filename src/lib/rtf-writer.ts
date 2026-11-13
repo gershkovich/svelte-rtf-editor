@@ -466,7 +466,7 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	// A block's alignment (\qc, 3) and left indent (\liN, up to 7) are written per paragraph,
 	// for every block inside an indented one too: count 12 for each block that could carry them.
 	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>('p, div, li, h1, h2, h3, h4, h5, h6, pre, blockquote'))) {
-		if (block.closest('[style*="margin"], [style*="text-align"]')) total += 12;
+		if (block.closest('[style*="margin"], [style*="text-align"], [align]')) total += 12;
 	}
 	for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 		const tag = el.tagName.toLowerCase();
@@ -672,6 +672,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// the next paragraph.
 			const tabsShow = ctx.inPre || showsTabs(node);
 			if (!tabsShow && COLLAPSIBLE_WHITESPACE.test(text) && besideBlock(node)) continue;
+			if (!ctx.inPre) rtf += restateAfterBlock(node, ctx);
 			if (ctx.inPre) {
 				// Split before escaping — escapeRtf collapses newlines, so the
 				// line structure a <pre> block depends on has to become \line
@@ -687,6 +688,8 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 		const el = node as HTMLElement;
 		const tag = el.tagName.toLowerCase();
+		// A picture directly under the root writes its own paragraph.
+		if (!isBlock(el) && !(tag === 'img' && el.parentNode === ctx.root)) rtf += restateAfterBlock(el, ctx);
 
 		switch (tag) {
 			// Heading sizes keep their ratio to the body (HEADING_SCALE).
@@ -791,17 +794,19 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			}
 
 			case 'blockquote': {
-				// The browser's Indent wraps the lines in a blockquote with a left margin
-				// (Chromium, WebKit): that is an indent, not a quotation, so it is not italic.
-				const step = leftMarginTwips(el);
-				if (step > 0) {
-					const inner = { ...ctx, indent: ctx.indent + step };
-					const lead = startsWithInline(el) ? `\\pard${inCell(ctx)}${liControl(inner.indent)} ` : '';
-					const tail = endsWithInline(el) ? '\\par ' : '';
-					rtf += `${lead}${walkChildren(el, inner)}${tail}`;
-					break;
-				}
-				rtf += `\\pard${inCell(ctx)}${liControl(ctx.indent + 720)}\\i ${walkChildren(el, { ...ctx, italic: true })}${ctx.italic ? '' : '\\i0'}\\par `;
+				// The browser's Indent wraps the lines in a blockquote with a left margin and
+				// border: none (Chromium, WebKit, Gmail): that is an indent, not a quotation, so it
+				// is not italic. A quotation is indented half an inch, plus any margin of its own.
+				// Either way the blocks inside carry the indent, and loose text gets a paragraph.
+				const quote = !isIndentBlockquote(el);
+				const indent = ctx.indent + leftMarginTwips(el) + (quote ? 720 : 0);
+				const inner = { ...ctx, indent, italic: ctx.italic || quote };
+				const lead = startsWithInline(el) ? `\\pard${inCell(ctx)}${liControl(indent)}` : '';
+				const tail = endsWithInline(el) ? '\\par ' : '';
+				const content = walkChildren(el, inner);
+				const italicOn = quote && !ctx.italic;
+				const italicOff = italicOn ? (tail ? '\\i0' : '\\i0 ') : '';
+				rtf += `${lead}${italicOn ? '\\i ' : lead ? ' ' : ''}${content}${italicOff}${tail}`;
 				break;
 			}
 
@@ -901,7 +906,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			case 'figure': {
 				const img = el.querySelector('img');
 				const caption = (el.querySelector('figcaption')?.textContent || '').trim();
-				const align = alignControl(el);
+				const align = `${alignControl(el)}${liControl(ctx.indent + leftMarginTwips(el))}`;
 
 				if (img) rtf += `\\pard${inCell(ctx)}${align} ${imageBody(img as HTMLElement)}\\par `;
 				else rtf += walkChildren(el, ctx);
@@ -1001,6 +1006,30 @@ function followsInlineContent(el: HTMLElement): boolean {
 	return prev.nodeType === Node.ELEMENT_NODE && !isBlock(prev);
 }
 
+/** Blocks whose last paragraph always carries an indent or alignment of its own. */
+const FORMATTED_BLOCK_TAGS = new Set(['ul', 'ol', 'blockquote', 'figure', 'hr']);
+
+/**
+ * Loose text or an inline element right after a block has no paragraph of its own, and would
+ * keep that block's alignment and indent (a centered line's \qc, a list's \li). Start a plain
+ * one, at the indent of the blocks around it. After a block with no formatting of its own,
+ * nothing is written, as before.
+ */
+function restateAfterBlock(node: Node, ctx: WalkContext): string {
+	let prev = node.previousSibling;
+	while (prev && prev.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(prev.textContent || '')) {
+		prev = prev.previousSibling;
+	}
+	if (!isBlock(prev)) return '';
+	const block = prev as HTMLElement;
+	const tag = block.tagName.toLowerCase();
+	const formatted =
+		FORMATTED_BLOCK_TAGS.has(tag) ||
+		(['p', 'div', 'h1', 'h2', 'h3'].includes(tag) && paragraphLayout(block, ctx) !== '') ||
+		(tag === 'pre' && ctx.indent + leftMarginTwips(block) > 0);
+	return formatted ? `\\pard${inCell(ctx)}${liControl(ctx.indent)} ` : '';
+}
+
 /**
  * The cell's own \par ends its last paragraph, so that paragraph's mark is dropped. Only a
  * real control word: "\par " preceded by an odd run of backslashes is escaped text.
@@ -1012,7 +1041,6 @@ function withoutTrailingPar(content: string): string {
 	return slashes % 2 === 0 ? content.slice(0, -5) : content;
 }
 
-/** \intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
 /**
  * An element's own left margin in twips, from its inline style: what the browser's Indent sets
  * (Firefox puts margin-left on the paragraph; Chromium and WebKit on a wrapping blockquote).
@@ -1024,6 +1052,14 @@ function leftMarginTwips(el: HTMLElement): number {
 	if (!m) return 0;
 	const perUnit: Record<string, number> = { px: TWIPS_PER_PX, pt: 20, in: 1440, cm: 1440 / 2.54, mm: 144 / 2.54 };
 	return Math.max(0, Math.round(parseFloat(m[1]) * perUnit[m[2]]));
+}
+
+/**
+ * The indent shape Chromium, WebKit and Gmail write: a blockquote with border: none, where a
+ * quotation keeps its border. The editor's Indent reads it the same way.
+ */
+function isIndentBlockquote(el: HTMLElement): boolean {
+	return el.style?.borderLeftStyle === 'none';
 }
 
 /** \liN for a left indent in twips, or nothing when there is none. */
@@ -1059,6 +1095,7 @@ function edgeIsInline(el: HTMLElement, edge: 'first' | 'last'): boolean {
 	return false;
 }
 
+/** \intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
 function inCell(ctx: WalkContext): string {
 	return ctx.inTableCell ? '\\intbl' : '';
 }

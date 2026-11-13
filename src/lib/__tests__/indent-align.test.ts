@@ -95,4 +95,46 @@ describe('an indented block reaches the RTF as a left indent', () => {
 		);
 		expect(estimateRtfBytes(el)).toBeGreaterThanOrEqual(htmlToRtf(el).length);
 	});
+
+	it('a quotation with a border and a margin of its own stays italic', () => {
+		expect(body('<blockquote style="margin-left: 48px; border-left: 2px solid #ccc;">q</blockquote>')).toBe(
+			'\\pard\\li1440\\i q\\i0\\par }'
+		);
+	});
+
+	it('a pasted indent outdented to nothing is plain text, not a quotation', () => {
+		expect(body('<blockquote style="margin: 0px; border: none; padding: 0px;"><p>x</p></blockquote>')).toBe('\\pard x\\par }');
+	});
+
+	it('paragraphs inside a quotation keep its indent', () => {
+		expect(body('<blockquote><p>a</p><p>b</p></blockquote>')).toBe('\\i \\pard\\li720 a\\par \\pard\\li720 b\\par \\i0 }');
+	});
+
+	it('an indented picture', () => {
+		expect(body('<figure style="margin-left: 48px;"><img alt="x"><figcaption>c</figcaption></figure>')).toContain(
+			'\\pard\\ql\\li720 \\i [Image: x]'
+		);
+	});
+
+	it('the size estimate counts Firefox alignment too', () => {
+		const el = htmlEl(Array.from({ length: 30 }, () => '<h2 align="center">H</h2>').join(''));
+		expect(estimateRtfBytes(el)).toBeGreaterThanOrEqual(htmlToRtf(el).length);
+	});
 });
+
+describe('loose text after a formatted block does not inherit its layout', () => {
+	it('after a centered paragraph', () => {
+		expect(body('<p style="text-align: center;">T</p>more')).toBe('\\pard\\qc T\\par \\pard more}');
+	});
+
+	it('after an indent, at the indent of the blocks around it', () => {
+		expect(body(`<blockquote style="${CHROME_INDENT}"><p>a</p>b</blockquote>c`)).toBe(
+			'\\pard\\li600 a\\par \\pard\\li600 b\\par \\pard c}'
+		);
+	});
+
+	it('after a plain paragraph, nothing is added', () => {
+		expect(body('<p>T</p>more')).toBe('\\pard T\\par more}');
+	});
+});
+
