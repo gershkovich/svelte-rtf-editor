@@ -78,6 +78,8 @@ interface WalkContext {
 	script: 'super' | 'sub' | null;
 	/** Inside inline code, which already set the monospace font. */
 	mono: boolean;
+	/** Left indent of the enclosing indented blocks, in twips (\liN). */
+	indent: number;
 }
 
 interface PixelSize {
@@ -360,9 +362,10 @@ function imageBody(el: HTMLElement): string {
 	return `\\i [Image: ${escapeRtf(label)}]\\i0 `;
 }
 
-/** \ql / \qc / \qr for a figure's text-align. */
+/** \ql / \qc / \qr / \qj for a block's text-align. */
 function alignControl(el: HTMLElement): string {
-	const align = (el.style?.textAlign || '').toLowerCase();
+	// Firefox's Center writes <p align="center">, not a style.
+	const align = (el.style?.textAlign || el.getAttribute?.('align') || '').toLowerCase();
 	if (align === 'center') return '\\qc';
 	if (align === 'right') return '\\qr';
 	if (align === 'justify') return '\\qj';
@@ -460,6 +463,11 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	// A tab that shows is written as "\tab " (5) and counted as 1; counting every tab that way
 	// can only overestimate.
 	total += ((editorEl.textContent || '').match(/\t/g)?.length ?? 0) * 4;
+	// A block's alignment (\qc, 3) and left indent (\liN, up to 7) are written per paragraph,
+	// for every block inside an indented one too: count 12 for each block that could carry them.
+	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>('p, div, li, h1, h2, h3, h4, h5, h6, pre, blockquote'))) {
+		if (block.closest('[style*="margin"], [style*="text-align"]')) total += 12;
+	}
 	for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 		const tag = el.tagName.toLowerCase();
 		total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
@@ -617,7 +625,8 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 		size: bodySize,
 		color: 0,
 		script: null,
-		mono: false
+		mono: false,
+		indent: 0
 	});
 
 	const rtf =
@@ -683,19 +692,19 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// Heading sizes keep their ratio to the body (HEADING_SCALE).
 			case 'h1': {
 				const size = scaled(ctx, HEADING_SCALE.h1);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h2': {
 				const size = scaled(ctx, HEADING_SCALE.h2);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h3': {
 				const size = scaled(ctx, HEADING_SCALE.h3);
-				rtf += `\\pard${inCell(ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
@@ -710,9 +719,11 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				// the two lines run together.
 				const afterLooseText = followsInlineContent(el);
 				if (ctx.inTableCell) {
+					// Alignment or an indent needs a paragraph of its own, even as the cell's first.
+					const layout = paragraphLayout(el, ctx);
 					const restate = afterLooseText
-						? '\\par \\pard\\intbl '
-						: el.previousElementSibling ? '\\pard\\intbl ' : '';
+						? `\\par \\pard\\intbl${layout} `
+						: el.previousElementSibling || layout ? `\\pard\\intbl${layout} ` : '';
 					if (isBlankLine(el)) {
 						rtf += `${restate}\\par `;
 						break;
@@ -734,7 +745,7 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				const inlineRtf = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
 				const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
 				const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
-				rtf += `${afterLooseText ? '\\par ' : ''}\\pard ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
+				rtf += `${afterLooseText ? '\\par ' : ''}\\pard${paragraphLayout(el, ctx)} ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
 				break;
 			}
 
@@ -779,13 +790,24 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 				break;
 			}
 
-			case 'blockquote':
-				rtf += `\\pard${inCell(ctx)}\\li720\\i ${walkChildren(el, { ...ctx, italic: true })}${ctx.italic ? '' : '\\i0'}\\par `;
+			case 'blockquote': {
+				// The browser's Indent wraps the lines in a blockquote with a left margin
+				// (Chromium, WebKit): that is an indent, not a quotation, so it is not italic.
+				const step = leftMarginTwips(el);
+				if (step > 0) {
+					const inner = { ...ctx, indent: ctx.indent + step };
+					const lead = startsWithInline(el) ? `\\pard${inCell(ctx)}${liControl(inner.indent)} ` : '';
+					const tail = endsWithInline(el) ? '\\par ' : '';
+					rtf += `${lead}${walkChildren(el, inner)}${tail}`;
+					break;
+				}
+				rtf += `\\pard${inCell(ctx)}${liControl(ctx.indent + 720)}\\i ${walkChildren(el, { ...ctx, italic: true })}${ctx.italic ? '' : '\\i0'}\\par `;
 				break;
+			}
 
 			case 'pre': {
 				const size = scaled(ctx, PRE_SCALE);
-				rtf += `\\pard${inCell(ctx)}\\f1\\fs${size} ${walkChildren(el, { ...ctx, inPre: true, size })}\\f0\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${liControl(ctx.indent + leftMarginTwips(el))}\\f1\\fs${size} ${walkChildren(el, { ...ctx, inPre: true, size })}\\f0\\fs${ctx.size}\\par `;
 				break;
 			}
 
@@ -795,8 +817,9 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 			case 'ul': {
 				const items = el.querySelectorAll(':scope > li');
-				items.forEach((li) => {
-					rtf += `\\pard${inCell(ctx)}\\li720\\fi-360\\bullet\\tab ${walkChildren(li, ctx)}\\par `;
+				const li = liControl(ctx.indent + leftMarginTwips(el) + 720);
+				items.forEach((item) => {
+					rtf += `\\pard${inCell(ctx)}${li}\\fi-360\\bullet\\tab ${walkChildren(item, ctx)}\\par `;
 				});
 				break;
 			}
@@ -804,8 +827,9 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			case 'ol': {
 				let counter = 1;
 				const items = el.querySelectorAll(':scope > li');
-				items.forEach((li) => {
-					rtf += `\\pard${inCell(ctx)}\\li720\\fi-360 ${counter}.\\tab ${walkChildren(li, ctx)}\\par `;
+				const li = liControl(ctx.indent + leftMarginTwips(el) + 720);
+				items.forEach((item) => {
+					rtf += `\\pard${inCell(ctx)}${li}\\fi-360 ${counter}.\\tab ${walkChildren(item, ctx)}\\par `;
 					counter++;
 				});
 				break;
@@ -989,6 +1013,52 @@ function withoutTrailingPar(content: string): string {
 }
 
 /** \intbl for a paragraph a block writes inside a table cell, so it stays in the cell. */
+/**
+ * An element's own left margin in twips, from its inline style: what the browser's Indent sets
+ * (Firefox puts margin-left on the paragraph; Chromium and WebKit on a wrapping blockquote).
+ * Units a reader cannot pin to a length (%, em) count as none.
+ */
+function leftMarginTwips(el: HTMLElement): number {
+	const value = (el.style?.marginLeft || '').trim().toLowerCase();
+	const m = /^(-?\d*\.?\d+)(px|pt|in|cm|mm)$/.exec(value);
+	if (!m) return 0;
+	const perUnit: Record<string, number> = { px: TWIPS_PER_PX, pt: 20, in: 1440, cm: 1440 / 2.54, mm: 144 / 2.54 };
+	return Math.max(0, Math.round(parseFloat(m[1]) * perUnit[m[2]]));
+}
+
+/** \liN for a left indent in twips, or nothing when there is none. */
+function liControl(twips: number): string {
+	return twips > 0 ? `\\li${twips}` : '';
+}
+
+/**
+ * A paragraph's alignment and left indent: \qc, \qr or \qj (left is the default and is not
+ * written), and \liN for the indent of the blocks around it plus its own margin.
+ */
+function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
+	const align = alignControl(el);
+	return `${align === '\\ql' ? '' : align}${liControl(ctx.indent + leftMarginTwips(el))}`;
+}
+
+/** Whether a container's first (or last) content is loose text or an inline element, not a block. */
+function startsWithInline(el: HTMLElement): boolean {
+	return edgeIsInline(el, 'first');
+}
+
+function endsWithInline(el: HTMLElement): boolean {
+	return edgeIsInline(el, 'last');
+}
+
+function edgeIsInline(el: HTMLElement, edge: 'first' | 'last'): boolean {
+	const nodes = Array.from(el.childNodes);
+	if (edge === 'last') nodes.reverse();
+	for (const n of nodes) {
+		if (n.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(n.textContent || '')) continue;
+		return !isBlock(n);
+	}
+	return false;
+}
+
 function inCell(ctx: WalkContext): string {
 	return ctx.inTableCell ? '\\intbl' : '';
 }

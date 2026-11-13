@@ -276,8 +276,121 @@
 			const sel = window.getSelection();
 			if (!sel || sel.isCollapsed) return;
 		}
+		if (cmd === 'indent' || cmd === 'outdent') {
+			indentBlocks(cmd);
+			return;
+		}
+		if (cmd === 'undo' && undoIndent()) return;
 		document.execCommand(cmd, false, value ?? undefined);
 		updateToolbarState();
+	}
+
+	// ── Indent ──
+	// Indent and Outdent move the paragraphs the selection touches by half an inch (48px, written
+	// to RTF as \li720) per press, as margin-left on each paragraph. The browser's own commands are
+	// not used: Chromium's Outdent strips the first paragraph to loose text ("one<br>"), and the
+	// browsers disagree on the markup. Only a style changes, so earlier typing stays undoable; the
+	// editor keeps its own undo for these steps until the next edit.
+	const INDENT_STEP_PX = 48;
+	const INDENT_TARGETS = 'p, div, h1, h2, h3, h4, h5, h6, pre, ul, ol';
+	let indentUndo: { el: HTMLElement; style: string | null }[][] = [];
+
+	function indentBlocks(cmd: 'indent' | 'outdent'): void {
+		if (readonly || !editorEl) return;
+		editorEl.focus();
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !editorEl.contains(sel.anchorNode)) return;
+		const range = sel.getRangeAt(0);
+		const targets = indentTargets(range);
+		if (targets.length === 0) return;
+		const step: { el: HTMLElement; style: string | null }[] = [];
+		for (const el of targets) {
+			const current = parseFloat(el.style.marginLeft) || 0;
+			const next = cmd === 'indent' ? current + INDENT_STEP_PX : Math.max(0, current - INDENT_STEP_PX);
+			if (next === current) continue;
+			step.push({ el, style: el.getAttribute('style') });
+			el.style.marginLeft = next > 0 ? `${next}px` : '';
+			if (!el.getAttribute('style')) el.removeAttribute('style');
+		}
+		if (step.length === 0) return;
+		indentUndo.push(step);
+		indentChanged();
+	}
+
+	/** Undo the last Indent or Outdent, if nothing has been typed since. */
+	function undoIndent(): boolean {
+		const step = indentUndo.pop();
+		if (!step) return false;
+		for (const { el, style } of step) {
+			if (style === null) el.removeAttribute('style');
+			else el.setAttribute('style', style);
+		}
+		indentChanged();
+		return true;
+	}
+
+	function indentChanged(): void {
+		updateToolbarState();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/**
+	 * The blocks Indent moves: each line's paragraph, and a list as a whole. A line of loose text
+	 * (typed straight into the editor or a table cell) is first given a paragraph of its own, so
+	 * the margin moves that line only.
+	 */
+	function indentTargets(range: Range): HTMLElement[] {
+		if (!editorEl) return [];
+		const root = editorEl;
+		const found: HTMLElement[] = [];
+		const add = (el: HTMLElement | null) => {
+			if (el && el !== root && root.contains(el) && !found.includes(el)) found.push(el);
+		};
+		const blockFor = (node: Node): HTMLElement | null => {
+			const el = node instanceof HTMLElement ? node : node.parentElement;
+			const item = el?.closest('li');
+			if (item && root.contains(item)) return item.parentElement as HTMLElement;
+			const block = el?.closest(INDENT_TARGETS) as HTMLElement | null;
+			const cell = el?.closest('td, th');
+			if (block && root.contains(block) && block !== root && (!cell || cell.contains(block))) return block;
+			return wrapLooseLine(node);
+		};
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		const texts: Text[] = [];
+		for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+			if (range.intersectsNode(n) && (n as Text).data.trim()) texts.push(n as Text);
+		}
+		if (texts.length === 0) add(blockFor(range.startContainer));
+		for (const t of texts) add(blockFor(t));
+		return found;
+	}
+
+	/** Put the run of loose text and inline elements around a node into a <p>, and return it. */
+	function wrapLooseLine(node: Node): HTMLElement | null {
+		if (!editorEl) return null;
+		let start: Node = node;
+		while (start.parentNode && start.parentNode !== editorEl && !(start.parentNode as Element).matches?.('td, th')) {
+			start = start.parentNode;
+		}
+		const parent = start.parentNode;
+		if (!parent) return null;
+		const isBreak = (n: Node | null) =>
+			!n || (n instanceof Element && (n.matches(INDENT_TARGETS) || n.matches('br, table, blockquote, hr, figure')));
+		let first: Node = start;
+		while (!isBreak(first.previousSibling)) first = first.previousSibling!;
+		let last: Node = start;
+		while (!isBreak(last.nextSibling)) last = last.nextSibling!;
+		const p = document.createElement('p');
+		parent.insertBefore(p, first);
+		let n: Node | null = first;
+		while (n) {
+			const next: Node | null = n === last ? null : n.nextSibling;
+			p.appendChild(n);
+			n = next;
+		}
+		if (p.nextSibling instanceof HTMLBRElement) p.nextSibling.remove();
+		return p;
 	}
 
 	// ── Block type ──
@@ -351,6 +464,7 @@
 
 	// ── Input handler ──
 	function handleInput(): void {
+		indentUndo = [];
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the
 		// selection here keeps Backspace editing that text instead of deleting a
@@ -730,6 +844,9 @@
 		if (mod && e.key === 'u') { e.preventDefault(); exec('underline'); }
 		if (mod && e.key === 'k') { e.preventDefault(); openLinkModal(); }
 		if (mod && e.key === 's') { e.preventDefault(); autoSaveNow(); }
+		if (mod && !e.shiftKey && e.key.toLowerCase() === 'z' && undoIndent()) { e.preventDefault(); return; }
+		if (mod && e.key === ']') { e.preventDefault(); indentBlocks('indent'); return; }
+		if (mod && e.key === '[') { e.preventDefault(); indentBlocks('outdent'); return; }
 
 		// Moving the caret leaves the picture behind, so drop its selection frame.
 		// Deliberately falls through: these keys still have their normal meaning,
@@ -771,6 +888,12 @@
 			if (!e.shiftKey) document.execCommand('insertText', false, '  ');
 			return;
 		}
+		// Several lines selected: Tab and Shift+Tab indent and outdent them all, as a word
+		// processor does. Within one line, Tab types a tab.
+		if (selectionSpansLines(sel)) {
+			indentBlocks(e.shiftKey ? 'outdent' : 'indent');
+			return;
+		}
 		if (!e.shiftKey) {
 			insertTab(sel);
 			return;
@@ -808,6 +931,16 @@
 		range.collapse(true);
 		range.setStart(editorEl, 0);
 		return range.toString();
+	}
+
+	/** Whether a selection runs across more than one paragraph or line. */
+	function selectionSpansLines(sel: Selection): boolean {
+		if (sel.isCollapsed || sel.rangeCount === 0 || !editorEl) return false;
+		const range = sel.getRangeAt(0);
+		const blockOf = (n: Node) =>
+			(n instanceof Element ? n : n.parentElement)?.closest(LINE_BLOCKS) ?? editorEl;
+		if (blockOf(range.startContainer) !== blockOf(range.endContainer)) return true;
+		return range.cloneContents().querySelector('br') !== null;
 	}
 
 	const LINE_BLOCKS = 'p, div, li, td, th, h1, h2, h3, h4, h5, h6, blockquote';
