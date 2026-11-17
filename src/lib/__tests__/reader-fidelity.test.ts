@@ -486,3 +486,47 @@ describe('RtfViewer', () => {
 		expect(viewer.textContent).not.toMatch(/Cannot read|null/);
 	});
 });
+
+describe('what reads as code, and what does not', () => {
+	const fonts = R`{\fonttbl{\f0\fswiss Arial;}{\f1\fmodern Courier New;}{\f2\fnil American Typewriter;}{\f3\fnil Monotype Corsiva;}{\f4\fmodern Roboto Mono;}}`;
+	const doc = (body: string) => rtfToHtml(`{\\rtf1\\ansi\\deff0${fonts} ${body}}`);
+
+	it('a proportional font whose name only contains "mono" or "typewriter" is not code', () => {
+		expect(doc(R`\f2 Hello\f0  world\par`)).toBe('<p>Hello world</p>');
+		expect(doc(R`\f3 Hello\f0  world\par`)).toBe('<p>Hello world</p>');
+	});
+
+	it('Courier New and a "… Mono" family still are', () => {
+		expect(doc(R`a \f1 b\f0  c\par`)).toContain('<code>b</code>');
+		expect(doc(R`a \f4 b\f0  c\par`)).toContain('<code>b</code>');
+	});
+
+	it("Word's second-level bullet, set in Courier New, is a marker, not code", () => {
+		const html = doc(R`{\listtext\pard\plain\f1 o\tab}\pard\plain\li1440\fi-360 Sub\par`);
+		expect(html).not.toContain('<code>');
+		expect(html).toContain('Sub');
+	});
+});
+
+describe('a table with many columns reads in time', () => {
+	it('one row of 60,000 cells with distinct edges reads in well under two seconds', () => {
+		const n = 60000;
+		let rtf = '{\\rtf1\\ansi \\trowd';
+		for (let k = 0; k < n; k++) rtf += `\\cellx${100 + 31 * k}`;
+		rtf += '\\pard\\intbl ' + 'x\\cell '.repeat(n) + '\\row}';
+		const t0 = performance.now();
+		const html = rtfToHtml(rtf);
+		expect(performance.now() - t0).toBeLessThan(2000);
+		expect(html.match(/<td/g)?.length).toBe(n);
+	});
+});
+
+describe('deep nesting around many rows reads in time', () => {
+	it('100,000 nested groups around 50,000 rows read in well under two seconds', () => {
+		const depth = 100000;
+		const rtf = `{\\rtf1\\ansi ${'{'.repeat(depth)}\\trowd\\cellx1000 ${'\\intbl x\\cell\\row '.repeat(50000)}${'}'.repeat(depth)}}`;
+		const t0 = performance.now();
+		rtfToHtml(rtf);
+		expect(performance.now() - t0).toBeLessThan(2000);
+	});
+});

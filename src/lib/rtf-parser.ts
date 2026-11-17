@@ -892,7 +892,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			fontSize: state.fontSize || bodySize,
 			color,
 			background: (state.highlightIndex > 0 && HIGHLIGHT_COLORS[state.highlightIndex]) || '',
-			mono: !documentIsMono && monoFonts.has(state.fontIndex),
+			// A list marker is set in whatever font the list uses (Word's second-level "o" is in
+			// Courier New): it is not code.
+			mono: !documentIsMono && !state.inList && monoFonts.has(state.fontIndex),
 			link: state.link
 		};
 	}
@@ -1129,12 +1131,19 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		for (const e of allEdges) {
 			if (edges.length === 0 || e - edges[edges.length - 1] > EDGE_TOLERANCE) edges.push(e);
 		}
+		// The column whose edge is nearest, the earlier one on a tie. A binary search over the
+		// sorted edges: a scan of every edge for every cell froze the page on a row of 100,000
+		// cells (14 s for 2 MB).
 		const columnOf = (right: number): number => {
-			let best = 0;
-			for (let k = 0; k < edges.length; k++) {
-				if (Math.abs(edges[k] - right) < Math.abs(edges[best] - right)) best = k;
+			let lo = 0;
+			let hi = edges.length - 1;
+			while (lo < hi) {
+				const mid = (lo + hi) >> 1;
+				if (edges[mid] < right) lo = mid + 1;
+				else hi = mid;
 			}
-			return best;
+			if (lo > 0 && Math.abs(edges[lo - 1] - right) <= Math.abs(edges[lo] - right)) return lo - 1;
+			return lo;
 		};
 		for (const row of placedRows) {
 			let start = 0;

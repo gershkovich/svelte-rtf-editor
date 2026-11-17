@@ -635,9 +635,15 @@ function cleanFontName(name: string | undefined): string {
 	return cleaned || DEFAULT_FONT_FAMILY;
 }
 
-/** Whether a font name is a monospace font's: Courier New, Consolas, Menlo and the like. */
+/**
+ * Whether a font name is a monospace font's: Courier New, Consolas, Menlo, a "… Mono" family
+ * (Roboto Mono, DejaVu Sans Mono) and the like. "mono" counts only as a word of its own, so
+ * Monotype Corsiva is not one, and neither is American Typewriter, which is proportional.
+ */
 export function isMonospaceFontName(name: string): boolean {
-	return /courier|mono|consolas|menlo|monaco|typewriter|lucida console/.test(name.toLowerCase());
+	return /\bcourier\b|\bmono\b|\bmonospace\b|consolas|menlo|monaco|lucida console|lucida sans typewriter|\bocr[ -]?[ab]\b|source code|fira code|cascadia|jetbrains/.test(
+		name.toLowerCase()
+	);
 }
 
 /** RTF font family class for a font name: \froman, \fmodern or \fswiss. */
