@@ -51,7 +51,13 @@ describe('characters', () => {
 	it("every byte from \\'80 to \\'ff reads as Windows-1252 decodes it", () => {
 		const bytes = Array.from({ length: 128 }, (_, i) => 0x80 + i);
 		const rtf = bytes.map((b) => `\\'${b.toString(16)}`).join('');
-		const expected = new TextDecoder('windows-1252').decode(new Uint8Array(bytes));
+		// Written out, not asked of TextDecoder('windows-1252'): Node 20, which CI and the
+		// publish workflow run, decodes that label as Latin-1. The five bytes the code page
+		// leaves undefined keep their own value, as a browser's decoder gives them.
+		const expected =
+			'\u20ac\u0081\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u008d\u017d\u008f' +
+			'\u0090\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u009d\u017e\u0178' +
+			String.fromCharCode(...bytes.slice(32));
 		expect(dom(read(`${rtf}\\par`)).textContent).toBe(expected);
 	});
 

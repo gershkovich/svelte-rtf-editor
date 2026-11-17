@@ -19,6 +19,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - run: npm ci
+      # Nothing is published that does not pass what CI runs on every push (ci.yml).
+      - run: npm run check
+      - run: npm test
       - run: npm run prepack
 
       - run: npm publish --access public --provenance
