@@ -242,6 +242,35 @@ describe('the reader', () => {
 		expect(html).not.toContain('margin-left');
 	});
 
+	it('a \\pard inside a list marker group does not reach the list item around it (Word)', () => {
+		const item = "{\\listtext\\pard\\plain \\'b7\\tab}";
+		const html = rtfToHtml(wrap(`${item}\\pard\\plain\\fi-360\\li720 Item 1\\par ${item}Item 2\\par ${item}Item 3\\par `));
+		const styles = Array.from(html.matchAll(/<p([^>]*)>/g)).map((m) => m[1]);
+		expect(styles).toEqual(Array(3).fill(' style="margin-left:36pt;text-indent:-18pt"'));
+	});
+
+	it('indents set inside a group end with the group', () => {
+		expect(rtfToHtml(wrap('{\\pard\\li720 A\\par }B\\par '))).toBe('<p style="margin-left:36pt">A</p>\n<p>B</p>');
+	});
+
+	it('a heading with a hanging number goes back to RTF with its first line where it started', () => {
+		const html = rtfToHtml(wrap('\\pard\\li720\\fi-720\\ri720{\\b\\fs48 1.\\tab Heading}\\par '));
+		expect(html).toMatch(/^<h1 style="margin-left:36pt;margin-right:36pt;text-indent:-36pt">/);
+		expect(htmlToRtf(htmlEl(html))).toContain('\\pard\\li720\\ri720\\fi-720\\f0\\fs48\\b ');
+	});
+
+	it('a heading in a table cell still writes its left indent only', () => {
+		expect(body('<table><tbody><tr><td><h2 style="margin-left: 48px; text-indent: -48px">x</h2></td></tr></tbody></table>')).not.toContain('\\fi-720');
+	});
+
+	it('a picture gets a left margin where its line starts, and no first-line indent for its caption to inherit', () => {
+		const pict = '{\\pict\\pngblip\\picw1\\pich1 89504e470d0a1a0a}';
+		const hanging = rtfToHtml(wrap(`\\pard\\li720\\fi-720 ${pict}\\par `));
+		expect(hanging).toMatch(/^<figure>/);
+		const indented = rtfToHtml(wrap(`\\pard\\li1440\\fi-720\\ri720 ${pict}\\par `));
+		expect(indented).toMatch(/^<figure style="margin-left:36pt">/);
+	});
+
 	it('what the writer sends, the reader brings back, and the writer sends the same again', () => {
 		const first = htmlToRtf(htmlEl('<p style="margin-left: 96px; margin-right: 48px; text-indent: -48px">one</p><p>two</p>'));
 		expect(first).toContain('\\pard\\li1440\\ri720\\fi-720 one\\par \\pard two\\par ');

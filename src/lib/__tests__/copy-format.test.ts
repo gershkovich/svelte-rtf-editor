@@ -191,6 +191,59 @@ describe('Copy format', () => {
 		expect(api.getHTML()).not.toMatch(/copy-format|class=/);
 	});
 
+	it('a click in the margin beside an indented paragraph copies nothing and changes nothing', () => {
+		// The margin is outside the <p>, so the click lands on the editor, and the browser puts the
+		// caret in the paragraph's text.
+		const { editor } = open(`${SOURCE}<p style="margin-left: 48px">one</p><blockquote>quote</blockquote>`);
+		click(button());
+		for (const text of ['source', 'quote']) {
+			const node = para(editor, text === 'quote' ? 'source' : text).firstChild as Text;
+			const inQuote = editor.querySelector('blockquote')!.firstChild as Text;
+			const at = text === 'quote' ? inQuote : node;
+			window.getSelection()!.setBaseAndExtent(at, 1, at, 1);
+			click(editor);
+			expect(editor.classList.contains('copy-format-pick')).toBe(true);
+		}
+		click(para(editor, 'source'));
+		const one = para(editor, 'one').firstChild as Text;
+		window.getSelection()!.setBaseAndExtent(one, 1, one, 1);
+		click(editor);
+		expect(para(editor, 'one').getAttribute('style')).toBe('margin-left: 48px');
+	});
+
+	it('carries the tab stop that goes with a hanging indent, and takes it away with a plain format', () => {
+		const hung = '<p data-rtf-tab-stops="150px" style="margin-left: 150px; text-indent: -150px; tab-size: 150px;">A.<span style="white-space:pre">\t</span>source</p>';
+		const { editor, api } = open(`${hung}<p>B.<span style="white-space:pre">\t</span>one</p><p>plain</p>`);
+		const source = editor.querySelector('p')!;
+		const target = editor.querySelectorAll('p')[1];
+		click(button());
+		click(source);
+		click(target);
+		expect(target.getAttribute('data-rtf-tab-stops')).toBe('150px');
+		expect(api.getRTF()).toContain('\\pard\\tx2250\\li2250\\fi-2250 B.\\tab one\\par ');
+		key(editor, 'z', true);
+		expect(target.outerHTML).toBe('<p>B.<span style="white-space:pre">\t</span>one</p>');
+
+		click(button());
+		click(button());
+		click(para(editor, 'plain'));
+		click(source);
+		expect(source.outerHTML).toBe('<p>A.<span style="white-space:pre">\t</span>source</p>');
+		expect(api.getRTF()).not.toContain('\\tx');
+	});
+
+	it('clear() puts the brush down and takes the frame away', () => {
+		const { editor } = open(`${SOURCE}<p>one</p>`);
+		click(button());
+		click(para(editor, 'source'));
+		(component as unknown as { clear(): void }).clear();
+		flushSync();
+		expect(bar()).toBeNull();
+		expect(host!.querySelector('.ink-copy-format-source')).toBeNull();
+		click(editor.querySelector('p')!);
+		expect(editor.innerHTML).toBe('<p></p>');
+	});
+
 	it('a new document puts the brush down', () => {
 		const { editor, api } = open(`${SOURCE}<p>one</p>`);
 		click(button());

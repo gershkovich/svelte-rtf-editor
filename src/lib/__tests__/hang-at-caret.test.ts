@@ -137,6 +137,40 @@ describe('Hang at caret', () => {
 		expect(editor.innerHTML).toBe('A. Pancreas: text<br>next');
 	});
 
+	it('keeps the tab stops the paragraph already has', () => {
+		const { editor } = open('<p data-rtf-tab-stops="1.75in,3.5in">A.<span style="white-space:pre">\t</span>text</p>');
+		layout(148);
+		caretIn(editor, 'text', 0);
+		hang();
+		expect(editor.querySelector('p')!.getAttribute('data-rtf-tab-stops')).toBe('1.75in,3.5in,48px');
+		layout(100);
+		caretIn(editor, 'A.', 0);
+		hang();
+		const p = editor.querySelector('p')!;
+		expect(p.getAttribute('data-rtf-tab-stops')).toBe('1.75in,3.5in');
+		expect(p.hasAttribute('style')).toBe(false);
+	});
+
+	it('a new hang with no tab before the caret takes the earlier hang\'s stop with it', () => {
+		const { editor } = open('<p data-rtf-tab-stops="48px" style="margin-left: 48px; text-indent: -48px; tab-size: 48px;">A.<span style="white-space:pre">\t</span>text</p>');
+		layout(124);
+		caretIn(editor, 'A.', 2);
+		hang();
+		const p = editor.querySelector('p')!;
+		expect(p.hasAttribute('data-rtf-tab-stops')).toBe(false);
+		expect(p.getAttribute('style')).toBe('margin-left: 24px; text-indent: -24px;');
+	});
+
+	it('leaves a line centered with align="center" alone (-webkit-center)', () => {
+		const html = '<div align="center">A. Pancreas: text</div>';
+		const { editor } = open(html);
+		layout(220);
+		vi.spyOn(window, 'getComputedStyle').mockReturnValue({ textAlign: '-webkit-center' } as CSSStyleDeclaration);
+		caretIn(editor, 'A. Pancreas: text', 13);
+		hang();
+		expect(editor.innerHTML).toBe(html);
+	});
+
 	it.each([
 		['a centered paragraph', '<p style="text-align: center">A. Pancreas: text</p>'],
 		['a heading', '<h2>A. Pancreas: text</h2>'],
@@ -172,6 +206,25 @@ describe('what a paste brings in', () => {
 		expect(editor.lastElementChild!.getAttribute('style')).toBe('margin-left: 96px; text-indent: -48px;');
 		paste(editor, '<span style="text-indent: -48px;">three</span>', editor.firstElementChild!);
 		expect(editor.querySelector('span')!.hasAttribute('style')).toBe(false);
+	});
+
+	it('a paste that inserts nothing does not make the next keystroke strip a new document', async () => {
+		const { editor, api } = open('<p>one</p>');
+		editor.dispatchEvent(new Event('paste', { bubbles: true, cancelable: true }));
+		api.setHTML('<p id="dx-1">Diagnosis</p><h2 id="sec-gross">Gross</h2>');
+		editor.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		expect(editor.innerHTML).toBe('<p id="dx-1">Diagnosis</p><h2 id="sec-gross">Gross</h2>');
+	});
+
+	it('and the snapshot expires by itself when no input event follows', async () => {
+		const { editor } = open('<p>one</p>');
+		editor.dispatchEvent(new Event('paste', { bubbles: true, cancelable: true }));
+		await new Promise((r) => setTimeout(r, 5));
+		editor.insertAdjacentHTML('beforeend', '<p id="typed">two</p>');
+		editor.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		expect(editor.querySelector('#typed')).not.toBeNull();
 	});
 
 	it('leaves what was already there alone', () => {

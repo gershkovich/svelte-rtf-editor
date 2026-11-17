@@ -52,6 +52,15 @@ interface RenderState {
 	fontIndex: number;
 	ucSkip: number;
 	inList: boolean;
+	/**
+	 * Paragraph indents in twips: \li (left), \ri (right) and \fi (first line, negative when the
+	 * paragraph hangs). They hold from one paragraph to the next until \pard, and like the rest of
+	 * this state they end with the group they were set in: a \pard inside {\listtext ...} or
+	 * {\pntext ...} does not reach the paragraph around it.
+	 */
+	leftIndent: number;
+	rightIndent: number;
+	firstLineIndent: number;
 }
 
 // ── Highlight palette (RTF \highlight 1-16) ──
@@ -411,6 +420,17 @@ export interface RtfReadOptions {
 	fontSize?: number;
 }
 
+/** Twips as a CSS length in points (20 twips), which the writer reads back as the same twips. */
+function twipsToPt(twips: number): string {
+	return `${Math.round(twips * 5) / 100}pt`;
+}
+
+function resetIndents(state: RenderState): void {
+	state.leftIndent = 0;
+	state.rightIndent = 0;
+	state.firstLineIndent = 0;
+}
+
 export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): string {
 	const tokens = tokenize(rtfString);
 	const tree = buildTree(tokens);
@@ -421,6 +441,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	const paragraphs: string[] = [];
 	const paragraphAligns: string[] = [];
 	const paragraphIndents: string[] = [];
+	const paragraphFigureIndents: string[] = [];
 	const paragraphCaptions: boolean[] = [];
 	let paragraphHasText = false;
 	let paragraphHasListMarker = false;
@@ -430,24 +451,14 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	function pushParagraph(html: string, align: string, isCaption = false): void {
 		paragraphs.push(html);
 		paragraphAligns.push(align);
-		paragraphIndents.push(inTableCell || html.startsWith('<table') ? '' : indentStyle());
+		const inTable = inTableCell || html.startsWith('<table');
+		paragraphIndents.push(inTable ? '' : indentStyle());
+		paragraphFigureIndents.push(inTable ? '' : figureIndentStyle());
 		paragraphCaptions.push(isCaption);
 	}
 
 	// Paragraph alignment (reset by \pard, affects cells and paragraphs)
 	let currentAlign = 'left';
-
-	// Paragraph indents in twips: \li (left), \ri (right) and \fi (first line, negative when the
-	// paragraph hangs). As in RTF they hold from one paragraph to the next until \pard resets them.
-	// A table cell declares its own paragraph, so they are not carried out of a table.
-	let leftIndent = 0;
-	let rightIndent = 0;
-	let firstLineIndent = 0;
-	function resetIndents(): void {
-		leftIndent = 0;
-		rightIndent = 0;
-		firstLineIndent = 0;
-	}
 
 	/**
 	 * The current indents as CSS, in points (20 twips), which the writer reads back as the same
@@ -455,14 +466,25 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	 * the page margin, where a browser would clip it.
 	 */
 	function indentStyle(): string {
-		const pt = (twips: number) => `${Math.round(twips * 5) / 100}pt`;
+		const { leftIndent, rightIndent, firstLineIndent } = currentState();
 		const left = Math.max(0, leftIndent);
 		const first = Math.max(-left, firstLineIndent);
 		const parts: string[] = [];
-		if (left > 0) parts.push(`margin-left:${pt(left)}`);
-		if (rightIndent > 0) parts.push(`margin-right:${pt(rightIndent)}`);
-		if (first !== 0) parts.push(`text-indent:${pt(first)}`);
+		if (left > 0) parts.push(`margin-left:${twipsToPt(left)}`);
+		if (rightIndent > 0) parts.push(`margin-right:${twipsToPt(rightIndent)}`);
+		if (first !== 0) parts.push(`text-indent:${twipsToPt(first)}`);
 		return parts.join(';');
+	}
+
+	/**
+	 * The indent of a picture's paragraph: where its one line starts, as a left margin. A figure
+	 * is written back with a left indent only, and a first-line indent on it would be passed on to
+	 * its caption.
+	 */
+	function figureIndentStyle(): string {
+		const { leftIndent, firstLineIndent } = currentState();
+		const start = Math.max(0, leftIndent) + Math.max(-Math.max(0, leftIndent), firstLineIndent);
+		return start > 0 ? `margin-left:${twipsToPt(start)}` : '';
 	}
 
 	// Table state
@@ -508,6 +530,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			fontIndex: 0,
 			ucSkip: 1,
 			inList: false,
+			leftIndent: 0,
+			rightIndent: 0,
+			firstLineIndent: 0,
 		};
 	}
 
@@ -727,13 +752,13 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						currentAlign = 'justify';
 						break;
 					case 'li':
-						leftIndent = p ?? 0;
+						state.leftIndent = p ?? 0;
 						break;
 					case 'ri':
-						rightIndent = p ?? 0;
+						state.rightIndent = p ?? 0;
 						break;
 					case 'fi':
-						firstLineIndent = p ?? 0;
+						state.firstLineIndent = p ?? 0;
 						break;
 					case 'par':
 						if (!inTableCell) flushParagraph();
@@ -788,7 +813,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						currentRowCellRights = [];
 						currentRowCellAligns = [];
 						inTableCell = false;
-						resetIndents();
+						resetIndents(state);
 						break;
 					case 'pard':
 						state.bold = false;
@@ -796,7 +821,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						state.underline = false;
 						state.strike = false;
 						currentAlign = 'left';
-						resetIndents();
+						resetIndents(state);
 						break;
 					case 'line':
 						currentParagraph += '<br>';
@@ -962,7 +987,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		// A paragraph holding nothing but pictures becomes a figure, so it can carry
 		// a caption and be aligned/resized as a unit in the editor.
 		if (IMAGE_ONLY_PARAGRAPH.test(trimmed)) {
-			rendered.push(`<figure${styleAttr}>${trimmed}</figure>`);
+			const figureStyle = [align !== 'left' ? `text-align:${align}` : '', paragraphFigureIndents[i] ?? '']
+				.filter(Boolean)
+				.join(';');
+			rendered.push(`<figure${figureStyle ? ` style="${figureStyle}"` : ''}>${trimmed}</figure>`);
 			continue;
 		}
 		const sizeMatch = trimmed.match(/font-size:\s*([\d.]+)pt/);
@@ -970,15 +998,14 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			// Compared in half-points, rounded the way the writer rounds them, so
 			// a heading written at any body size is read back as the same level.
 			const halfPoints = Math.round(parseFloat(sizeMatch[1]) * 2);
-			const alignAttr = styleAttr;
 			const atLeast = (scale: number) => halfPoints >= Math.round(bodySize * scale);
 			// At the default 12 pt, size alone makes a heading, as it always has. At
 			// another screen size, ordinary 12 pt text can be a step above the body,
 			// so a heading must also be bold, as every heading the writer emits is.
 			const looksLikeHeading = bodySize === 24 || /^<strong>/.test(trimmed);
-			if (looksLikeHeading && atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${alignAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
-			if (looksLikeHeading && atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
-			if (looksLikeHeading && atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${styleAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${styleAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
+			if (looksLikeHeading && atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${styleAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
 		}
 		rendered.push(`<p${styleAttr}>${trimmed}</p>`);
 	}

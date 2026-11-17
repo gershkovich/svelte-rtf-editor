@@ -180,8 +180,7 @@
 	export function setHTML(html: string): void {
 		if (editorEl) {
 			selectedImage = null;
-			stopCopyFormat();
-			indentUndo = [];
+			documentReplaced();
 			editorEl.innerHTML = html;
 			updateCounts();
 			if (autosave) scheduleAutoSave();
@@ -213,7 +212,7 @@
 	export function clear(): void {
 		if (editorEl) {
 			selectedImage = null;
-			indentUndo = [];
+			documentReplaced();
 			editorEl.innerHTML = '<p></p>';
 			try { localStorage.removeItem(storageKey); } catch (e) {}
 			updateCounts();
@@ -251,6 +250,31 @@
 	export function importRtf(): void {
 		fileInputEl?.click();
 	}
+
+	/**
+	 * The whole document is about to be replaced (setHTML, clear, an RTF import): nothing that
+	 * points into the old one may act on the new one. Indent steps no longer undo, the Copy format
+	 * brush is put down, and a paste that inserted nothing is forgotten.
+	 */
+	function documentReplaced(): void {
+		indentUndo = [];
+		pastedOver = null;
+		stopCopyFormat();
+	}
+
+	// The frame around the paragraph copied from follows it when the text reflows: typing is caught
+	// by the input handler, and a picture finishing loading or the editor changing width by this.
+	$effect(() => {
+		if (copyFormat !== 'apply' || !editorEl || typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(() => placeCopySourceBox());
+		observer.observe(editorEl);
+		return () => observer.disconnect();
+	});
+
+	// A read-only editor has no toolbar to put the brush down with.
+	$effect(() => {
+		if (readonly) stopCopyFormat();
+	});
 
 	// ── Selection helpers ──
 	function saveSelection(): void {
@@ -407,11 +431,15 @@
 
 	/** A length from an element's inline style, in px, or 0 when it sets none. */
 	function stylePx(el: HTMLElement, prop: 'marginLeft' | 'marginRight' | 'textIndent'): number {
-		const value = el.style[prop].trim().toLowerCase();
+		const value = el.style[prop].trim();
 		if (!value) return 0;
-		const m = /^(-?\d*\.?\d+)(px|pt|in|cm|mm)$/.exec(value);
-		const px = m ? parseFloat(m[1]) * PX_PER_UNIT[m[2]] : parseFloat(getComputedStyle(el)[prop]);
-		return px || 0;
+		return (lengthPx(value) ?? parseFloat(getComputedStyle(el)[prop])) || 0;
+	}
+
+	/** A CSS length in px, or null when it is not a number in px, pt, in, cm or mm. */
+	function lengthPx(value: string): number | null {
+		const m = /^(-?\d*\.?\d+)(px|pt|in|cm|mm)$/.exec(value.trim().toLowerCase());
+		return m ? parseFloat(m[1]) * PX_PER_UNIT[m[2]] : null;
 	}
 
 	/** A <p>, or a <div> that holds text and no blocks: what a right or hanging indent is set on. */
@@ -467,8 +495,8 @@
 			// Wrapping moved the text the caret was in: put the caret back.
 			if (node.isConnected) sel.collapse(node, offset);
 		}
-		const align = getComputedStyle(block).textAlign;
-		if (align === 'center' || align === 'right' || align === 'end') {
+		// A centered <div align="center"> computes to -webkit-center or -moz-center.
+		if (/(center|right)$|^end$/.test(getComputedStyle(block).textAlign)) {
 			if (wrapped) undoWrap(block, wrapped);
 			return;
 		}
@@ -485,19 +513,28 @@
 		before0.setEnd(node, offset);
 		const tabBefore = before0.toString().includes('\t');
 
+		// The stop an earlier hang put at the old indent goes with that hang. Any other stop the
+		// paragraph has (data-rtf-tab-stops="1.75in,3.5in") is not this command's to remove.
+		const hung = textIndentPx(block) < 0;
+		const stops = (stopsBefore ?? '')
+			.split(',')
+			.map((v) => v.trim())
+			.filter((v) => v && !(hung && Math.abs((lengthPx(v) ?? NaN) - left) < 0.5));
+		// tab-size shows one stop, the one at the hang: it goes when that stop does.
+		block.style.tabSize = '';
 		if (hang < 1) {
 			block.style.marginLeft = first > 0 ? `${first}px` : '';
 			block.style.textIndent = '';
-			block.style.tabSize = '';
-			block.removeAttribute(TAB_STOPS);
 		} else {
 			block.style.marginLeft = `${at}px`;
 			block.style.textIndent = `${-hang}px`;
 			if (tabBefore) {
 				block.style.tabSize = `${hang}px`;
-				block.setAttribute(TAB_STOPS, `${at}px`);
+				if (!stops.some((v) => Math.abs((lengthPx(v) ?? NaN) - at) < 0.5)) stops.push(`${at}px`);
 			}
 		}
+		if (stops.length > 0) block.setAttribute(TAB_STOPS, stops.join(','));
+		else block.removeAttribute(TAB_STOPS);
 		if (!block.getAttribute('style')) block.removeAttribute('style');
 		const after = block.getAttribute('style');
 		const stopsAfter = block.getAttribute(TAB_STOPS);
@@ -545,7 +582,8 @@
 	// format can go to as many paragraphs as needed.
 	//
 	// What is copied is the paragraph's own formatting, the part the RTF writer sends as \q, \li,
-	// \ri and \fi: text-align, margin-left, margin-right and text-indent. A heading or a paragraph
+	// \ri and \fi: text-align, margin-left, margin-right and text-indent, and with them the tab
+	// stop Hang at caret sets (tab-size, data-rtf-tab-stops). A heading or a paragraph
 	// in a table cell takes the alignment and the left indent only, which is all the writer sends
 	// for them. Lists, code blocks and pictures are left alone. Each click is one Undo step.
 	interface ParagraphFormat {
@@ -553,8 +591,11 @@
 		marginLeft: string;
 		marginRight: string;
 		textIndent: string;
+		/** The tab stop that goes with a hanging indent: tab-size on screen, \tx in the RTF. */
+		tabSize: string;
+		tabStops: string;
 	}
-	const NO_FORMAT: ParagraphFormat = { textAlign: '', marginLeft: '', marginRight: '', textIndent: '' };
+	const NO_FORMAT: ParagraphFormat = { textAlign: '', marginLeft: '', marginRight: '', textIndent: '', tabSize: '', tabStops: '' };
 	const PAINT_BLOCKS = 'p, div, h1, h2, h3, h4, h5, h6';
 
 	/** 'pick': waiting for the paragraph to copy from. 'apply': each click applies the format. */
@@ -599,7 +640,9 @@
 			textAlign: align === 'left' || align === 'start' ? '' : align,
 			marginLeft: el.style.marginLeft,
 			marginRight: el.style.marginRight,
-			textIndent: el.style.textIndent
+			textIndent: el.style.textIndent,
+			tabSize: el.style.tabSize,
+			tabStops: el.getAttribute(TAB_STOPS) ?? ''
 		};
 	}
 
@@ -613,18 +656,30 @@
 		const target = e.target instanceof Element ? e.target : null;
 		if (!target || !editorEl.contains(target)) return none;
 		if (target.closest('li, pre, figure')) return none;
-		const block = target.closest(PAINT_BLOCKS);
-		const cell = target.closest('td, th');
-		if (block instanceof HTMLElement && block !== editorEl && editorEl.contains(block) && (!cell || cell.contains(block))) {
-			const holdsBlocks = Array.from(block.children).some((c) => c.matches(`${INDENT_TARGETS}, table, hr`));
-			return holdsBlocks ? none : { block, loose: null };
-		}
+		const own = paintable(target);
+		if (own !== undefined) return own ? { block: own, loose: null } : none;
+		// The click landed on the editor itself, not on a paragraph: loose text, a margin, or the
+		// empty space below the text. Only loose text counts. The caret also lands in the nearest
+		// paragraph when its margin is clicked, and that paragraph was not what was clicked.
 		const anchor = window.getSelection()?.anchorNode ?? null;
-		if (anchor instanceof Text && anchor.data.trim() && editorEl.contains(anchor)) {
-			const parent = anchor.parentElement;
-			if (parent && !parent.closest('li, pre, figure')) return { block: null, loose: anchor };
-		}
-		return none;
+		if (!(anchor instanceof Text) || !anchor.data.trim() || !editorEl.contains(anchor)) return none;
+		const parent = anchor.parentElement;
+		if (!parent || parent.closest('li, pre, figure, blockquote') || paintable(parent) !== undefined) return none;
+		return { block: null, loose: anchor };
+	}
+
+	/**
+	 * The paragraph an element is in that Copy format can read or set: a heading, a <p>, or a
+	 * <div> that holds text. null when it is in a block that cannot take one (a <div> holding other
+	 * blocks); undefined when it is in no block at all, which is loose text.
+	 */
+	function paintable(el: Element): HTMLElement | null | undefined {
+		if (!editorEl) return undefined;
+		const block = el.closest(PAINT_BLOCKS);
+		const cell = el.closest('td, th');
+		if (!(block instanceof HTMLElement) || block === editorEl || !editorEl.contains(block)) return undefined;
+		if (cell && !cell.contains(block)) return undefined;
+		return /^H[1-6]$/.test(block.tagName) || isPlainParagraph(block) ? block : null;
 	}
 
 	function handleCopyFormatClick(e: MouseEvent): void {
@@ -650,6 +705,7 @@
 		}
 		if (!target) return;
 		const before = wrapped ? null : target.getAttribute('style');
+		const stopsBefore = target.getAttribute(TAB_STOPS);
 		const whole = isPlainParagraph(target) && !target.closest('td, th');
 		// align="center" (Firefox) outranks an empty style, so say left out loud over it.
 		target.style.textAlign = copiedFormat.textAlign || (target.hasAttribute('align') ? 'left' : '');
@@ -657,11 +713,15 @@
 		if (whole) {
 			target.style.marginRight = copiedFormat.marginRight;
 			target.style.textIndent = copiedFormat.textIndent;
+			target.style.tabSize = copiedFormat.tabSize;
+			if (copiedFormat.tabStops) target.setAttribute(TAB_STOPS, copiedFormat.tabStops);
+			else target.removeAttribute(TAB_STOPS);
 		}
 		if (!target.getAttribute('style')) target.removeAttribute('style');
 		const after = target.getAttribute('style');
-		if (!wrapped && after === before) return;
-		indentUndo.push([{ el: target, before, after, wrapped }]);
+		const stopsAfter = target.getAttribute(TAB_STOPS);
+		if (!wrapped && after === before && stopsAfter === stopsBefore) return;
+		indentUndo.push([{ el: target, before, after, wrapped, stops: { before: stopsBefore, after: stopsAfter } }]);
 		indentChanged();
 		placeCopySourceBox();
 	}
@@ -682,10 +742,7 @@
 				if (stops.before === null) el.removeAttribute(TAB_STOPS);
 				else el.setAttribute(TAB_STOPS, stops.before);
 			}
-			if (wrapped) {
-				if (wrapped.br) el.after(wrapped.br);
-				el.replaceWith(...Array.from(el.childNodes));
-			}
+			if (wrapped) undoWrap(el, wrapped);
 		}
 		indentChanged();
 		return true;
@@ -866,6 +923,7 @@
 
 	// ── Input handler ──
 	function handleInput(): void {
+		placeCopySourceBox();
 		if (pastedOver) {
 			tidyPasted(pastedOver);
 			pastedOver = null;
@@ -1235,7 +1293,7 @@
 			const html = await readRtfFile(file, { fontSize });
 			if (editorEl) {
 				selectedImage = null;
-				indentUndo = [];
+				documentReplaced();
 				editorEl.innerHTML = html;
 				updateCounts();
 				fireChange();
@@ -1441,7 +1499,16 @@
 			return;
 		}
 		// The browser pastes next; the input event that follows tidies what came in.
-		if (!readonly && editorEl) pastedOver = new Set(editorEl.querySelectorAll('*'));
+		if (!readonly && editorEl) {
+			const snapshot = new Set(editorEl.querySelectorAll('*'));
+			pastedOver = snapshot;
+			// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
+			// input event. Left set, the snapshot would make the next keystroke treat the whole
+			// document as pasted.
+			setTimeout(() => {
+				if (pastedOver === snapshot) pastedOver = null;
+			}, 0);
+		}
 	}
 
 	// ── Pasted formatting ──

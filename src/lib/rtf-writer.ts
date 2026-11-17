@@ -716,19 +716,19 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// Heading sizes keep their ratio to the body (HEADING_SCALE).
 			case 'h1': {
 				const size = scaled(ctx, HEADING_SCALE.h1);
-				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h2': {
 				const size = scaled(ctx, HEADING_SCALE.h2);
-				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h3': {
 				const size = scaled(ctx, HEADING_SCALE.h3);
-				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
@@ -1068,7 +1068,7 @@ function restateAfterBlock(node: Node, ctx: WalkContext): string {
 	const formatted =
 		FORMATTED_BLOCK_TAGS.has(tag) ||
 		(['p', 'div'].includes(tag) && (ctx.inTableCell ? paragraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '') ||
-		(['h1', 'h2', 'h3'].includes(tag) && paragraphLayout(block, ctx) !== '') ||
+		(['h1', 'h2', 'h3'].includes(tag) && headingLayout(block, ctx) !== '') ||
 		(tag === 'pre' && ctx.indent + leftMarginTwips(block) > 0);
 	return formatted ? `\\pard${inCell(ctx)}${liControl(ctx.indent)} ` : '';
 }
@@ -1137,6 +1137,21 @@ function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
 }
 
 /**
+ * A heading's layout: its alignment and left indent, and outside a table cell its right and
+ * first-line indents too, so a heading read from RTF with a hanging number goes back as it came.
+ */
+function headingLayout(el: HTMLElement, ctx: WalkContext): string {
+	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? '' : edgeIndents(el)}`;
+}
+
+/** \\riN for margin-right and \\fiN for text-indent, or nothing where the element sets none. */
+function edgeIndents(el: HTMLElement): string {
+	const ri = lengthTwips(el.style?.marginRight);
+	const fi = lengthTwips(el.style?.textIndent, true);
+	return `${ri ? `\\ri${ri}` : ''}${fi ? `\\fi${fi}` : ''}`;
+}
+
+/**
  * A <p> or <div>'s formatting outside a table cell: its alignment, then paragraphControls with the
  * indent of the blocks around it plus its own margin.
  */
@@ -1170,10 +1185,7 @@ function paragraphControls(el: HTMLElement, leftTwips: number): string {
 	out += liControl(leftTwips);
 	const style = el.style;
 	if (!style) return out;
-	const ri = lengthTwips(style.marginRight);
-	if (ri) out += `\\ri${ri}`;
-	const fi = lengthTwips(style.textIndent, true);
-	if (fi) out += `\\fi${fi}`;
+	out += edgeIndents(el);
 	const sb = lengthTwips(style.marginTop);
 	if (sb) out += `\\sb${sb}`;
 	const sa = lengthTwips(style.marginBottom);

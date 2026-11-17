@@ -220,6 +220,7 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 - `margin-left` adds to the indent of the blocks around the paragraph (an indent pasted from a browser, or a `<div>` with a margin that holds paragraphs), and is written as one `\li`.
 - Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not the right or first-line indent, spacing, tab stops or keep-with-next.
 - `rtfToHtml` reads the three indents back, in points: `\li720\ri720\fi-720` becomes `margin-left:36pt;margin-right:36pt;text-indent:-36pt`, and `RtfViewer` shows them. As in RTF, they hold from one paragraph to the next until `\pard`. Indents inside a table cell are not read.
+- A heading outside a table cell also writes its right and first-line indents, so a heading read from RTF with a hanging number goes back as it came. A picture is read with a left margin only, where its line starts.
 - `rtfToHtml` does not yet read spacing, keep-with-next or tab stops back.
 
 ## Theming
@@ -269,7 +270,7 @@ Four more toolbar buttons set the other two RTF indents, 0.5 in per press, on a 
 
 Decrease indent stops where the first line of a hanging paragraph reaches the left edge.
 
-**Hang at caret** sets the hanging indent to any distance: put the caret where the later lines should begin, for example after `A. Pancreas: `, and press the button. The first line stays where it starts and the lines after it begin under the caret. With the caret at the start of the line, the hang is taken away. When a tab comes before the caret, the paragraph also gets a tab stop at the new indent (`tab-size` on screen, `data-rtf-tab-stops` for the RTF's `\tx`), so the text after the tab lines up with the lines below it. It works on a paragraph outside a table cell that is aligned left or justified.
+**Hang at caret** sets the hanging indent to any distance: put the caret where the later lines should begin, for example after `A. Pancreas: `, and press the button. The first line stays where it starts and the lines after it begin under the caret. With the caret at the start of the line, the hang is taken away. When a tab comes before the caret, the paragraph also gets a tab stop at the new indent (`tab-size` on screen, `data-rtf-tab-stops` for the RTF's `\tx`), so the text after the tab lines up with the lines below it. Tab stops the paragraph already has are kept. It works on a paragraph outside a table cell that is aligned left or justified.
 
 ### Copy format
 
@@ -281,7 +282,8 @@ The **Copy format** button gives several paragraphs the same alignment and inden
 
 It stays on until **Done** in the bar, `Esc`, or the button again. Each click is one Undo step.
 
-- What is copied is the paragraph's alignment, indent, right indent and hanging indent. Bold, italic, color and size are not.
+- What is copied is the paragraph's alignment, indent, right indent and hanging indent, with the tab stop Hang at caret sets. Bold, italic, color and size are not.
+- A click in the margin beside a paragraph, or in the empty space below the text, does nothing.
 - Copying from a plain paragraph clears those from the paragraphs clicked.
 - A heading or a paragraph in a table cell takes the alignment and the indent only, which is what the RTF carries for them. Lists, code blocks and pictures are left alone.
 - The frame, the highlight and the bar are not part of the text and never reach `getHTML()` or the RTF.
