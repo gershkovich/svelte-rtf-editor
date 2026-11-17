@@ -60,9 +60,16 @@ describe('characters', () => {
 		expect(htmlToRtf(el(read(R`It\'92s\par`)))).toContain("It\\u8217\\'3fs");
 	});
 
-	it.fails("#3.10: a \\' with no hex digits after it adds no NUL character", () => {
+	it("#3.10: a \\' with no hex digits after it adds no NUL character", () => {
 		expect(rtfToHtml("{\\rtf1\\ansi abc\\'")).not.toContain('\u0000');
 		expect(rtfToHtml("{\\rtf1\\ansi abc\\'zz def\\par}")).not.toContain('\u0000');
+	});
+
+	it("a damaged \\' is dropped and the text after it is kept as it is", () => {
+		expect(read(R`abc\'zz def\par`)).toBe('<p>abczz def</p>');
+		expect(read(R`a\'9z b\par`)).toBe('<p>a9z b</p>');
+		expect(read(R`a\'\b b\b0\par`)).toBe('<p>a<strong>b</strong></p>');
+		expect(rtfToHtml("{\\rtf1\\ansi abc\\'9")).toBe('<p>abc9</p>');
 	});
 
 	it('escaped backslash and braces are text', () => {

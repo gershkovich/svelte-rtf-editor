@@ -236,13 +236,16 @@ function tokenize(rtf: string): Token[] {
 
 			const next = rtf[i];
 
-			// Hex escape \'xx
+			// Hex escape \'xx. One without two hex digits after it is damaged: it is dropped, and
+			// what follows it is read as usual, rather than turned into a NUL or a control character.
 			if (next === "'") {
 				i++;
 				const hex = rtf.substring(i, i + 2);
-				i += 2;
-				const code = parseInt(hex, 16);
-				tokens.push({ type: 'text', value: String.fromCharCode(WINDOWS_1252_C1[code - 0x80] ?? code) });
+				if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+					i += 2;
+					const code = parseInt(hex, 16);
+					tokens.push({ type: 'text', value: String.fromCharCode(WINDOWS_1252_C1[code - 0x80] ?? code) });
+				}
 			}
 			// Special escapes
 			else if (next === '\\' || next === '{' || next === '}') {
