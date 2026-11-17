@@ -579,3 +579,23 @@ describe('display fonts named with "mono"', () => {
 		expect(() => rtfToHtml(rtf, { maxBytes: 52_490_000 })).toThrow(/bytes, and the limit is 52490000 bytes/);
 	});
 });
+
+describe("a figure's caption is its own text", () => {
+	const png = '89504e470d0a1a0a0000000d49484452';
+	const figure = (caption: string) => read(`{\\pict\\pngblip\\picw10\\pich10 ${png}}\\par{\\*\\inkcap}${caption}\\par`);
+	const img = '<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" style="width:10px;height:auto" alt="">';
+
+	it('"$&", "$`" and "$\'" in it are those characters, not the figure written a second time', () => {
+		expect(figure("costs $& and $` and $' and $1")).toBe(
+			`<figure>${img}<figcaption>costs $&amp; and $\` and $' and $1</figcaption></figure>`
+		);
+	});
+
+	it('a link in it keeps an address that holds "$`", and the figure stays one element', () => {
+		const html = figure('{\\field{\\*\\fldinst HYPERLINK "mailto:a$`"}{\\fldrslt mail}}');
+		expect(html).toBe(`<figure>${img}<figcaption><a href="mailto:a$\`">mail</a></figcaption></figure>`);
+		const parsed = el(html);
+		expect(parsed.querySelectorAll('figure, img')).toHaveLength(2);
+		expect(parsed.querySelector('a')!.getAttributeNames()).toEqual(['href']);
+	});
+});
