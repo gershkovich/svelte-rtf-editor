@@ -268,6 +268,27 @@ Four more toolbar buttons set the other two RTF indents, 0.5 in per press, on a 
 | Increase / Decrease right indent | The right edge of the paragraph | `\ri720` |
 
 Decrease indent stops where the first line of a hanging paragraph reaches the left edge.
+
+**Hang at caret** sets the hanging indent to any distance: put the caret where the later lines should begin, for example after `A. Pancreas: `, and press the button. The first line stays where it starts and the lines after it begin under the caret. With the caret at the start of the line, the hang is taken away. When a tab comes before the caret, the paragraph also gets a tab stop at the new indent (`tab-size` on screen, `data-rtf-tab-stops` for the RTF's `\tx`), so the text after the tab lines up with the lines below it. It works on a paragraph outside a table cell that is aligned left or justified.
+
+### Copy format
+
+The **Copy format** button gives several paragraphs the same alignment and indents:
+
+1. Press the button. The pointer becomes a crosshair and a bar under the toolbar says what to click.
+2. Click the paragraph to copy from. A dashed frame marks it and the pointer becomes a brush.
+3. Click each paragraph that should get the format. The one under the pointer is highlighted.
+
+It stays on until **Done** in the bar, `Esc`, or the button again. Each click is one Undo step.
+
+- What is copied is the paragraph's alignment, indent, right indent and hanging indent. Bold, italic, color and size are not.
+- Copying from a plain paragraph clears those from the paragraphs clicked.
+- A heading or a paragraph in a table cell takes the alignment and the indent only, which is what the RTF carries for them. Lists, code blocks and pictures are left alone.
+- The frame, the highlight and the bar are not part of the text and never reach `getHTML()` or the RTF.
+
+### Pasted text
+
+A browser copies a paragraph with its looks written out as inline styles, and repeats its `id`. After a paste, each element that came in loses its `id` and any margin or first-line indent that changes nothing on screen, so a copy pasted inside the editor is the same markup as its source. A line the browser makes as a `<div>` is spaced like a `<p>`; both are written to RTF as a paragraph.
  Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
 
 Tab stays in the editor so a line can be indented. To leave the editor from the keyboard, press

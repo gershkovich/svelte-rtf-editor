@@ -180,6 +180,7 @@
 	export function setHTML(html: string): void {
 		if (editorEl) {
 			selectedImage = null;
+			stopCopyFormat();
 			indentUndo = [];
 			editorEl.innerHTML = html;
 			updateCounts();
@@ -282,6 +283,10 @@
 			indentBlocks(cmd);
 			return;
 		}
+		if (cmd === 'hangAtCaret') {
+			hangAtCaret();
+			return;
+		}
 		if (cmd === 'undo' && undoIndent()) return;
 		document.execCommand(cmd, false, value ?? undefined);
 		updateToolbarState();
@@ -327,6 +332,8 @@
 		after: string | null;
 		/** The block is a paragraph this step made around loose text, and the <br> that ended it. */
 		wrapped: { br: HTMLBRElement | null } | null;
+		/** The paragraph's data-rtf-tab-stops before a step that changed it. */
+		stops?: { before: string | null; after: string | null };
 	}
 	let indentUndo: IndentChange[][] = [];
 
@@ -421,6 +428,244 @@
 		return el instanceof HTMLElement && el.tagName === 'BLOCKQUOTE' && el.style.borderLeftStyle === 'none';
 	}
 
+	// ── Hang at caret ──
+	// Sets the hanging indent to where the caret is: the first line stays where it starts, and the
+	// lines after it begin under the caret. Put the caret after "A. Pancreas: " and the rest of the
+	// paragraph lines up under the diagnosis. With the caret at the start of the line the hang is
+	// taken away. Works on a paragraph (a <p>, or a <div> that holds text) outside a table cell,
+	// aligned left or justified, where a position measured from the left means something.
+	//
+	// When a tab comes before the caret, the tab has to end at the new indent for the first line to
+	// line up with the rest. The paragraph gets a tab stop there: tab-size on screen (stops are
+	// counted from the indent, so one hang's width puts a stop on it) and data-rtf-tab-stops for
+	// the writer's \tx.
+	const TAB_STOPS = 'data-rtf-tab-stops';
+
+	function hangAtCaret(): void {
+		if (readonly || !editorEl) return;
+		editorEl.focus();
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !sel.anchorNode || !editorEl.contains(sel.anchorNode)) return;
+		const caret = sel.getRangeAt(0).cloneRange();
+		caret.collapse(true);
+		const node = caret.startContainer;
+		const offset = caret.startOffset;
+		const el = node instanceof Element ? node : node.parentElement;
+		if (!el || el.closest('td, th, li, pre, figure, h1, h2, h3, h4, h5, h6')) return;
+		const x = caretLeft(caret);
+		if (x === null) return;
+
+		const closest = el.closest(PAINT_BLOCKS);
+		let block = closest instanceof HTMLElement && closest !== editorEl && editorEl.contains(closest) ? closest : null;
+		let wrapped: { br: HTMLBRElement | null } | null = null;
+		if (block && !isPlainParagraph(block)) return;
+		if (!block) {
+			const made = wrapLooseLine(node);
+			if (!made) return;
+			block = made.p;
+			wrapped = { br: made.br };
+			// Wrapping moved the text the caret was in: put the caret back.
+			if (node.isConnected) sel.collapse(node, offset);
+		}
+		const align = getComputedStyle(block).textAlign;
+		if (align === 'center' || align === 'right' || align === 'end') {
+			if (wrapped) undoWrap(block, wrapped);
+			return;
+		}
+
+		const left = marginLeftPx(block);
+		// Where the first line starts, and where the caret is, both from the page's left edge.
+		const first = Math.max(0, left + textIndentPx(block));
+		const at = Math.round(x - (block.getBoundingClientRect().left - left));
+		const hang = at - first;
+		const before = wrapped ? null : block.getAttribute('style');
+		const stopsBefore = block.getAttribute(TAB_STOPS);
+		const before0 = document.createRange();
+		before0.setStart(block, 0);
+		before0.setEnd(node, offset);
+		const tabBefore = before0.toString().includes('\t');
+
+		if (hang < 1) {
+			block.style.marginLeft = first > 0 ? `${first}px` : '';
+			block.style.textIndent = '';
+			block.style.tabSize = '';
+			block.removeAttribute(TAB_STOPS);
+		} else {
+			block.style.marginLeft = `${at}px`;
+			block.style.textIndent = `${-hang}px`;
+			if (tabBefore) {
+				block.style.tabSize = `${hang}px`;
+				block.setAttribute(TAB_STOPS, `${at}px`);
+			}
+		}
+		if (!block.getAttribute('style')) block.removeAttribute('style');
+		const after = block.getAttribute('style');
+		const stopsAfter = block.getAttribute(TAB_STOPS);
+		if (!wrapped && after === before && stopsAfter === stopsBefore) return;
+		indentUndo.push([{ el: block, before, after, wrapped, stops: { before: stopsBefore, after: stopsAfter } }]);
+		indentChanged();
+	}
+
+	/** Take away the paragraph wrapLooseLine made, leaving the loose line as it was. */
+	function undoWrap(p: HTMLElement, wrapped: { br: HTMLBRElement | null }): void {
+		if (wrapped.br) p.after(wrapped.br);
+		p.replaceWith(...Array.from(p.childNodes));
+	}
+
+	/**
+	 * The caret's distance from the left of the window. A caret between two pieces of text can have
+	 * no box of its own, so the character after it, or the one before, stands in.
+	 */
+	function caretLeft(caret: Range): number | null {
+		const own = caret.getClientRects()[0];
+		if (own && (own.height > 0 || own.width > 0)) return own.left;
+		const node = caret.startContainer;
+		if (!(node instanceof Text)) return null;
+		const probe = document.createRange();
+		if (caret.startOffset < node.length) {
+			probe.setStart(node, caret.startOffset);
+			probe.setEnd(node, caret.startOffset + 1);
+			const r = probe.getClientRects()[0];
+			if (r) return r.left;
+		}
+		if (caret.startOffset > 0) {
+			probe.setStart(node, caret.startOffset - 1);
+			probe.setEnd(node, caret.startOffset);
+			const rects = probe.getClientRects();
+			const r = rects[rects.length - 1];
+			if (r) return r.right;
+		}
+		return null;
+	}
+
+	// ── Copy format ──
+	// The toolbar's Copy format button turns the pointer into a format brush. The first click in
+	// the text picks the paragraph to copy from; each click after that gives the clicked paragraph
+	// the same alignment and indents. It stays on until Escape, Done, or the button again, so one
+	// format can go to as many paragraphs as needed.
+	//
+	// What is copied is the paragraph's own formatting, the part the RTF writer sends as \q, \li,
+	// \ri and \fi: text-align, margin-left, margin-right and text-indent. A heading or a paragraph
+	// in a table cell takes the alignment and the left indent only, which is all the writer sends
+	// for them. Lists, code blocks and pictures are left alone. Each click is one Undo step.
+	interface ParagraphFormat {
+		textAlign: string;
+		marginLeft: string;
+		marginRight: string;
+		textIndent: string;
+	}
+	const NO_FORMAT: ParagraphFormat = { textAlign: '', marginLeft: '', marginRight: '', textIndent: '' };
+	const PAINT_BLOCKS = 'p, div, h1, h2, h3, h4, h5, h6';
+
+	/** 'pick': waiting for the paragraph to copy from. 'apply': each click applies the format. */
+	let copyFormat: 'off' | 'pick' | 'apply' = $state('off');
+	let copiedFormat: ParagraphFormat = NO_FORMAT;
+	let copySource: HTMLElement | null = null;
+	/** Where the frame around the paragraph copied from sits, inside the content wrapper. */
+	let copySourceBox: { top: number; left: number; width: number; height: number } | null = $state(null);
+
+	function toggleCopyFormat(): void {
+		if (copyFormat !== 'off') {
+			stopCopyFormat();
+			return;
+		}
+		if (readonly) return;
+		selectedImage = null;
+		copyFormat = 'pick';
+	}
+
+	function stopCopyFormat(): void {
+		copyFormat = 'off';
+		copiedFormat = NO_FORMAT;
+		copySource = null;
+		copySourceBox = null;
+	}
+
+	function placeCopySourceBox(): void {
+		if (!copySource?.isConnected || !contentWrapEl) {
+			copySourceBox = null;
+			return;
+		}
+		const wrap = contentWrapEl.getBoundingClientRect();
+		const r = copySource.getBoundingClientRect();
+		// A hanging first line starts left of the paragraph's own box: frame it too.
+		const hang = Math.max(0, -textIndentPx(copySource));
+		copySourceBox = { top: r.top - wrap.top, left: r.left - wrap.left - hang, width: r.width + hang, height: r.height };
+	}
+
+	function formatOf(el: HTMLElement): ParagraphFormat {
+		const align = (el.style.textAlign || el.getAttribute('align') || '').toLowerCase();
+		return {
+			textAlign: align === 'left' || align === 'start' ? '' : align,
+			marginLeft: el.style.marginLeft,
+			marginRight: el.style.marginRight,
+			textIndent: el.style.textIndent
+		};
+	}
+
+	/**
+	 * The paragraph a click landed on: a <p>, a heading, or a <div> that holds text. A click on a
+	 * line of loose text lands on the editor itself, so the caret the click placed says which line.
+	 */
+	function paragraphAt(e: MouseEvent): { block: HTMLElement | null; loose: Node | null } {
+		const none = { block: null, loose: null };
+		if (!editorEl) return none;
+		const target = e.target instanceof Element ? e.target : null;
+		if (!target || !editorEl.contains(target)) return none;
+		if (target.closest('li, pre, figure')) return none;
+		const block = target.closest(PAINT_BLOCKS);
+		const cell = target.closest('td, th');
+		if (block instanceof HTMLElement && block !== editorEl && editorEl.contains(block) && (!cell || cell.contains(block))) {
+			const holdsBlocks = Array.from(block.children).some((c) => c.matches(`${INDENT_TARGETS}, table, hr`));
+			return holdsBlocks ? none : { block, loose: null };
+		}
+		const anchor = window.getSelection()?.anchorNode ?? null;
+		if (anchor instanceof Text && anchor.data.trim() && editorEl.contains(anchor)) {
+			const parent = anchor.parentElement;
+			if (parent && !parent.closest('li, pre, figure')) return { block: null, loose: anchor };
+		}
+		return none;
+	}
+
+	function handleCopyFormatClick(e: MouseEvent): void {
+		const { block, loose } = paragraphAt(e);
+		if (!block && !loose) return;
+		if (copyFormat === 'pick') {
+			copiedFormat = block ? formatOf(block) : NO_FORMAT;
+			copySource = block;
+			copyFormat = 'apply';
+			placeCopySourceBox();
+			return;
+		}
+		if (block && block === copySource) return;
+		let target = block;
+		let wrapped: { br: HTMLBRElement | null } | null = null;
+		if (!target && loose) {
+			// A line of loose text has no format to take away, and needs a paragraph to carry one.
+			if (Object.values(copiedFormat).every((v) => !v)) return;
+			const made = wrapLooseLine(loose);
+			if (!made) return;
+			target = made.p;
+			wrapped = { br: made.br };
+		}
+		if (!target) return;
+		const before = wrapped ? null : target.getAttribute('style');
+		const whole = isPlainParagraph(target) && !target.closest('td, th');
+		// align="center" (Firefox) outranks an empty style, so say left out loud over it.
+		target.style.textAlign = copiedFormat.textAlign || (target.hasAttribute('align') ? 'left' : '');
+		target.style.marginLeft = copiedFormat.marginLeft;
+		if (whole) {
+			target.style.marginRight = copiedFormat.marginRight;
+			target.style.textIndent = copiedFormat.textIndent;
+		}
+		if (!target.getAttribute('style')) target.removeAttribute('style');
+		const after = target.getAttribute('style');
+		if (!wrapped && after === before) return;
+		indentUndo.push([{ el: target, before, after, wrapped }]);
+		indentChanged();
+		placeCopySourceBox();
+	}
+
 	/** Undo the last Indent or Outdent, if nothing has changed since. */
 	function undoIndent(): boolean {
 		const step = indentUndo.pop();
@@ -430,9 +675,13 @@
 			indentUndo = [];
 			return false;
 		}
-		for (const { el, before, wrapped } of step) {
+		for (const { el, before, wrapped, stops } of step) {
 			if (before === null) el.removeAttribute('style');
 			else el.setAttribute('style', before);
+			if (stops) {
+				if (stops.before === null) el.removeAttribute(TAB_STOPS);
+				else el.setAttribute(TAB_STOPS, stops.before);
+			}
 			if (wrapped) {
 				if (wrapped.br) el.after(wrapped.br);
 				el.replaceWith(...Array.from(el.childNodes));
@@ -617,6 +866,10 @@
 
 	// ── Input handler ──
 	function handleInput(): void {
+		if (pastedOver) {
+			tidyPasted(pastedOver);
+			pastedOver = null;
+		}
 		indentUndo = [];
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the
@@ -882,6 +1135,10 @@
 	// ── Image selection / editing ──
 	function handleContentClick(e: MouseEvent): void {
 		if (readonly) return;
+		if (copyFormat !== 'off') {
+			handleCopyFormatClick(e);
+			return;
+		}
 		const target = e.target as HTMLElement | null;
 		selectedImage = target?.tagName === 'IMG' ? (target as HTMLImageElement) : null;
 	}
@@ -995,6 +1252,12 @@
 
 	// ── Keyboard shortcuts ──
 	function handleKeydown(e: KeyboardEvent): void {
+		// Escape puts the Copy format brush down, and does nothing else that press.
+		if (copyFormat !== 'off' && e.key === 'Escape') {
+			e.preventDefault();
+			stopCopyFormat();
+			return;
+		}
 		const mod = e.ctrlKey || e.metaKey;
 		if (mod && e.key === 'b') { e.preventDefault(); exec('bold'); }
 		if (mod && e.key === 'i') { e.preventDefault(); exec('italic'); }
@@ -1175,6 +1438,38 @@
 			e.preventDefault();
 			const text = e.clipboardData?.getData('text/plain') || '';
 			document.execCommand('insertText', false, text);
+			return;
+		}
+		// The browser pastes next; the input event that follows tidies what came in.
+		if (!readonly && editorEl) pastedOver = new Set(editorEl.querySelectorAll('*'));
+	}
+
+	// ── Pasted formatting ──
+	// A browser copies a paragraph with its looks written out: Chromium turns the editor's own
+	// spacing into "margin: 0px 0px 0.2em 96px" on the copy, and repeats the id. Pasted back, the
+	// copy looked the same until the writer or a later edit met those extra values, and two
+	// elements shared one id. After a paste, each element that came in loses its id, and loses any
+	// margin or first-line indent that changes nothing: one the editor's own style already gives,
+	// or one on a piece of text inside a line, where neither has an effect.
+	const PASTED_SPACING = ['margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'text-indent'];
+	/** The elements in the editor just before a paste; what is not in it came from the paste. */
+	let pastedOver: Set<Element> | null = null;
+
+	function tidyPasted(before: Set<Element>): void {
+		if (!editorEl) return;
+		for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
+			if (before.has(el)) continue;
+			el.removeAttribute('id');
+			if (!el.getAttribute('style')) continue;
+			const inline = !el.matches(`${INDENT_TARGETS}, li, table, thead, tbody, tfoot, tr, td, th, figcaption, hr`);
+			for (const prop of PASTED_SPACING) {
+				const value = el.style.getPropertyValue(prop);
+				if (!value) continue;
+				const shown = getComputedStyle(el).getPropertyValue(prop);
+				el.style.removeProperty(prop);
+				if (!inline && getComputedStyle(el).getPropertyValue(prop) !== shown) el.style.setProperty(prop, value);
+			}
+			if (!el.getAttribute('style')) el.removeAttribute('style');
 		}
 	}
 
@@ -1221,6 +1516,13 @@
 	onchange={handleImageFilesChosen}
 />
 
+<svelte:window
+	onkeydown={(e) => {
+		if (copyFormat !== 'off' && e.key === 'Escape') stopCopyFormat();
+	}}
+	onresize={placeCopySourceBox}
+/>
+
 <div
 	class="ink-editor"
 	style:--ink-min-height={minHeight}
@@ -1235,13 +1537,32 @@
 			onblock={setBlock}
 			oninsertlink={openLinkModal}
 			oninsertimage={openImageModal}
+			copyingFormat={copyFormat !== 'off'}
+			oncopyformat={toggleCopyFormat}
 		/>
+	{/if}
+
+	{#if copyFormat !== 'off' && !readonly}
+		<div class="ink-copy-format" role="status">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v5h-9v3"/><rect x="9.5" y="14" width="3" height="7" rx="1"/></svg>
+			<span>
+				{copyFormat === 'pick'
+					? 'Copy format: click the paragraph to copy from.'
+					: 'Format copied. Click each paragraph that should get it.'}
+			</span>
+			<button type="button" class="ink-copy-format-done" onmousedown={(e) => e.preventDefault()} onclick={stopCopyFormat}>
+				{copyFormat === 'pick' ? 'Cancel' : 'Done'}
+			</button>
+			<span class="ink-copy-format-key">or press Esc</span>
+		</div>
 	{/if}
 
 	<div class="ink-content-wrap" bind:this={contentWrapEl}>
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
 			class="ink-content"
+			class:copy-format-pick={copyFormat === 'pick'}
+			class:copy-format-apply={copyFormat === 'apply'}
 			contenteditable={!readonly}
 			spellcheck="true"
 			bind:this={editorEl}
@@ -1257,6 +1578,16 @@
 			ondrop={handleDrop}
 			data-placeholder={placeholder}
 		></div>
+
+		{#if copySourceBox}
+			<div
+				class="ink-copy-format-source"
+				style:top="{copySourceBox.top}px"
+				style:left="{copySourceBox.left}px"
+				style:width="{copySourceBox.width}px"
+				style:height="{copySourceBox.height}px"
+			></div>
+		{/if}
 
 		{#if !readonly}
 			<ImageOverlay
@@ -1387,6 +1718,78 @@
 		border-color: var(--border-active, #c4b5a0);
 	}
 
+	/* ── Copy format ── */
+	/* The pointer says which step it is: a crosshair to pick the paragraph to copy from, then a
+	   brush that paints the format on. The paragraph under the pointer lights up, so it is clear
+	   what a click will act on. None of this is in the content, so none of it is exported. */
+	.ink-content.copy-format-pick,
+	.ink-content.copy-format-pick :global(*) {
+		cursor: crosshair !important;
+	}
+
+	.ink-content.copy-format-apply,
+	.ink-content.copy-format-apply :global(*) {
+		cursor:
+			url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='white' stroke='%231a1714' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='14' height='6' rx='1.5'/%3E%3Cpath d='M17 6h3v5h-9v3' fill='none'/%3E%3Crect x='9.5' y='14' width='3' height='7' rx='1'/%3E%3C/svg%3E")
+				4 4,
+			copy !important;
+	}
+
+	.ink-content.copy-format-pick :global(:is(p, h1, h2, h3, h4, h5, h6):hover),
+	.ink-content.copy-format-apply :global(:is(p, h1, h2, h3, h4, h5, h6):hover) {
+		background: var(--accent-soft, #ede9fe);
+		border-radius: 3px;
+	}
+
+	.ink-copy-format {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin: -8px 0 12px;
+		padding: 8px 12px;
+		border: 1px solid var(--accent, #6e56cf);
+		border-radius: var(--radius-sm, 5px);
+		background: var(--accent-soft, #ede9fe);
+		color: var(--text, #2c2520);
+		font-family: 'DM Sans', sans-serif;
+		font-size: 13px;
+	}
+
+	.ink-copy-format svg {
+		flex-shrink: 0;
+		color: var(--accent, #6e56cf);
+	}
+
+	.ink-copy-format-done {
+		margin-left: auto;
+		padding: 4px 12px;
+		border: 1px solid var(--accent, #6e56cf);
+		border-radius: var(--radius-sm, 5px);
+		background: white;
+		color: var(--accent, #6e56cf);
+		font: inherit;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.ink-copy-format-done:hover {
+		background: var(--accent, #6e56cf);
+		color: white;
+	}
+
+	.ink-copy-format-key {
+		color: var(--text-muted, #8a7e72);
+		font-size: 12px;
+	}
+
+	.ink-copy-format-source {
+		position: absolute;
+		box-sizing: border-box;
+		border: 1.5px dashed var(--accent, #6e56cf);
+		border-radius: 3px;
+		pointer-events: none;
+	}
+
 	/* Placeholder */
 	.ink-content:empty::before {
 		content: attr(data-placeholder);
@@ -1423,7 +1826,10 @@
 		margin-top: 24px;
 	}
 
-	.ink-content :global(p) {
+	/* A line the browser made as a <div> (after a paste, or Enter in loose text) is a paragraph
+	   like any other, and is written to RTF the same way: it gets the same spacing. */
+	.ink-content :global(p),
+	.ink-content :global(div) {
 		margin: 0 0 0.2em;
 	}
 

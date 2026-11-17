@@ -9,6 +9,9 @@
 		onblock?: (tag: string) => void;
 		oninsertlink?: () => void;
 		oninsertimage?: () => void;
+		/** The Copy format brush is in hand: the button shows as pressed. */
+		copyingFormat?: boolean;
+		oncopyformat?: () => void;
 	}
 
 	let {
@@ -17,7 +20,9 @@
 		onexec,
 		onblock,
 		oninsertlink,
-		oninsertimage
+		oninsertimage,
+		copyingFormat = false,
+		oncopyformat
 	}: Props = $props();
 
 	function exec(cmd: string, value: string | null = null) {
@@ -110,11 +115,23 @@
 		<ToolbarButton title="Increase hanging indent" onclick={() => exec('hangingIndent')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="11" y1="10" x2="21" y2="10"/><line x1="11" y1="14" x2="21" y2="14"/><line x1="11" y1="19" x2="21" y2="19"/><polyline points="4 11.5 7 14.5 4 17.5"/></svg>
 		</ToolbarButton>
+		<ToolbarButton title="Hang at caret" onclick={() => exec('hangAtCaret')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="7" y2="5"/><line x1="14" y1="5" x2="21" y2="5"/><line x1="10.5" y1="2" x2="10.5" y2="8" stroke="var(--accent, currentColor)"/><line x1="10.5" y1="11" x2="21" y2="11"/><line x1="10.5" y1="15" x2="21" y2="15"/><line x1="10.5" y1="19" x2="21" y2="19"/></svg>
+		</ToolbarButton>
 		<ToolbarButton title="Decrease right indent" onclick={() => exec('rightOutdent')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="3" y1="10" x2="13" y2="10"/><line x1="3" y1="14" x2="13" y2="14"/><line x1="3" y1="19" x2="21" y2="19"/><polyline points="17 9 20 12 17 15"/></svg>
 		</ToolbarButton>
 		<ToolbarButton title="Increase right indent" onclick={() => exec('rightIndent')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="3" y1="10" x2="13" y2="10"/><line x1="3" y1="14" x2="13" y2="14"/><line x1="3" y1="19" x2="21" y2="19"/><polyline points="20 9 17 12 20 15"/></svg>
+		</ToolbarButton>
+	</div>
+
+	<div class="toolbar-divider"></div>
+
+	<!-- Copy format -->
+	<div class="toolbar-group">
+		<ToolbarButton active={copyingFormat} title="Copy format" onclick={oncopyformat}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v5h-9v3"/><rect x="9.5" y="14" width="3" height="7" rx="1"/></svg>
 		</ToolbarButton>
 	</div>
 
