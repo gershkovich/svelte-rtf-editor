@@ -163,18 +163,18 @@ editor.importRtf()        // → void    — open the file picker to import .rtf
 ```ts
 import {
   rtfToHtml, htmlToRtf, estimateRtfBytes, readRtfFile, htmlToMarkdown, downloadFile,
-  DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, isSafeLinkUrl
+  DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, DEFAULT_MAX_RTF_BYTES, isSafeLinkUrl
 } from 'svelte-rtf-editor';
 ```
 
 | Function                              | Description                                        |
 |---------------------------------------|----------------------------------------------------|
-| `rtfToHtml(rtf: string, options?: { fontSize? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12) |
+| `rtfToHtml(rtf: string, options?: { fontSize?, maxBytes? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12). Throws a `RangeError` for a string longer than `maxBytes` (default 50 MB; see [Size limit on import](#size-limit-on-import)) |
 | `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Arial 12 pt unless told otherwise |
 | `estimateRtfBytes(el: HTMLElement): number` | Approximate RTF size of a DOM element without converting it |
-| `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` writes any other link as its text alone |
-| `readRtfFile(file: File): Promise<string>` | Read a `.rtf` File object and return HTML     |
-| `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown   |
+| `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` and `htmlToMarkdown` write any other link as its text alone, and `rtfToHtml` reads any other as text |
+| `readRtfFile(file: File, options?: { fontSize?, maxBytes? }): Promise<string>` | Read a `.rtf` File object and return HTML. Rejects, without reading it, for a file larger than `maxBytes` |
+| `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown. See [Markdown export](#markdown-export) |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |
 
 ---
@@ -222,6 +222,72 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 - `rtfToHtml` reads the three indents back, in points: `\li720\ri720\fi-720` becomes `margin-left:36pt;margin-right:36pt;text-indent:-36pt`, and `RtfViewer` shows them. As in RTF, they hold from one paragraph to the next until `\pard`. Indents inside a table cell are not read.
 - A heading outside a table cell also writes its right and first-line indents, so a heading read from RTF with a hanging number goes back as it came. A picture is read with a left margin only, where its line starts.
 - `rtfToHtml` does not yet read spacing, keep-with-next or tab stops back.
+
+---
+
+## What is written, and what is read back
+
+`htmlToRtf` writes each construct below as the RTF beside it, and `rtfToHtml` reads that RTF back as the same HTML, so a document saved, reloaded and saved again is the same RTF. Where a reload changes how something is written, it changes once and then stays: nothing drifts from save to save.
+
+| HTML | RTF | Read back as |
+|---|---|---|
+| `<h1>`, `<h2>`, `<h3>` | a bold paragraph at 2, 1.5 and 7/6 of the body size | the same heading, with nothing inside it but its text |
+| `<h4>`, `<h5>`, `<h6>` (pasted text) | a bold paragraph at 1, 5/6 and 2/3 of the body size | a bold paragraph |
+| `<ul>`, `<ol>` | one paragraph per item: `\li720\fi-360`, then `\bullet\tab` or `1.\tab` | `<ul>`, `<ol>` |
+| a list inside a list item | the same, `\li720` further in for each level | a list inside the item |
+| `<ol start="5">` | `5.\tab`, `6.\tab`, … | `<ol start="5">` |
+| `<a href="https://…">` | `{\field{\*\fldinst HYPERLINK "…"}{\fldrslt …}}`, underlined, in the link color | `<a href="https://…" target="_blank" rel="noopener noreferrer">` |
+| `<code>` | `\f1` (Courier New) | `<code>` |
+| `<pre>` | a paragraph in `\f1` at 5/6 of the body size, lines separated by `\line` | `<pre>` |
+| `<hr>` | a centered line of twenty em dashes | `<hr>` |
+| `<hr style="break-after:page">` | `\page` | the same |
+| `<blockquote>` | paragraphs indented half an inch, in italics | indented italic paragraphs |
+| `<table>` | one `\trowd … \row` per row; see [Tables](#tables) | `<table>` |
+| `<br>` | `\line` | `<br>` |
+
+- **Lists.** Only the shape above is read back as a list: a bullet or `N.`, a tab, and a paragraph that hangs by 360 twips and has no right indent or alignment of its own. Word's lists have that shape and are read as lists, including the bullet it writes in a `{\listtext}` group. Anything else stays the paragraph it is, marker and all, because it could not be written back the same: a line typed as `- Invasive adenocarcinoma.`, a list hung by another distance, one marked `a.` or `1)`, a centered one. A list in a table cell is read as lines of text.
+- **List items.** A paragraph inside an item (`<li><p>…</p></li>`, as Word and Google Docs paste a list) is the item's text; a second paragraph in the item is a line under it. A list written straight inside a list (`<ul><ul>`) is one level deeper. An item with no list around it is written as a bulleted line. The list a browser's own list command makes, which the toolbar's list buttons run, is left inside the paragraph it was made from (`<p><ul>…</ul></p>`); it is written as the list alone.
+- **Headings.** A paragraph is read as a heading when all of its text is at a heading's size, and at a body size other than 12 pt when all of it is bold too. A large word in an ordinary paragraph is a large word. A heading set larger than its level keeps that size.
+- **Links.** A link is read back only for an address `isSafeLinkUrl` accepts, the same test the writer applies: an absolute web, mail or phone address. A field with a `javascript:`, `data:` or `file:` address, a relative or network path, or a link to a bookmark is read as its text alone. A web link opens in a tab of its own, so a click in `RtfViewer` does not replace your application. A document with a link carries the link color as the first entry of its color table (`\red0\green0\blue255`); a document without one is written as before.
+- **Code.** Text in a monospace font other than the document's own font is read as code, and a paragraph set wholly in it at the code block size as a code block. In a document whose own font is monospace, nothing is.
+- **Line breaks.** The `<br>` a browser leaves at the end of a paragraph, a list item or a table cell shows as nothing and is not written. A line break that does end a paragraph in the RTF (`\line\par`) is read as `<br><br>`, which a browser shows as that empty last line.
+- **Page breaks.** `\page` is read as a rule that is shown dashed and written back as `\page`, so a page break in a document that passes through the editor is still one.
+
+### Tables
+
+RTF has no table element: each row says where its cells end (`\cellx`), so columns only line up if every row is written against the same edges. `htmlToRtf` works the columns out once for the table and writes every row against them.
+
+- **`colspan`**: one cell that ends at the right edge of the last column it covers.
+- **`rowspan`**: `\clvmgf` on the cell where it starts and an empty `\clvmrg` cell in the same columns of each row below. `rowspan="0"` reaches the last row, and no span reaches past the table.
+- **Column widths** come from the cells' own `width` in percent. A cell across several columns gives what it has left to those of them with no width; columns with none share what remains. The table is written 6 in wide.
+- **A column no cell starts in is not a column.** `colspan="100"` on a cell meant to cross the whole table adds none.
+- **A row short of cells** is filled with empty ones, so its edges are the table's.
+- **`<th>`** gets a bottom border, on that cell only, which is how `rtfToHtml` knows a header cell.
+- **`<thead>` and `<tfoot>`** are written first and last, wherever the source has them.
+- **A cell's `text-align`** is written on its paragraphs (`\qc`, `\qr`, `\qj`), and read back onto the cell.
+- **A table inside a table cell** is written as lines of text in that cell: each of its rows a paragraph, its cells a tab apart. RTF can nest tables, but many readers show a nested table wrongly or not at all; every word is kept, the inner grid is not. `rtfToHtml` reads a nested table Word wrote the same way.
+- **Reading.** `\clvmgf` and `\clvmrg` become `rowspan`; a cell that crosses the column edges of other rows gets `colspan` (as do `\clmgf` and `\clmrg`). Each paragraph in a cell is a line in it. Widths are read to a hundredth of a percent, so a column edge is written back where it was.
+
+### Reading RTF from other programs
+
+- `\'xx` is read as Windows-1252, the code page RTF is written in: `\'92`, the apostrophe TextEdit writes, is `’`, not an invisible control character. Other code pages (`\ansicpg1251`, `\mac`) are still read as Windows-1252.
+- Word writes each table row's definition twice, before its cells and again before `\row`. Both are read as one row. A row with no definition repeats the one before it.
+- `\pard` resets the paragraph, not the characters: bold, italic, underline and strikethrough carry on until `\plain` or their own `\b0`.
+- `\sect` ends a paragraph, as `\par` does.
+- A font table is read in both shapes: one group per font, and TextEdit's run of fonts with no groups.
+- Damaged input does not stop a document being read: a `\'` with no hex digits after it, a `\u` out of range, half of a surrogate pair, a color component outside 0 to 255, groups nested tens of thousands deep, `\intbl` with no `\row`, a table row the file ends in the middle of.
+
+### What `rtfToHtml` may return
+
+`RtfViewer` puts the HTML `rtfToHtml` returns into the page as it is, so that HTML is limited to a fixed set, whatever the file holds: the elements `p`, `br`, `strong`, `em`, `u`, `s`, `sup`, `sub`, `span`, `code`, `pre`, `h1` to `h3`, `hr`, `ul`, `ol`, `li`, `a`, `table`, `tr`, `td`, `th`, `figure`, `figcaption` and `img`, and the attributes `style` (built from numbers and fixed words only), `href` (a web, mail or phone address, escaped), `target` and `rel` (fixed), `start`, `colspan` and `rowspan` (digits), and on a picture `src` (a PNG or JPEG data URL) and `alt`. Text from the file is always escaped. The test suite checks this against hostile files.
+
+### Size limit on import
+
+`rtfToHtml` parses a document in one go on the main thread, and a picture costs two characters per byte, so the only bound on how long a page stops responding is the size of what it is handed. A string longer than `maxBytes` (`DEFAULT_MAX_RTF_BYTES`, 50 MB) is refused with a `RangeError` before any of it is parsed; `readRtfFile` rejects a larger file without reading it, and the editor's import shows that message; `RtfViewer` shows it in place of the document. Pass `maxBytes: 0` to read a document of any size, or a smaller number to refuse sooner.
+
+### Markdown export
+
+`htmlToMarkdown` writes a table as a Markdown table (a merged cell where it starts, with the cells it covers left empty, since Markdown has none), a numbered list from its `start`, and `<h4>` to `<h6>` as headings. Characters that Markdown would read as markup are escaped in text (`*`, `_`, `` ` ``, `#`, `[`, `]`, `<`, `~`, `\`, and `|` in a table cell), and so are `-`, `+`, `>` and `1.` at the start of a line: a report line typed as `- Benign.` stays that line. A link with an address `isSafeLinkUrl` refuses is written as its text alone.
 
 ## Theming
 
@@ -291,6 +357,8 @@ It stays on until **Done** in the bar, `Esc`, or the button again. Each click is
 ### Pasted text
 
 A browser copies a paragraph with its looks written out as inline styles, and repeats its `id`. After a paste, each element that came in loses its `id` and any margin or first-line indent that changes nothing on screen, so a copy pasted inside the editor is the same markup as its source. A line the browser makes as a `<div>` is spaced like a `<p>`; both are written to RTF as a paragraph.
+
+A picture copied with its text comes in by address (`<img src="https://…">`). The editor fetches it and holds its data in the document, as it does for an address typed in the image dialog, so it reaches the RTF as a picture. When it cannot be fetched (the site forbids it, or there is no network) the picture still shows and the editor says that it will export as a placeholder.
  Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
 
 Tab stays in the editor so a line can be indented. To leave the editor from the keyboard, press
@@ -317,7 +385,7 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
 - **RTF export** writes each picture as a real `\pict` group (`\pngblip` / `\jpegblip`) sized with `\picwgoal` / `\pichgoal`, so it opens with the images in Word, TextEdit and other RTF readers. The description follows as an italic line, tagged with an ignorable `{\*\inkcap}` destination that this library uses to re-attach it to the figure on import; other readers simply skip the tag.
 - **RTF import** decodes `\pict` PNG and JPEG data (including pictures wrapped in `{\*\shppict}`) back into images at their stored size. Picture formats a browser cannot display — metafiles and device-dependent bitmaps — are skipped.
 - **Formats**: PNG and JPEG are embedded as-is. Anything else (GIF, WebP, SVG, …) is re-encoded to PNG when inserted, since RTF carries no other bitmap types. Animated images keep their first frame.
-- **Images added by address** are fetched and inlined so they survive export. When the fetch is blocked (CORS or offline) the address is kept and the picture still displays, but it exports as an `[Image: …]` placeholder instead of picture data — the editor says so at insert time rather than letting it go unnoticed until the document is read downstream.
+- **Images added by address**, typed in the dialog or pasted with text copied from a web page, are fetched and inlined so they survive export. When the fetch is blocked (CORS or offline) the address is kept and the picture still displays, but it exports as an `[Image: …]` placeholder instead of picture data — the editor says so at insert time rather than letting it go unnoticed until the document is read downstream.
 - **Size**: RTF stores picture data as hexadecimal — two characters per byte — so an embedded image costs twice its file size in the document. Resizing an image in the editor changes its display size only; two caps applied at insert time are what bound the payload:
   - `maxImageEdge` (1600 px) scales the picture down so neither edge exceeds it.
   - `maxImageBytes` (512 KB, so roughly 1 MB of document per image) is the ceiling that actually matters. A picture over it is re-encoded until it fits: a PNG is tried as PNG first so screenshots and diagrams stay sharp, falls back to JPEG only when it is too heavy *and* has no transparency to lose, then steps down through 80%, 64% and 50% of the target size. Whichever candidate fits first is kept.
@@ -375,6 +443,24 @@ npm run changeset
 ```
 
 Commit both your code and the generated `.changeset/*.md` file together.
+
+### Checks
+
+Three commands must pass before a change is merged, and CI (`.github/workflows/ci.yml`) runs them on every push and pull request:
+
+```bash
+npm run check    # svelte-check: types
+npm test         # vitest
+npm run prepack  # build the package and lint it with publint
+```
+
+The publish workflow runs the same three before it publishes, so a release cannot go out with a failing test.
+
+`src/lib/__tests__/random-documents.test.ts` builds 400 documents at random on each run and checks what must hold for all of them: no text lost, the RTF settles after one reload, the size estimate is never low, the HTML read back is made of known elements. For a longer run, in batches:
+
+```bash
+RTF_RANDOM_DOCUMENTS=4000 RTF_RANDOM_FIRST=4001 npx vitest run random-documents
+```
 
 ### Publishing a new version
 
