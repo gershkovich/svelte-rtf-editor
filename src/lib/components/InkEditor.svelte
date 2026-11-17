@@ -1564,6 +1564,51 @@
 			}
 			if (!el.getAttribute('style')) el.removeAttribute('style');
 		}
+		// A picture copied with its text comes in by address (<img src="https://…">). Only picture
+		// data held in the document reaches the RTF, so it is fetched and embedded, as the image
+		// dialog does for an address typed there.
+		const linked = Array.from(editorEl.querySelectorAll('img')).filter(
+			(img) => !before.has(img) && !/^data:image\//i.test(img.getAttribute('src') || '')
+		);
+		if (linked.length > 0) void embedPastedImages(linked);
+	}
+
+	/**
+	 * Fetch each pasted picture and hold its data in the document. One that cannot be fetched
+	 * (the site forbids it, or there is no network) still shows, but leaves in the RTF as an
+	 * "[Image: …]" placeholder: the editor says so now, rather than letting it be found downstream.
+	 */
+	async function embedPastedImages(images: HTMLImageElement[]): Promise<void> {
+		let failed = 0;
+		let changed = false;
+		for (const img of images) {
+			const url = img.getAttribute('src') || '';
+			if (!isSafeImageUrl(url)) {
+				failed++;
+				continue;
+			}
+			const { src, embedded } = await urlToImageSrc(url, imageLimits());
+			// It may have been deleted or replaced while it was fetched.
+			if (!img.isConnected || img.getAttribute('src') !== url) continue;
+			if (embedded) {
+				img.setAttribute('src', src);
+				changed = true;
+			} else {
+				failed++;
+			}
+		}
+		if (failed > 0) {
+			showError(
+				failed === 1
+					? 'A pasted image could not be embedded — it will export as a placeholder'
+					: `${failed} pasted images could not be embedded — they will export as placeholders`
+			);
+		}
+		if (changed) {
+			updateCounts();
+			fireChange();
+			if (autosave) scheduleAutoSave();
+		}
 	}
 
 	// ── Lifecycle ──
@@ -2030,6 +2075,13 @@
 		height: 1px;
 		background: var(--border, #e5e2dc);
 		margin: 32px 0;
+	}
+
+	/* A page break read from RTF (\page): a dashed rule, written back as \page. */
+	.ink-content :global(hr[style*='break-after']) {
+		height: 0;
+		background: none;
+		border-top: 1px dashed var(--text-muted, #8a7e72);
 	}
 
 	/* ── Status Bar ── */
