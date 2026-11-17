@@ -535,6 +535,9 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// paragraph around it (\pard, the indent, \par) in ways the counts above do not follow
 		// exactly: up to 10 more each, so the estimate stays above the real size.
 		if (/^(h[1-6]|pre|blockquote)$/.test(tag) && el.parentElement !== editorEl && el.parentElement?.closest('li, blockquote, p')) total += 10;
+		// In a list item, text after a wrapper that ends with a block starts a paragraph again
+		// ("\pard\intbl\liN\fi-N ", at most 24).
+		if (!isBlock(el) && el.closest('li') && endsWithBlock(el)) total += 24;
 		// A paragraph a block writes inside a table cell also carries \intbl (6). A list
 		// writes one paragraph per item, so the item is counted, not the list.
 		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
@@ -1019,7 +1022,11 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 		// simply show an italic line under the image.
 		case 'figure': {
 			const img = el.querySelector('img');
-			const caption = (el.querySelector('figcaption')?.textContent || '').trim();
+			// A figure with a picture takes the caption the editor gives it, wherever it sits. One
+			// with no picture takes only its own (a child): a caption further in belongs to what
+			// holds it (a figure inside this one), and is written there.
+			const captionEl = img ? el.querySelector('figcaption') : Array.from(el.children).find((c) => c.tagName === 'FIGCAPTION');
+			const caption = (captionEl?.textContent || '').trim();
 			const align = `${ownAlign(el) ?? (cellAlign(ctx) || '\\ql')}${liControl(ctx.indent + leftMarginTwips(el))}`;
 
 			if (img) {
@@ -1027,7 +1034,7 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 			} else {
 				// A figure with no picture is a block of what it holds: its lines end with \par, as a
 				// <div>'s do, or its text ran into the next paragraph. Its caption is written below.
-				const held = Array.from(el.childNodes).filter((n) => n.nodeName !== 'FIGCAPTION');
+				const held = Array.from(el.childNodes).filter((n) => n !== captionEl);
 				rtf += flowRtf(held, ctx, null, `\\pard${inCell(ctx)}${align} `);
 			}
 
@@ -1166,7 +1173,8 @@ function flowRtf(nodes: Node[], ctx: WalkContext, first: string | null, plain: s
 		const el = node as HTMLElement;
 		const tag = el.tagName.toLowerCase();
 
-		if (!isBlock(el)) {
+		// A caption outside a figure is text where it stands, as everywhere else.
+		if (!endsItsLine(el)) {
 			start();
 			rtf += walkNode(el, ctx, false);
 			// A wrapper that ends with a block (<b><p>a</p></b>) has ended the line itself.

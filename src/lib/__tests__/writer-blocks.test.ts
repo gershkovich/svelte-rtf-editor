@@ -397,3 +397,27 @@ describe('a figure with no picture, and a stray caption', () => {
 		expect(md('x<figure>t</figure>y')).toBe('x\n\nt\n\ny');
 	});
 });
+
+describe('what the fourth review found', () => {
+	const texts = (html: string) => (el(rtfToHtml(htmlToRtf(el(html)))).textContent || '').replace(/\s+/g, ' ').trim();
+
+	it("a figure's own caption is written even when what it holds has a caption of its own", () => {
+		const rtf = htmlToRtf(el('<figure><figure>a<figcaption>c</figcaption></figure><figcaption>d</figcaption></figure>'));
+		expect(rtf.split(' c\\').length - 1).toBe(1);
+		expect(rtf).toContain(' d\\');
+		// (The HTML parser closes the <p> at the <figcaption>, so "c" is the figure's first caption
+		// and "d" a second one held in it: each word is still written once.)
+		const words = texts('<figure><p>x<figcaption>c</figcaption></p><figcaption>d</figcaption></figure>').split(' ').sort();
+		expect(words).toEqual(['c', 'd', 'x']);
+	});
+
+	it('the estimate covers text after a wrapper that ends with a block, in a list item', () => {
+		for (const html of ['<ul><li><span>x<ul><li>n</li></ul></span>tail</li></ul>', `<ul><li>${'<b>x<p>a</p></b>t'.repeat(20)}</li></ul>`]) {
+			expect(estimateRtfBytes(el(html))).toBeGreaterThanOrEqual(htmlToRtf(el(html)).length);
+		}
+	});
+
+	it('a caption outside a figure, in a list item, stays on its line', () => {
+		expect(texts('<ul><li>a<figcaption>c</figcaption>b</li></ul>')).toBe('acb');
+	});
+});
