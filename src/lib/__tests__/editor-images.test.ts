@@ -385,6 +385,99 @@ describe('InkEditor: a picture pasted with its text', () => {
 	});
 });
 
+describe('InkEditor: maxImageBytes is a ceiling', () => {
+	// The test DOM cannot redraw a picture, which makes every picture over the limit one that
+	// cannot be brought under it: the case in which the editor must refuse it (issue #21, item 30).
+	// That a picture a browser can redraw is shrunk to fit is in image-cap.test.ts.
+
+	beforeEach(() => {
+		unmount(editor as never);
+		host.innerHTML = '';
+		editor = mount(InkEditor, {
+			target: host,
+			props: { autosave: false, content: '<p>Report body</p>', maxImageBytes: 10 }
+		}) as unknown as EditorApi;
+		flushSync();
+	});
+
+	function pasteHtml(html: string): void {
+		const event = new Event('paste', { bubbles: true, cancelable: true });
+		Object.defineProperty(event, 'clipboardData', { value: { items: [], getData: () => '' } });
+		contentEl().dispatchEvent(event);
+		contentEl().insertAdjacentHTML('beforeend', html);
+		contentEl().dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+	}
+
+	const toast = () => host.querySelector('.ink-toast-error')?.textContent?.trim() ?? '';
+
+	it('a dropped picture that cannot be brought under it is not inserted, and the editor says why', async () => {
+		dropFiles([pngFile('slide.png')]);
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(toast()).toBe('This picture could not be made small enough for the 10 bytes size limit');
+		expect(editor.getRTF()).not.toContain('\\pict');
+	});
+
+	it('a pasted picture file is refused the same way', async () => {
+		pasteFiles([pngFile('scan.png')]);
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(toast()).toContain('could not be made small enough');
+	});
+
+	it('picture data pasted with text is taken out again, so it cannot leave in the RTF at full size', async () => {
+		pasteHtml(`<p>Figure 1 <img src="${PNG_SRC}" alt="figure"> shows the margin.</p>`);
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(contentEl().textContent).toContain('Figure 1  shows the margin.');
+		expect(toast()).toBe('A pasted picture was over the size limit and could not be made smaller, so it was left out');
+		expect(editor.getRTF()).not.toContain('\\pict');
+	});
+
+	it('counts the pasted pictures it left out', async () => {
+		pasteHtml(`<p><img src="${PNG_SRC}" alt="a"><img src="${PNG_SRC}" alt="b"></p>`);
+		await settle();
+
+		expect(contentEl().querySelectorAll('img').length).toBe(0);
+		expect(toast()).toContain('2 pasted pictures were over the size limit');
+	});
+
+	it('picture data typed into the image dialog is not inserted', async () => {
+		(host.querySelector('button[title="Insert image"]') as HTMLElement).click();
+		flushSync();
+		const field = (Array.from(host.querySelectorAll('.modal input')) as HTMLInputElement[]).find((i) =>
+			(i.placeholder || '').startsWith('https://')
+		)!;
+		field.value = PNG_SRC;
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		(Array.from(host.querySelectorAll('.modal-actions button')).find((b) => b.textContent?.trim() === 'Insert') as HTMLElement).click();
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(toast()).toBe('That picture is over the size limit and could not be made smaller, so it was not inserted');
+	});
+
+	it('a picture within the limit is inserted as before', async () => {
+		unmount(editor as never);
+		host.innerHTML = '';
+		editor = mount(InkEditor, {
+			target: host,
+			props: { autosave: false, content: '<p>Report body</p>', maxImageBytes: 100000 }
+		}) as unknown as EditorApi;
+		flushSync();
+		dropFiles([pngFile('slide.png')]);
+		await settle();
+
+		expect(contentEl().querySelector('img')!.getAttribute('src')).toBe(PNG_SRC);
+		expect(toast()).toBe('');
+	});
+});
+
 describe('urlToImageSrc: a picture fetched by address', () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();

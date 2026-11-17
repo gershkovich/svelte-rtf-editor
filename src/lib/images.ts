@@ -48,6 +48,30 @@ export function initialDisplayWidth(
 /** Successive reductions tried when a picture will not fit the byte budget. */
 const SIZE_LADDER = [1, 0.8, 0.64, 0.5];
 
+/**
+ * A picture is never made smaller than this on its longest edge, in px. Below it nothing can be
+ * made out, so a picture that still does not fit is refused instead.
+ */
+const MIN_IMAGE_EDGE = 16;
+
+/**
+ * A picture that could not be brought under the byte limit. The limit is a ceiling: a picture
+ * over it is not handed back for the caller to embed anyway.
+ */
+export class ImageTooLargeError extends Error {
+	constructor(readonly maxBytes: number) {
+		super(`This picture could not be made small enough for the ${formatBytes(maxBytes)} size limit`);
+		this.name = 'ImageTooLargeError';
+	}
+}
+
+/** A byte count as a person reads it: "512 KB", "1.5 MB", "900 bytes". */
+function formatBytes(bytes: number): string {
+	if (bytes >= 1024 * 1024) return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
+	if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+	return `${bytes} bytes`;
+}
+
 /** JPEG qualities tried at each size, best first. */
 const QUALITY_LADDER = [0.85, 0.7];
 
@@ -193,11 +217,23 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 /**
- * Prepare a data URL for embedding: scale it down to `maxEdge` and re-encode it
- * to PNG when its format cannot be carried by RTF. JPEG sources stay JPEG so
- * photographs do not balloon; everything else becomes PNG. Animated images keep
- * their first frame. Falls back to the original data URL when the runtime
- * cannot rasterise, so nothing is lost if the conversion is unavailable.
+ * Prepare a data URL for embedding: scale it down to `maxEdge`, re-encode it to
+ * PNG when its format cannot be carried by RTF, and bring it under `maxBytes`.
+ * JPEG sources stay JPEG so photographs do not balloon; everything else becomes
+ * PNG while that fits. Animated images keep their first frame.
+ *
+ * `maxBytes` is a ceiling. The picture is shrunk until it fits:
+ *
+ * 1. At full size, then 80%, 64% and 50% of it, a PNG source is tried as PNG first, so
+ *    screenshots and diagrams stay sharp, and as JPEG only when it has no transparency to lose.
+ * 2. If none of those fits, transparency is given up: the picture is laid on white and tried as
+ *    JPEG from full size again, then smaller and smaller, each step sized from how far over the
+ *    last one was.
+ *
+ * A picture that cannot be brought under the limit, because nothing legible would be left of it
+ * or because this runtime cannot redraw it, is refused with an ImageTooLargeError; it is never
+ * returned over the limit. Where the runtime cannot rasterise (SSR, a test DOM), a picture within
+ * the limit is passed through as it is.
  */
 export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}): Promise<string> {
 	const { maxEdge = DEFAULT_MAX_IMAGE_EDGE, maxBytes = DEFAULT_MAX_IMAGE_BYTES } = limits;
@@ -206,70 +242,103 @@ export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}
 	const actual = sniffImageType(dataUrl);
 	const isJpeg = actual === 'image/jpeg';
 	const isNative = actual !== null;
-	if (!canRasterize()) return dataUrl;
+	const capped = !!maxBytes && maxBytes > 0;
+	const fits = (bytes: number) => !capped || bytes <= maxBytes;
+	/** The picture as it came, where it cannot be redrawn: only if it is within the limit. */
+	const asIs = (): string => {
+		if (!fits(dataUrlByteLength(dataUrl))) throw new ImageTooLargeError(maxBytes);
+		return dataUrl;
+	};
+	if (!canRasterize()) return asIs();
+
+	let img: HTMLImageElement;
+	let ctx: CanvasRenderingContext2D | null;
+	const canvas = document.createElement('canvas');
+	try {
+		img = await loadImage(dataUrl);
+		ctx = canvas.getContext('2d');
+	} catch {
+		return asIs();
+	}
+	const width = img.naturalWidth || img.width;
+	const height = img.naturalHeight || img.height;
+	if (!width || !height || !ctx) return asIs();
+
+	const target = scaledSize(width, height, maxEdge);
+
+	// Already embeddable, within the pixel cap and within budget — leave the
+	// original bytes alone rather than losing quality to a pointless re-encode.
+	if (isNative && target.width === width && target.height === height && fits(dataUrlByteLength(dataUrl))) {
+		return dataUrl;
+	}
+
+	/** Draw the picture at a share of its target size; `onWhite` gives up its transparency. */
+	const draw = (scale: number, onWhite: boolean): { w: number; h: number } => {
+		const w = Math.max(1, Math.round(target.width * scale));
+		const h = Math.max(1, Math.round(target.height * scale));
+		canvas.width = w;
+		canvas.height = h;
+		ctx.clearRect(0, 0, w, h);
+		if (onWhite) {
+			// A JPEG has no transparency, and a canvas encodes what shows through as black.
+			ctx.fillStyle = '#ffffff';
+			ctx.fillRect(0, 0, w, h);
+		}
+		ctx.drawImage(img, 0, 0, w, h);
+		return { w, h };
+	};
+	const jpegs = () => QUALITY_LADDER.map((quality) => canvas.toDataURL('image/jpeg', quality));
+	/** The first candidate that fits, or the size of the smallest one. */
+	const pick = (candidates: string[]): { fit: string | null; smallest: number } => {
+		let smallest = Infinity;
+		for (const candidate of candidates) {
+			const bytes = dataUrlByteLength(candidate);
+			if (fits(bytes)) return { fit: candidate, smallest: bytes };
+			smallest = Math.min(smallest, bytes);
+		}
+		return { fit: null, smallest };
+	};
 
 	try {
-		const img = await loadImage(dataUrl);
-		const width = img.naturalWidth || img.width;
-		const height = img.naturalHeight || img.height;
-		if (!width || !height) return dataUrl;
-
-		const target = scaledSize(width, height, maxEdge);
-		const fits = (bytes: number) => !maxBytes || maxBytes <= 0 || bytes <= maxBytes;
-
-		// Already embeddable, within the pixel cap and within budget — leave the
-		// original bytes alone rather than losing quality to a pointless re-encode.
-		if (
-			isNative &&
-			target.width === width &&
-			target.height === height &&
-			fits(dataUrlByteLength(dataUrl))
-		) {
-			return dataUrl;
-		}
-
-		const canvas = document.createElement('canvas');
-		const ctx = canvas.getContext('2d');
-		if (!ctx) return dataUrl;
-
 		let opaque: boolean | null = null;
-		let smallest = '';
+		let smallest = Infinity;
 
 		// Shrink in steps until the encoded picture fits the budget. At each size a
 		// PNG source is tried as PNG first — screenshots and diagrams stay sharp and
 		// usually compress well — and only falls back to JPEG when PNG is too heavy
 		// and the image has no transparency to lose.
 		for (const scale of SIZE_LADDER) {
-			const w = Math.max(1, Math.round(target.width * scale));
-			const h = Math.max(1, Math.round(target.height * scale));
-			canvas.width = w;
-			canvas.height = h;
-			ctx.clearRect(0, 0, w, h);
-			ctx.drawImage(img, 0, 0, w, h);
-
+			const { w, h } = draw(scale, false);
 			const candidates: string[] = [];
 			if (!isJpeg) candidates.push(canvas.toDataURL('image/png'));
 			if (isJpeg || !fits(dataUrlByteLength(candidates[0] ?? ''))) {
 				if (opaque === null) opaque = !hasTransparency(ctx, w, h);
-				if (isJpeg || opaque) {
-					for (const quality of QUALITY_LADDER) {
-						candidates.push(canvas.toDataURL('image/jpeg', quality));
-					}
-				}
+				if (isJpeg || opaque) candidates.push(...jpegs());
 			}
-
-			for (const candidate of candidates) {
-				const bytes = dataUrlByteLength(candidate);
-				if (fits(bytes)) return candidate;
-				if (!smallest || bytes < dataUrlByteLength(smallest)) smallest = candidate;
-			}
+			const picked = pick(candidates);
+			if (picked.fit) return picked.fit;
+			smallest = picked.smallest;
 		}
 
-		// Nothing fit — hand back the smallest we managed rather than the original.
-		return smallest || dataUrl;
-	} catch {
-		return dataUrl;
+		// Nothing fit. The limit is a ceiling, so keep going: smaller, and for a picture with
+		// transparency as a JPEG on white from full size again, which keeps far more of it than
+		// a PNG a fraction of the size. Each step is sized from how far over the last one was
+		// (the bytes of a picture go with its area), and is never less than a fifth smaller.
+		const smaller = (bytes: number) => Math.min(0.8, Math.sqrt(maxBytes / bytes) * 0.95);
+		let scale = isJpeg || opaque ? SIZE_LADDER[SIZE_LADDER.length - 1] * smaller(smallest) : 1;
+		while (Math.max(target.width, target.height) * scale >= MIN_IMAGE_EDGE) {
+			draw(scale, !isJpeg);
+			const candidates = isJpeg ? jpegs() : [canvas.toDataURL('image/png'), ...jpegs()];
+			const picked = pick(candidates);
+			if (picked.fit) return picked.fit;
+			scale *= smaller(picked.smallest);
+		}
+	} catch (err) {
+		if (err instanceof ImageTooLargeError) throw err;
+		// The canvas gave up (a picture too large for it, a tainted source).
+		return asIs();
 	}
+	throw new ImageTooLargeError(maxBytes);
 }
 
 /** Read an image File into a data URL the RTF writer can embed. */
@@ -293,15 +362,27 @@ export const MAX_FETCHED_IMAGE_BYTES = 25 * 1024 * 1024;
  * URL is kept and the image still displays — it just exports as a text
  * placeholder. `embedded` is true only for PNG or JPEG data, the two formats the
  * RTF writer carries: a GIF, WebP or SVG that could not be converted is not.
+ *
+ * A picture that could not be brought under `maxBytes` is never returned as data. One fetched
+ * from an address keeps its address, and so exports as the placeholder. One given as data has
+ * no address to fall back to: it comes back with `tooLarge` set, and must not be inserted.
  */
 export async function urlToImageSrc(
 	url: string,
 	limits: ImageLimits = {}
-): Promise<{ src: string; embedded: boolean }> {
+): Promise<{ src: string; embedded: boolean; tooLarge?: true }> {
 	const value = url.trim();
 	const result = (src: string) => ({ src, embedded: src.startsWith('data:') && sniffImageType(src) !== null });
 	if (value.startsWith('data:image/')) {
-		return result(await toRtfSafeDataUrl(value, limits));
+		try {
+			return result(await toRtfSafeDataUrl(value, limits));
+		} catch (err) {
+			if (!(err instanceof ImageTooLargeError)) throw err;
+			// Picture data over the limit that could not be reduced. The data is the
+			// address here, so there is nothing to keep that would not also be over it:
+			// the caller must not put it in the document.
+			return { src: value, embedded: false, tooLarge: true };
+		}
 	}
 
 	// A picture that could not be inlined still displays, but it leaves the

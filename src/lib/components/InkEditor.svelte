@@ -1053,7 +1053,13 @@
 
 		insertingImages = true;
 		try {
-			const { src, embedded } = await urlToImageSrc(url, imageLimits());
+			const { src, embedded, tooLarge } = await urlToImageSrc(url, imageLimits());
+			// Picture data over the size limit that could not be reduced is not inserted:
+			// once in the document it would be written to the RTF at its full size.
+			if (tooLarge) {
+				showError(TOO_LARGE_MESSAGE);
+				return;
+			}
 			restoreSelection();
 			editorEl?.focus();
 			finishInsert(insertFigure(src, alt || caption, caption));
@@ -1065,6 +1071,9 @@
 			insertingImages = false;
 		}
 	}
+
+	/** Said when picture data given by address or pasted is over the size limit and cannot be reduced. */
+	const TOO_LARGE_MESSAGE = 'That picture is over the size limit and could not be made smaller, so it was not inserted';
 
 	/** Caps applied to a picture as it is inserted. */
 	function imageLimits(): { maxEdge: number; maxBytes: number } {
@@ -1584,6 +1593,7 @@
 	 */
 	async function embedPastedImages(images: HTMLImageElement[]): Promise<void> {
 		let failed = 0;
+		let removed = 0;
 		let changed = false;
 		// All at once, each with its own timeout, so one slow site does not hold up the rest.
 		await Promise.all(
@@ -1593,10 +1603,17 @@
 					failed++;
 					return;
 				}
-				const { src, embedded } = await urlToImageSrc(url, imageLimits());
+				const { src, embedded, tooLarge } = await urlToImageSrc(url, imageLimits());
 				// It may have been deleted or replaced while it was fetched.
 				if (!img.isConnected || img.getAttribute('src') !== url) return;
-				if (!embedded) {
+				if (tooLarge) {
+					// Pasted picture data over the size limit that could not be reduced. Left
+					// in the document it would be written to the RTF at its full size, so it
+					// is taken out and the editor says so.
+					img.remove();
+					removed++;
+					changed = true;
+				} else if (!embedded) {
 					failed++;
 				} else if (src !== url) {
 					img.setAttribute('src', src);
@@ -1604,7 +1621,13 @@
 				}
 			})
 		);
-		if (failed > 0) {
+		if (removed > 0) {
+			showError(
+				removed === 1
+					? 'A pasted picture was over the size limit and could not be made smaller, so it was left out'
+					: `${removed} pasted pictures were over the size limit and could not be made smaller, so they were left out`
+			);
+		} else if (failed > 0) {
 			showError(
 				failed === 1
 					? 'A pasted image could not be embedded — it will export as a placeholder'

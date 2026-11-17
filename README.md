@@ -129,7 +129,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `minHeight`     | `string`   | `'40vh'`                     | CSS `min-height` of the editing area                      |
 | `readonly`      | `boolean`  | `false`                      | Disable editing                                           |
 | `maxImageEdge`  | `number`   | `1600`                       | Longest edge (px) an inserted image is scaled down to; `0` keeps full size |
-| `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; oversized pictures are re-encoded until they fit. `0` disables |
+| `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; an oversized picture is re-encoded and shrunk until it fits, and is not inserted if it cannot. `0` disables |
 | `maxRtfBytes`   | `number`   | `52428800`                   | The largest RTF file Import reads (50 MB); `0` reads any size |
 | `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
 | `fontFamily`    | `string`   | `'Arial'`                    | Document font, on screen and in the RTF. See [Fonts](#fonts) |
@@ -391,9 +391,14 @@ Images are held inline as base64 data URLs, so a document is self-contained — 
 - **Images added by address**, typed in the dialog or pasted with text copied from a web page, are fetched and inlined so they survive export. When the fetch is blocked (CORS or offline) the address is kept and the picture still displays, but it exports as an `[Image: …]` placeholder instead of picture data — the editor says so at insert time rather than letting it go unnoticed until the document is read downstream.
 - **Size**: RTF stores picture data as hexadecimal — two characters per byte — so an embedded image costs twice its file size in the document. Resizing an image in the editor changes its display size only; two caps applied at insert time are what bound the payload:
   - `maxImageEdge` (1600 px) scales the picture down so neither edge exceeds it.
-  - `maxImageBytes` (512 KB, so roughly 1 MB of document per image) is the ceiling that actually matters. A picture over it is re-encoded until it fits: a PNG is tried as PNG first so screenshots and diagrams stay sharp, falls back to JPEG only when it is too heavy *and* has no transparency to lose, then steps down through 80%, 64% and 50% of the target size. Whichever candidate fits first is kept.
+  - `maxImageBytes` (512 KB, so roughly 1 MB of document per image) is the ceiling that actually matters, and it is a ceiling: no picture goes into the document over it. A picture over it is re-encoded until it fits:
+    1. At full size, then 80%, 64% and 50% of it, a PNG is tried as PNG first so screenshots and diagrams stay sharp, and as JPEG only when it is too heavy *and* has no transparency to lose.
+    2. If none of those fits, the picture is made smaller still, each step sized from how far over the last one was, down to 16 px on its longest edge. A picture with transparency is laid on white and written as a JPEG from full size again, which keeps far more of it than a PNG a fraction of the size.
+    3. A picture that still does not fit is not inserted, and the editor says so. This takes a limit of a few hundred bytes, or a picture the browser cannot redraw.
 
-  Set either to `0` to disable it. Both caps are applied by re-encoding through a `<canvas>`, so they only take effect in a browser — in a runtime without one (SSR, jsdom/happy-dom tests) the original bytes are passed through untouched. Do not rely on them to bound a payload assembled server-side.
+    Measured in Chromium with a 6.8 MB, 4000×3000 JPEG dropped on the editor: 312 KB at the defaults, 92 KB at a limit of 100 KB, 14 KB at 20 KB, 4.8 KB at 5 KB, refused at 300 bytes. A 6.9 MB PNG with transparency: a 368 KB JPEG on white at the defaults.
+
+  Set either to `0` to disable it. Both caps are applied by re-encoding through a `<canvas>`, so pictures are only made smaller in a browser. In a runtime without one (SSR, jsdom/happy-dom tests) a picture within `maxImageBytes` is passed through untouched and one over it is refused, since it cannot be made to fit. The caps apply when a picture is inserted: HTML handed to the editor through `content` or `setHTML` is not checked, so do not rely on them to bound a payload assembled elsewhere.
 - **Page fit**: a newly inserted picture is displayed at `maxImageDisplayWidth` (624 px) rather than filling the editor. RTF records the display size in twips — 624 px × 15 = 9360 twips = 6.5 in, the text width of a Letter page with 1 in margins — so pictures arrive sized to the page they will be printed or filed on, not to the width of the browser window. Resize handles still go up to the full column width when a picture deserves it.
 
 ### Sending RTF over a transport
