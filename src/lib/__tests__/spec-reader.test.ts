@@ -269,9 +269,19 @@ describe('input that is damaged, hostile or not RTF', () => {
 		expect(rtfToHtml('{\\rtf1 a} b}')).toContain('a');
 	});
 
-	it.fails('#3.10: deeply nested groups do not overflow the stack', () => {
+	it('#3.10: deeply nested groups do not overflow the stack', () => {
 		const depth = 30000;
 		expect(() => rtfToHtml(`{\\rtf1 ${'{'.repeat(depth)}x${'}'.repeat(depth)}}`)).not.toThrow();
+	});
+
+	it('the text of groups nested past the limit is kept, and the text after them too', () => {
+		const depth = 2000;
+		expect(rtfToHtml(`{\\rtf1 a${'{'.repeat(depth)}b${'}'.repeat(depth)}c\\par d\\par}`)).toBe('<p>abc</p>\n<p>d</p>');
+	});
+
+	it('formatting inside groups nested past the limit ends where the group at the limit ends', () => {
+		const deep = `${'{'.repeat(600)}\\b x${'}'.repeat(600)}`;
+		expect(rtfToHtml(`{\\rtf1 ${deep} y\\par}`)).toBe('<p><strong>x</strong> y</p>');
 	});
 
 	it.fails('#3.10: color components are kept within 0 to 255', () => {
