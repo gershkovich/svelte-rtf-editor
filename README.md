@@ -209,6 +209,7 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 | HTML on the paragraph | RTF |
 |---|---|
 | `margin-left: 1.75in` | `\li2520` |
+| `margin-right: 0.5in` | `\ri720` |
 | `text-indent: -1.75in` | `\fi-2520` |
 | `margin-top: 5pt` / `margin-bottom: 5pt` | `\sb100` / `\sa100` |
 | `break-after: avoid` or `page-break-after: avoid` | `\keepn` |
@@ -217,8 +218,9 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 - Lengths in `in`, `pt`, `cm`, `mm` or `px` (15 twips per px), rounded to whole twips. Only `text-indent` may be negative. A value the writer cannot read, or zero, writes nothing.
 - CSS has no absolute tab stop, hence the `data-` attribute. On screen, `white-space: pre-wrap; tab-size: 1.75in` with that hanging indent puts the browser's first stop at the same place, and `pre-wrap` makes the writer send the tab as `\tab`.
 - `margin-left` adds to the indent of the blocks around the paragraph (an indent pasted from a browser, or a `<div>` with a margin that holds paragraphs), and is written as one `\li`.
-- Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not spacing, tab stops or keep-with-next.
-- `rtfToHtml` does not yet read them back, so `RtfViewer` shows such a document without its indents.
+- Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not the right or first-line indent, spacing, tab stops or keep-with-next.
+- `rtfToHtml` reads the three indents back, in points: `\li720\ri720\fi-720` becomes `margin-left:36pt;margin-right:36pt;text-indent:-36pt`, and `RtfViewer` shows them. As in RTF, they hold from one paragraph to the next until `\pard`. Indents inside a table cell are not read.
+- `rtfToHtml` does not yet read spacing, keep-with-next or tab stops back.
 
 ## Theming
 
@@ -256,7 +258,17 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Shift+Tab` | Remove one tab from the start of the line. With several lines selected, decrease their indent |
 | `Esc`, then `Tab` / `Shift+Tab` | Move focus out of the editor |
 
-The toolbar's Increase indent and Decrease indent buttons do the same as `Ctrl+]` and `Ctrl+[`. Undo reverses an indent step until the next edit. Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
+The toolbar's Increase indent and Decrease indent buttons do the same as `Ctrl+]` and `Ctrl+[`. Undo reverses an indent step until the next edit.
+
+Four more toolbar buttons set the other two RTF indents, 0.5 in per press, on a paragraph outside a table cell (not on a list, a heading, a quotation or a code block):
+
+| Button | What moves | RTF per step |
+|---|---|---|
+| Increase / Decrease hanging indent | Every line but the first; the first line stays where it is | `\li720\fi-720` |
+| Increase / Decrease right indent | The right edge of the paragraph | `\ri720` |
+
+Decrease indent stops where the first line of a hanging paragraph reaches the left edge.
+ Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
 
 Tab stays in the editor so a line can be indented. To leave the editor from the keyboard, press
 `Esc` first. A readonly editor leaves Tab to the browser.

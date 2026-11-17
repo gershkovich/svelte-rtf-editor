@@ -278,7 +278,7 @@
 			const sel = window.getSelection();
 			if (!sel || sel.isCollapsed) return;
 		}
-		if (cmd === 'indent' || cmd === 'outdent') {
+		if (isIndentCommand(cmd)) {
 			indentBlocks(cmd);
 			return;
 		}
@@ -294,7 +294,28 @@
 	// browsers disagree on the markup. Only a style changes (and a line of loose text gets a
 	// paragraph of its own), so earlier typing stays undoable; the editor keeps its own undo for
 	// these steps until the next edit.
+	//
+	// The right indent and the hanging indent move by the same step, on a paragraph (a <p>, or a
+	// <div> that holds text) outside a table cell, which is where the RTF writer sends them:
+	//
+	// | Command                          | Style on the paragraph                 | RTF            |
+	// |----------------------------------|----------------------------------------|----------------|
+	// | indent / outdent                 | margin-left                            | \liN           |
+	// | rightIndent / rightOutdent       | margin-right                           | \riN           |
+	// | hangingIndent / hangingOutdent   | margin-left, and text-indent the other | \liN\fi-N     |
+	// |                                  | way, so the first line stays put       |                |
+	//
+	// Outdent stops where the first line of a hanging paragraph would reach the left edge.
 	const INDENT_STEP_PX = 48;
+	const INDENT_COMMANDS = ['indent', 'outdent', 'rightIndent', 'rightOutdent', 'hangingIndent', 'hangingOutdent'] as const;
+	type IndentCommand = (typeof INDENT_COMMANDS)[number];
+	function isIndentCommand(cmd: string): cmd is IndentCommand {
+		return (INDENT_COMMANDS as readonly string[]).includes(cmd);
+	}
+	/** Commands that take an indent away: they never make a paragraph around loose text. */
+	function decreases(cmd: IndentCommand): boolean {
+		return cmd === 'outdent' || cmd === 'rightOutdent' || cmd === 'hangingOutdent';
+	}
 	const INDENT_TARGETS = 'p, div, h1, h2, h3, h4, h5, h6, pre, ul, ol, blockquote, figure';
 	/** CSS lengths a margin is written in, in px. */
 	const PX_PER_UNIT: Record<string, number> = { px: 1, pt: 96 / 72, in: 96, cm: 96 / 2.54, mm: 96 / 25.4 };
@@ -309,7 +330,7 @@
 	}
 	let indentUndo: IndentChange[][] = [];
 
-	function indentBlocks(cmd: 'indent' | 'outdent'): void {
+	function indentBlocks(cmd: IndentCommand): void {
 		if (readonly || !editorEl) return;
 		editorEl.focus();
 		const sel = window.getSelection();
@@ -324,11 +345,35 @@
 		}
 		const step: IndentChange[] = [];
 		for (const el of targets) {
-			const current = marginLeftPx(el);
-			const next = cmd === 'indent' ? current + INDENT_STEP_PX : Math.max(0, current - INDENT_STEP_PX);
-			if (next === current) continue;
 			const before = el.getAttribute('style');
-			el.style.marginLeft = next > 0 ? `${Math.round(next * 100) / 100}px` : '';
+			const left = marginLeftPx(el);
+			const first = textIndentPx(el);
+			const setPx = (prop: 'marginLeft' | 'marginRight' | 'textIndent', px: number) => {
+				el.style[prop] = px !== 0 ? `${Math.round(px * 100) / 100}px` : '';
+			};
+			if (cmd === 'indent') {
+				setPx('marginLeft', left + INDENT_STEP_PX);
+			} else if (cmd === 'outdent') {
+				// A hanging paragraph's first line starts left of its margin: stop at the edge.
+				const next = Math.max(0, -first, left - INDENT_STEP_PX);
+				if (next === left) continue;
+				setPx('marginLeft', next);
+			} else if (cmd === 'rightIndent') {
+				setPx('marginRight', marginRightPx(el) + INDENT_STEP_PX);
+			} else if (cmd === 'rightOutdent') {
+				const right = marginRightPx(el);
+				if (right === 0) continue;
+				setPx('marginRight', Math.max(0, right - INDENT_STEP_PX));
+			} else if (cmd === 'hangingIndent') {
+				setPx('marginLeft', left + INDENT_STEP_PX);
+				setPx('textIndent', first - INDENT_STEP_PX);
+			} else {
+				// Only what hangs comes back: a paragraph with no hanging indent stays as it is.
+				const back = Math.min(INDENT_STEP_PX, -first, left);
+				if (back <= 0) continue;
+				setPx('marginLeft', left - back);
+				setPx('textIndent', first + back);
+			}
 			if (!el.getAttribute('style')) el.removeAttribute('style');
 			const br = wrapped.get(el);
 			step.push({ el, before, after: el.getAttribute('style'), wrapped: br === undefined ? null : { br } });
@@ -340,11 +385,32 @@
 
 	/** An element's left margin in px: its own, from the inline style, or 0. */
 	function marginLeftPx(el: HTMLElement): number {
-		const value = el.style.marginLeft.trim().toLowerCase();
+		return Math.max(0, stylePx(el, 'marginLeft'));
+	}
+
+	/** An element's right margin in px: its own, from the inline style, or 0. */
+	function marginRightPx(el: HTMLElement): number {
+		return Math.max(0, stylePx(el, 'marginRight'));
+	}
+
+	/** An element's first-line indent in px, from the inline style: negative when it hangs. */
+	function textIndentPx(el: HTMLElement): number {
+		return stylePx(el, 'textIndent');
+	}
+
+	/** A length from an element's inline style, in px, or 0 when it sets none. */
+	function stylePx(el: HTMLElement, prop: 'marginLeft' | 'marginRight' | 'textIndent'): number {
+		const value = el.style[prop].trim().toLowerCase();
 		if (!value) return 0;
 		const m = /^(-?\d*\.?\d+)(px|pt|in|cm|mm)$/.exec(value);
-		const px = m ? parseFloat(m[1]) * PX_PER_UNIT[m[2]] : parseFloat(getComputedStyle(el).marginLeft);
-		return Math.max(0, px || 0);
+		const px = m ? parseFloat(m[1]) * PX_PER_UNIT[m[2]] : parseFloat(getComputedStyle(el)[prop]);
+		return px || 0;
+	}
+
+	/** A <p>, or a <div> that holds text and no blocks: what a right or hanging indent is set on. */
+	function isPlainParagraph(el: HTMLElement): boolean {
+		if (el.tagName !== 'P' && el.tagName !== 'DIV') return false;
+		return !Array.from(el.children).some((c) => c.matches(`${INDENT_TARGETS}, table, hr`));
 	}
 
 	/**
@@ -386,11 +452,12 @@
 	 * The blocks Indent moves: each line's paragraph, and a list, a quotation or a picture as a
 	 * whole. A line of loose text (typed straight into the editor or a table cell) is first given a
 	 * paragraph of its own, so the margin moves that line only. Outdent on a line with no margin
-	 * of its own moves the pasted indent around it (isIndentBlockquote) instead.
+	 * of its own moves the pasted indent around it (isIndentBlockquote) instead. A right or hanging
+	 * indent moves paragraphs only (isPlainParagraph), and nothing inside a table cell.
 	 */
 	function indentTargets(
 		range: Range,
-		cmd: 'indent' | 'outdent',
+		cmd: IndentCommand,
 		wrapped: Map<HTMLElement, HTMLBRElement | null>
 	): HTMLElement[] {
 		if (!editorEl) return [];
@@ -409,6 +476,14 @@
 			const item = el.closest('li');
 			const closest = el.closest(INDENT_TARGETS);
 			const block = inScope(item) ? item.parentElement : inScope(closest) ? closest : null;
+			if (cmd !== 'indent' && cmd !== 'outdent') {
+				if (cell) return null;
+				if (inScope(block)) return isPlainParagraph(block) ? block : null;
+				if (decreases(cmd)) return null;
+				const made = wrapLooseLine(node);
+				if (made) wrapped.set(made.p, made.br);
+				return made?.p ?? null;
+			}
 			if (cmd === 'outdent' && (!block || marginLeftPx(block) === 0)) {
 				for (let a = (block ?? el).parentElement; inScope(a); a = a.parentElement) {
 					if (isIndentBlockquote(a) && marginLeftPx(a) > 0) return a;

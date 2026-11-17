@@ -420,6 +420,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let currentParagraph = '';
 	const paragraphs: string[] = [];
 	const paragraphAligns: string[] = [];
+	const paragraphIndents: string[] = [];
 	const paragraphCaptions: boolean[] = [];
 	let paragraphHasText = false;
 	let paragraphHasListMarker = false;
@@ -429,11 +430,40 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	function pushParagraph(html: string, align: string, isCaption = false): void {
 		paragraphs.push(html);
 		paragraphAligns.push(align);
+		paragraphIndents.push(inTableCell || html.startsWith('<table') ? '' : indentStyle());
 		paragraphCaptions.push(isCaption);
 	}
 
 	// Paragraph alignment (reset by \pard, affects cells and paragraphs)
 	let currentAlign = 'left';
+
+	// Paragraph indents in twips: \li (left), \ri (right) and \fi (first line, negative when the
+	// paragraph hangs). As in RTF they hold from one paragraph to the next until \pard resets them.
+	// A table cell declares its own paragraph, so they are not carried out of a table.
+	let leftIndent = 0;
+	let rightIndent = 0;
+	let firstLineIndent = 0;
+	function resetIndents(): void {
+		leftIndent = 0;
+		rightIndent = 0;
+		firstLineIndent = 0;
+	}
+
+	/**
+	 * The current indents as CSS, in points (20 twips), which the writer reads back as the same
+	 * \li, \ri and \fi: "margin-left:36pt;text-indent:-36pt". A first line may not start left of
+	 * the page margin, where a browser would clip it.
+	 */
+	function indentStyle(): string {
+		const pt = (twips: number) => `${Math.round(twips * 5) / 100}pt`;
+		const left = Math.max(0, leftIndent);
+		const first = Math.max(-left, firstLineIndent);
+		const parts: string[] = [];
+		if (left > 0) parts.push(`margin-left:${pt(left)}`);
+		if (rightIndent > 0) parts.push(`margin-right:${pt(rightIndent)}`);
+		if (first !== 0) parts.push(`text-indent:${pt(first)}`);
+		return parts.join(';');
+	}
 
 	// Table state
 	let tableRows: Array<{ cells: string[]; isHeader: boolean; cellRights: number[]; cellAligns: string[] }> = [];
@@ -696,6 +726,15 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					case 'qj':
 						currentAlign = 'justify';
 						break;
+					case 'li':
+						leftIndent = p ?? 0;
+						break;
+					case 'ri':
+						rightIndent = p ?? 0;
+						break;
+					case 'fi':
+						firstLineIndent = p ?? 0;
+						break;
 					case 'par':
 						if (!inTableCell) flushParagraph();
 						break;
@@ -749,6 +788,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						currentRowCellRights = [];
 						currentRowCellAligns = [];
 						inTableCell = false;
+						resetIndents();
 						break;
 					case 'pard':
 						state.bold = false;
@@ -756,6 +796,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						state.underline = false;
 						state.strike = false;
 						currentAlign = 'left';
+						resetIndents();
 						break;
 					case 'line':
 						currentParagraph += '<br>';
@@ -877,6 +918,11 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	for (let i = 0; i < trimmedParagraphs.length; i++) {
 		const trimmed = trimmedParagraphs[i];
 		const align = paragraphAligns[i] ?? 'left';
+		// The paragraph's style attribute: its alignment, then its indents.
+		const blockStyle = [align !== 'left' ? `text-align:${align}` : '', paragraphIndents[i] ?? '']
+			.filter(Boolean)
+			.join(';');
+		const styleAttr = blockStyle ? ` style="${blockStyle}"` : '';
 		const prev = i > 0 ? trimmedParagraphs[i - 1] : '';
 		const next = i + 1 < trimmedParagraphs.length ? trimmedParagraphs[i + 1] : '';
 
@@ -916,8 +962,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		// A paragraph holding nothing but pictures becomes a figure, so it can carry
 		// a caption and be aligned/resized as a unit in the editor.
 		if (IMAGE_ONLY_PARAGRAPH.test(trimmed)) {
-			const alignAttr = align !== 'left' ? ` style="text-align:${align}"` : '';
-			rendered.push(`<figure${alignAttr}>${trimmed}</figure>`);
+			rendered.push(`<figure${styleAttr}>${trimmed}</figure>`);
 			continue;
 		}
 		const sizeMatch = trimmed.match(/font-size:\s*([\d.]+)pt/);
@@ -925,7 +970,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			// Compared in half-points, rounded the way the writer rounds them, so
 			// a heading written at any body size is read back as the same level.
 			const halfPoints = Math.round(parseFloat(sizeMatch[1]) * 2);
-			const alignAttr = align !== 'left' ? ` style="text-align:${align}"` : '';
+			const alignAttr = styleAttr;
 			const atLeast = (scale: number) => halfPoints >= Math.round(bodySize * scale);
 			// At the default 12 pt, size alone makes a heading, as it always has. At
 			// another screen size, ordinary 12 pt text can be a step above the body,
@@ -935,8 +980,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			if (looksLikeHeading && atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${alignAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
 			if (looksLikeHeading && atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${alignAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
 		}
-		const pStyle = align !== 'left' ? ` style="text-align:${align}"` : '';
-		rendered.push(`<p${pStyle}>${trimmed}</p>`);
+		rendered.push(`<p${styleAttr}>${trimmed}</p>`);
 	}
 
 	const output = rendered.join('\n');

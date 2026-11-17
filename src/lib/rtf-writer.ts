@@ -465,8 +465,11 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	total += ((editorEl.textContent || '').match(/\t/g)?.length ?? 0) * 4;
 	// A block's alignment (\qc, 3) and left indent (\liN, up to 7) are written per paragraph,
 	// for every block inside an indented one too: count 12 for each block that could carry them.
+	// A paragraph's own right indent (\\riN) and first-line indent (\\fi-N) are up to 8 more each.
 	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>('p, div, li, h1, h2, h3, h4, h5, h6, pre, blockquote'))) {
 		if (block.closest('[style*="margin"], [style*="text-align"], [align]')) total += 12;
+		if (block.style?.marginRight) total += 8;
+		if (block.style?.textIndent) total += 8;
 	}
 	// Each paragraph's formatting, worked out once: a blank line looks at the one before it.
 	const formatCache = new Map<Element, string>();
@@ -1148,6 +1151,7 @@ function paragraphFormat(el: HTMLElement, ctx: WalkContext): string {
  * |--------------------------------------------------|-------------------|
  * | data-rtf-tab-stops="1.75in" (comma-separated)    | \tx2520           |
  * | margin-left: 1.75in (the left indent, given)     | \li2520           |
+ * | margin-right: 0.5in                              | \ri720            |
  * | text-indent: -1.75in                             | \fi-2520          |
  * | margin-top: 5pt / margin-bottom: 5pt             | \sb100 / \sa100   |
  * | break-after: avoid, or page-break-after: avoid   | \keepn            |
@@ -1166,6 +1170,8 @@ function paragraphControls(el: HTMLElement, leftTwips: number): string {
 	out += liControl(leftTwips);
 	const style = el.style;
 	if (!style) return out;
+	const ri = lengthTwips(style.marginRight);
+	if (ri) out += `\\ri${ri}`;
 	const fi = lengthTwips(style.textIndent, true);
 	if (fi) out += `\\fi${fi}`;
 	const sb = lengthTwips(style.marginTop);

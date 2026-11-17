@@ -104,6 +104,18 @@
 		<ToolbarButton title="Increase indent (Ctrl+])" onclick={() => exec('indent')}>
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="11" y1="10" x2="21" y2="10"/><line x1="11" y1="14" x2="21" y2="14"/><line x1="3" y1="19" x2="21" y2="19"/><polyline points="4 9 7 12 4 15"/></svg>
 		</ToolbarButton>
+		<ToolbarButton title="Decrease hanging indent" onclick={() => exec('hangingOutdent')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="11" y1="10" x2="21" y2="10"/><line x1="11" y1="14" x2="21" y2="14"/><line x1="11" y1="19" x2="21" y2="19"/><polyline points="7 11.5 4 14.5 7 17.5"/></svg>
+		</ToolbarButton>
+		<ToolbarButton title="Increase hanging indent" onclick={() => exec('hangingIndent')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="11" y1="10" x2="21" y2="10"/><line x1="11" y1="14" x2="21" y2="14"/><line x1="11" y1="19" x2="21" y2="19"/><polyline points="4 11.5 7 14.5 4 17.5"/></svg>
+		</ToolbarButton>
+		<ToolbarButton title="Decrease right indent" onclick={() => exec('rightOutdent')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="3" y1="10" x2="13" y2="10"/><line x1="3" y1="14" x2="13" y2="14"/><line x1="3" y1="19" x2="21" y2="19"/><polyline points="17 9 20 12 17 15"/></svg>
+		</ToolbarButton>
+		<ToolbarButton title="Increase right indent" onclick={() => exec('rightIndent')}>
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="21" y2="5"/><line x1="3" y1="10" x2="13" y2="10"/><line x1="3" y1="14" x2="13" y2="14"/><line x1="3" y1="19" x2="21" y2="19"/><polyline points="20 9 17 12 20 15"/></svg>
+		</ToolbarButton>
 	</div>
 
 	<div class="toolbar-divider"></div>
