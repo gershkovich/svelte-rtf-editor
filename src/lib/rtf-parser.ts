@@ -1800,10 +1800,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		if (block.caption) {
 			const last = rendered.length - 1;
 			if (last >= 0 && rendered[last].startsWith('<figure') && !rendered[last].includes('<figcaption')) {
-				rendered[last] = rendered[last].replace(
-					'</figure>',
-					`<figcaption>${stripWrappingEm(trimmed)}</figcaption></figure>`
-				);
+				// The caption is given by a function: as a replacement string, a "$&" or a "$`"
+				// in the caption's own text would be read as the match or as the figure before it.
+				const caption = `<figcaption>${stripWrappingEm(trimmed)}</figcaption></figure>`;
+				rendered[last] = rendered[last].replace('</figure>', () => caption);
 				continue;
 			}
 		}

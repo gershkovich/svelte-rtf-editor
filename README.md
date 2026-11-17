@@ -291,6 +291,8 @@ RTF has no table element: each row says where its cells end (`\cellx`), so colum
 
 `htmlToMarkdown` writes a table as a Markdown table (a merged cell where it starts, with the cells it covers left empty, since Markdown has none), a numbered list from its `start`, and `<h4>` to `<h6>` as headings. Characters that Markdown would read as markup are escaped in text (`*`, `_`, `` ` ``, `#`, `[`, `]`, `<`, `~`, `\`, and `|` in a table cell), and so are `-`, `+`, `>` and `1.` at the start of a line: a report line typed as `- Benign.` stays that line. A link with an address `isSafeLinkUrl` refuses is written as its text alone.
 
+Code is the one thing written as it is, so it has to stay inside its code span or its fenced block. A line break in a code span is written as a space, which is how Markdown shows one; a code block starts a line of its own, whatever element is around it; every line of a quotation carries its `>`. Underline is the `<u>` tag around the text itself, never alone on a line, and is not written around a code block, a quotation, a list or a table. Markdown allows HTML, and this export keeps a document's text from being read as any, but a page that shows Markdown from more than one source should still use a viewer that does not pass HTML through, or sanitize what the viewer makes.
+
 ## Theming
 
 The components use CSS custom properties with sensible fallbacks, so they work out of the box but are easy to customise. Override these in your own CSS:
