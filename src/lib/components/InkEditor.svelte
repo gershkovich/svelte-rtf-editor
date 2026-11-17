@@ -926,7 +926,7 @@
 			text: editorEl?.innerText || '',
 			wordCount,
 			charCount,
-			estimatedRtfBytes: editorEl ? estimateRtfBytes(editorEl) : 0
+			estimatedRtfBytes: editorEl ? estimateRtfBytes(editorEl, { fontFamily, fontSize }) : 0
 		});
 	}
 

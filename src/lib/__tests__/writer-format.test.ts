@@ -67,7 +67,7 @@ describe('closing a format restores the enclosing one', () => {
 describe('blocks inside a table cell stay in the cell', () => {
 	it('a list keeps \\intbl and does not end the row with an extra paragraph', () => {
 		const rtf = body('<table><tr><td><ul><li>x</li></ul></td></tr></table>');
-		expect(rtf).toContain('\\pard\\intbl\\li720\\fi-360\\bullet\\tab x\\par}\\cell');
+		expect(rtf).toContain('\\pard\\intbl\\li720\\fi-360\\bullet\\tab x\\cell}');
 		expect(rtf).not.toMatch(/\\pard\\li720/);
 	});
 
@@ -82,18 +82,18 @@ describe('blocks inside a table cell stay in the cell', () => {
 	});
 
 	it('two paragraphs in one cell stay two', () => {
-		expect(body('<table><tr><td><p>x</p><p>y</p></td></tr></table>')).toContain('x\\par \\pard\\intbl y\\par}\\cell');
+		expect(body('<table><tr><td><p>x</p><p>y</p></td></tr></table>')).toContain('x\\par \\pard\\intbl y\\cell}');
 	});
 
 	it('a line typed after loose text stays its own line (Chrome\'s "abc<div>def</div>")', () => {
-		expect(body('<table><tr><td>abc<div>def</div></td></tr></table>')).toContain('abc\\par \\pard\\intbl def\\par}\\cell');
+		expect(body('<table><tr><td>abc<div>def</div></td></tr></table>')).toContain('abc\\par \\pard\\intbl def\\cell}');
 		// The same shape outside a table.
 		expect(body('abc<div>def</div>')).toBe('abc\\par \\pard def\\par }');
 	});
 
 	it('an empty line in a cell is one line, not two', () => {
 		expect(body('<table><tr><td><p>a</p><div><br></div><p>b</p></td></tr></table>')).toContain(
-			'a\\par \\pard\\intbl \\par \\pard\\intbl b\\par}\\cell'
+			'a\\par \\pard\\intbl \\par \\pard\\intbl b\\cell}'
 		);
 	});
 
@@ -107,12 +107,12 @@ describe('blocks inside a table cell stay in the cell', () => {
 
 	it('keeps a paragraph mark that is really typed text', () => {
 		// The text "\par " typed at the end of a cell is escaped, not a paragraph mark to drop.
-		expect(body('<table><tr><td><p>see \\par </p></td></tr></table>')).toContain('see \\\\par \\par}\\cell');
+		expect(body('<table><tr><td><p>see \\par </p></td></tr></table>')).toContain('see \\\\par \\cell}');
 	});
 
 	it('a one-paragraph cell is written exactly as before', () => {
 		expect(body('<table><tr><td><p>x</p></td><td>y</td></tr></table>')).toContain(
-			'{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 x\\par}\\cell{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 y\\par}\\cell'
+			'{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 x\\cell}{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 y\\cell}'
 		);
 	});
 });

@@ -28,7 +28,7 @@ describe('a <br> that shows as nothing is not written', () => {
 		expect(body('<p>text<br></p>')).toBe('\\pard text\\par ');
 		expect(body('<h2>head<br></h2>')).toBe('\\pard\\f0\\fs36\\b head\\b0\\fs24\\par ');
 		expect(body('<ul><li>item<br></li></ul>')).toBe('\\pard\\li720\\fi-360\\bullet\\tab item\\par ');
-		expect(body('<table><tr><td>cell<br></td></tr></table>')).toContain('\\fi0 cell\\par}\\cell');
+		expect(body('<table><tr><td>cell<br></td></tr></table>')).toContain('\\fi0 cell\\cell}');
 		expect(body('loose<br>')).toBe('loose');
 	});
 
@@ -81,7 +81,7 @@ describe('<h4>, <h5> and <h6>', () => {
 
 	it('they take an alignment and an indent, and stay in a table cell', () => {
 		expect(body('<h5 style="text-align:center;margin-left:48px">five</h5>')).toBe('\\pard\\qc\\li720\\f0\\fs20\\b five\\b0\\fs24\\par ');
-		expect(body('<table><tr><td><h4>four</h4></td></tr></table>')).toContain('\\pard\\intbl\\f0\\fs24\\b four\\b0\\fs24\\par}\\cell');
+		expect(body('<table><tr><td><h4>four</h4></td></tr></table>')).toContain('\\pard\\intbl\\f0\\fs24\\b four\\b0\\fs24\\cell}');
 	});
 
 	it('they read back as the bold paragraphs they were written as, with every word', () => {
@@ -180,7 +180,8 @@ describe('htmlToMarkdown: text that looks like Markdown', () => {
 		expect(md('<p>- Benign.</p><p>+ plus</p><p>1. Left colon</p><p>2) right</p><p>&gt; p</p>')).toBe(
 			'\\- Benign.\n\n\\+ plus\n\n1\\. Left colon\n\n2\\) right\n\n\\> p\n\n'
 		);
-		expect(md('<p>first<br>- second</p>')).toBe('first\n\\- second\n\n');
+		// (Changed on purpose for issue 21: a <br> is a line break Markdown keeps, two spaces and a newline.)
+		expect(md('<p>first<br>- second</p>')).toBe('first  \n\\- second\n\n');
 	});
 
 	it('those marks in the middle of a line are left alone', () => {

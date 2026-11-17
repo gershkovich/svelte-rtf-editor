@@ -18,6 +18,8 @@ export interface TableModel {
 	/** For each row, the cell that covers each column, or null where no cell does. */
 	rows: (GridCell | null)[][];
 	cells: GridCell[];
+	/** For each column, which column of the markup it is: columns no cell starts in are not counted. */
+	source: number[];
 }
 
 /** The most columns one cell may span, as in HTML. */
@@ -95,10 +97,14 @@ export function tableModel(table: Element): TableModel {
 	const starts = new Array<boolean>(width).fill(false);
 	for (const cell of cells) starts[cell.col] = true;
 	const index: number[] = [];
+	const source: number[] = [];
 	let kept = 0;
 	for (let c = 0; c <= width; c++) {
 		index[c] = kept;
-		if (starts[c]) kept++;
+		if (starts[c]) {
+			source.push(c);
+			kept++;
+		}
 	}
 	for (const cell of cells) {
 		const end = index[cell.col + cell.colspan];
@@ -112,31 +118,90 @@ export function tableModel(table: Element): TableModel {
 		for (let c = 0; c < columns; c++) row[c] = row[c] ?? null;
 	}
 
-	return { columns, rows, cells };
+	return { columns, rows, cells, source };
 }
 
-/** The share of the table's width a cell asks for, in percent, or null when it asks for none. */
-function percentWidth(el: HTMLElement): number | null {
-	const m = (el.style?.width || el.getAttribute('width') || '').trim().match(/^(\d+(?:\.\d+)?|\.\d+)%$/);
-	const value = m ? parseFloat(m[1]) : 0;
-	return value > 0 ? value : null;
+/** A width as it is asked for: a share of the table in percent, or a length in twips. */
+type Width = { percent: number } | { twips: number };
+
+const TWIPS_PER_UNIT: Record<string, number> = { px: 15, pt: 20, in: 1440, cm: 1440 / 2.54, mm: 144 / 2.54 };
+
+/** The width an element asks for (style or the width attribute, where a bare number is pixels), or null. */
+function widthOf(el: Element | null | undefined): Width | null {
+	if (!el) return null;
+	const value = ((el as HTMLElement).style?.width || el.getAttribute('width') || '').trim().toLowerCase();
+	const m = value.match(/^(\d+(?:\.\d+)?|\.\d+)(%|px|pt|in|cm|mm)?$/);
+	if (!m) return null;
+	const n = parseFloat(m[1]);
+	if (!(n > 0)) return null;
+	return m[2] === '%' ? { percent: n } : { twips: n * TWIPS_PER_UNIT[m[2] ?? 'px'] };
+}
+
+/** The width each column of the markup is given by <col> and <colgroup>, where it is given one. */
+function colWidths(table: Element): (Width | null)[] {
+	const widths: (Width | null)[] = [];
+	const add = (el: Element, fallback: Width | null) => {
+		const span = Math.min(MAX_COLSPAN, Math.max(1, parseInt(el.getAttribute('span') ?? '', 10) || 1));
+		const width = widthOf(el) ?? fallback;
+		for (let k = 0; k < span && widths.length < MAX_COLSPAN; k++) widths.push(width);
+	};
+	for (const child of Array.from(table.children)) {
+		const tag = child.tagName.toLowerCase();
+		if (tag === 'col') add(child, null);
+		if (tag !== 'colgroup') continue;
+		const cols = Array.from(child.children).filter((c) => c.tagName.toLowerCase() === 'col');
+		if (cols.length === 0) add(child, null);
+		for (const col of cols) add(col, widthOf(child));
+	}
+	return widths;
 }
 
 /**
  * The share of the table's width each column takes, adding up to 1. A column is as wide as a
- * cell of its own says (width: 25%); a cell across several columns gives what it has left to
- * those of them with no width; the rest share what remains equally.
+ * cell of its own says, or else its <col> (width: 25%); a cell across several columns gives what
+ * it has left to those of them with no width; the rest share what remains equally.
+ *
+ * Widths given as lengths (120px, 90pt, the bare width="120" of a pasted table) count too: as a
+ * share of the table where the table's own width is a length, and otherwise, where no width is a
+ * percentage, in proportion to each other. Lengths beside percentages with no table width to
+ * measure them against cannot be compared, and are left out.
  */
-export function columnShares(model: TableModel): number[] {
-	const width: (number | null)[] = new Array(model.columns).fill(null);
-
+export function columnShares(model: TableModel, table?: Element): number[] {
+	const cols = table ? colWidths(table) : [];
+	const asked: (Width | null)[] = Array.from({ length: model.columns }, (_, c) => cols[model.source[c]] ?? null);
+	const own: boolean[] = new Array(model.columns).fill(false);
 	for (const cell of model.cells) {
-		if (cell.colspan !== 1 || width[cell.col] != null) continue;
-		width[cell.col] = percentWidth(cell.el);
+		if (cell.colspan !== 1 || own[cell.col]) continue;
+		const w = widthOf(cell.el);
+		if (!w) continue;
+		asked[cell.col] = w;
+		own[cell.col] = true;
 	}
-	for (const cell of model.cells) {
-		if (cell.colspan === 1) continue;
-		const pct = percentWidth(cell.el);
+
+	const tableWidth = widthOf(table);
+	const tableTwips = tableWidth && 'twips' in tableWidth ? tableWidth.twips : 0;
+	const spanning = model.cells.filter((cell) => cell.colspan !== 1).map((cell) => ({ cell, width: widthOf(cell.el) }));
+	const anyPercent = asked.some((w) => w && 'percent' in w) || spanning.some((s) => s.width && 'percent' in s.width);
+	const lengths = asked.filter((w): w is { twips: number } => w != null && 'twips' in w);
+
+	if (!tableTwips && !anyPercent && lengths.length > 0) {
+		// Lengths only: the columns in proportion, one with no width as wide as the average.
+		const average = lengths.reduce((sum, w) => sum + w.twips, 0) / lengths.length;
+		const twips = asked.map((w) => (w && 'twips' in w ? w.twips : average));
+		const all = twips.reduce((a, b) => a + b, 0) || 1;
+		return twips.map((t) => t / all);
+	}
+
+	/** A width in percent of the table, or null where it cannot be told. */
+	const percent = (w: Width | null): number | null => {
+		if (!w) return null;
+		if ('percent' in w) return w.percent;
+		return tableTwips ? (w.twips / tableTwips) * 100 : null;
+	};
+
+	const width: (number | null)[] = asked.map(percent);
+	for (const { cell, width: w } of spanning) {
+		const pct = percent(w);
 		if (pct == null) continue;
 		const cols = Array.from({ length: cell.colspan }, (_, k) => cell.col + k).filter((c) => c < model.columns);
 		const open = cols.filter((c) => width[c] == null);
