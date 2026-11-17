@@ -285,7 +285,7 @@ It stays on until **Done** in the bar, `Esc`, or the button again. Each click is
 - What is copied is the paragraph's alignment, indent, right indent and hanging indent, with the tab stop Hang at caret sets. Bold, italic, color and size are not.
 - A click in the margin beside a paragraph, or in the empty space below the text, does nothing.
 - Copying from a plain paragraph clears those from the paragraphs clicked.
-- A heading or a paragraph in a table cell takes the alignment and the indent only, which is what the RTF carries for them. Lists, code blocks and pictures are left alone.
+- Each block takes what the RTF carries for it: a heading everything but the tab stop, and a heading or paragraph in a table cell the alignment and the indent only. Lists, code blocks and pictures are left alone.
 - The frame, the highlight and the bar are not part of the text and never reach `getHTML()` or the RTF.
 
 ### Pasted text

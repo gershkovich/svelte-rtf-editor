@@ -144,14 +144,31 @@ describe('Copy format', () => {
 		expect(para(editor, 'one').hasAttribute('style')).toBe(false);
 	});
 
-	it('a heading and a table cell paragraph take the alignment and the left indent only', () => {
-		const { editor } = open(`${SOURCE}<h2>head</h2><table><tbody><tr><td><p>cell</p></td></tr></tbody></table>`);
+	it('a heading takes all the indents; in a table cell a paragraph or heading takes alignment and left indent only', () => {
+		const { editor } = open(
+			`${SOURCE}<h2>head</h2><table><tbody><tr><td><p>cell</p><h3>cell head</h3></td></tr></tbody></table>`
+		);
 		click(button());
 		click(para(editor, 'source'));
 		click(para(editor, 'head'));
 		click(editor.querySelector('td p')!);
-		expect(style(para(editor, 'head'))).toBe('margin-left: 96px; text-align: justify');
+		click(editor.querySelector('td h3')!);
+		expect(style(para(editor, 'head'))).toBe(sorted(SOURCE_STYLE));
 		expect(style(editor.querySelector('td p') as HTMLElement)).toBe('margin-left: 96px; text-align: justify');
+		expect(style(editor.querySelector('td h3') as HTMLElement)).toBe('margin-left: 96px; text-align: justify');
+	});
+
+	it('a plain format takes a heading\'s hang away whole, not just its left indent', () => {
+		// Left with a first-line indent and no left indent, the heading's first line would be
+		// written 0.5 in left of the page margin.
+		const { editor, api } = open(
+			'<h1 style="margin-left:36pt;margin-right:36pt;text-indent:-36pt">1. Heading</h1><p>Body</p>'
+		);
+		click(button());
+		click(para(editor, 'Body'));
+		click(para(editor, '1. Heading'));
+		expect(para(editor, '1. Heading').hasAttribute('style')).toBe(false);
+		expect(api.getRTF()).not.toMatch(/\\fi-|\\ri/);
 	});
 
 	it('leaves a list alone, and a list cannot be the source', () => {

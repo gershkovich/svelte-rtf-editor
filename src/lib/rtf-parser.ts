@@ -813,7 +813,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						currentRowCellRights = [];
 						currentRowCellAligns = [];
 						inTableCell = false;
-						resetIndents(state);
+						// The cell's indents end with the table, in whichever group set them:
+						// \row may sit in a group of its own ({\row}).
+						stateStack.forEach(resetIndents);
 						break;
 					case 'pard':
 						state.bold = false;

@@ -271,6 +271,12 @@ describe('the reader', () => {
 		expect(indented).toMatch(/^<figure style="margin-left:36pt">/);
 	});
 
+	it('a table cell\'s indent ends with the table when \\row sits in a group of its own', () => {
+		const html = rtfToHtml(wrap('\\pard\\li720 A\\par \\trowd\\cellx3000 \\pard\\intbl\\li200 c1\\cell {\\row} After\\par '));
+		expect(html).toContain('<p style="margin-left:36pt">A</p>');
+		expect(html).toContain('<p>After</p>');
+	});
+
 	it('what the writer sends, the reader brings back, and the writer sends the same again', () => {
 		const first = htmlToRtf(htmlEl('<p style="margin-left: 96px; margin-right: 48px; text-indent: -48px">one</p><p>two</p>'));
 		expect(first).toContain('\\pard\\li1440\\ri720\\fi-720 one\\par \\pard two\\par ');

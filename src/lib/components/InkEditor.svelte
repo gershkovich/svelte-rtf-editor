@@ -583,9 +583,10 @@
 	//
 	// What is copied is the paragraph's own formatting, the part the RTF writer sends as \q, \li,
 	// \ri and \fi: text-align, margin-left, margin-right and text-indent, and with them the tab
-	// stop Hang at caret sets (tab-size, data-rtf-tab-stops). A heading or a paragraph
-	// in a table cell takes the alignment and the left indent only, which is all the writer sends
-	// for them. Lists, code blocks and pictures are left alone. Each click is one Undo step.
+	// stop Hang at caret sets (tab-size, data-rtf-tab-stops). Each block takes what the writer
+	// sends for it: a heading all of it but the tab stop, and a heading or paragraph in a table
+	// cell the alignment and the left indent only. Lists, code blocks and pictures are left alone.
+	// Each click is one Undo step.
 	interface ParagraphFormat {
 		textAlign: string;
 		marginLeft: string;
@@ -706,13 +707,19 @@
 		if (!target) return;
 		const before = wrapped ? null : target.getAttribute('style');
 		const stopsBefore = target.getAttribute(TAB_STOPS);
-		const whole = isPlainParagraph(target) && !target.closest('td, th');
+		// What the writer sends decides what a block can take: a paragraph or a heading outside a
+		// table cell carries all three indents, and only a paragraph carries tab stops.
+		const outsideCell = !target.closest('td, th');
+		const whole = outsideCell && isPlainParagraph(target);
+		const indents = whole || (outsideCell && /^H[1-6]$/.test(target.tagName));
 		// align="center" (Firefox) outranks an empty style, so say left out loud over it.
 		target.style.textAlign = copiedFormat.textAlign || (target.hasAttribute('align') ? 'left' : '');
 		target.style.marginLeft = copiedFormat.marginLeft;
-		if (whole) {
+		if (indents) {
 			target.style.marginRight = copiedFormat.marginRight;
 			target.style.textIndent = copiedFormat.textIndent;
+		}
+		if (whole) {
 			target.style.tabSize = copiedFormat.tabSize;
 			if (copiedFormat.tabStops) target.setAttribute(TAB_STOPS, copiedFormat.tabStops);
 			else target.removeAttribute(TAB_STOPS);
@@ -749,6 +756,7 @@
 	}
 
 	function indentChanged(): void {
+		placeCopySourceBox();
 		updateToolbarState();
 		fireChange();
 		if (autosave) scheduleAutoSave();
