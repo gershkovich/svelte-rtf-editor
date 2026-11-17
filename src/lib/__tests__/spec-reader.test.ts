@@ -284,7 +284,7 @@ describe('input that is damaged, hostile or not RTF', () => {
 		expect(rtfToHtml(`{\\rtf1 ${deep} y\\par}`)).toBe('<p><strong>x</strong> y</p>');
 	});
 
-	it.fails('#3.10: color components are kept within 0 to 255', () => {
+	it('#3.10: color components are kept within 0 to 255', () => {
 		const html = rtfToHtml(R`{\rtf1\ansi{\colortbl;\red999\green-5\blue0;}\cf1 x\par}`);
 		expect(html).toContain('color:rgb(255,0,0)');
 	});
