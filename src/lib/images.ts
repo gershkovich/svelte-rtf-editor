@@ -65,6 +65,19 @@ export class ImageTooLargeError extends Error {
 	}
 }
 
+/**
+ * A picture the browser could not open: a format it does not show (TIFF, HEIC in most browsers),
+ * or a damaged file. Its size has nothing to do with it, so it is refused in these words whatever
+ * the limit. It could not be shown in the editor, and what it holds could not be checked or
+ * converted for the RTF.
+ */
+export class ImageUnreadableError extends Error {
+	constructor() {
+		super('This picture could not be opened: the browser cannot show its format, or the file is damaged');
+		this.name = 'ImageUnreadableError';
+	}
+}
+
 /** A byte count as a person reads it: "512 KB", "1.5 MB", "900 bytes". */
 function formatBytes(bytes: number): string {
 	if (bytes >= 1024 * 1024) return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
@@ -234,6 +247,14 @@ function loadImage(src: string): Promise<HTMLImageElement> {
  * or because this runtime cannot redraw it, is refused with an ImageTooLargeError; it is never
  * returned over the limit. Where the runtime cannot rasterise (SSR, a test DOM), a picture within
  * the limit is passed through as it is.
+ *
+ * A browser has a largest canvas (268 million pixels in Chromium, about 16.7 million in Safari on
+ * a phone). Only a picture larger than `maxEdge` normally allows can meet it: with `maxEdge` 0, or
+ * a very large one. Such a picture is brought down to a size the canvas can hold, and the steps
+ * above start from there.
+ *
+ * A picture the browser cannot open at all is refused with an ImageUnreadableError, whatever its
+ * size.
  */
 export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}): Promise<string> {
 	const { maxEdge = DEFAULT_MAX_IMAGE_EDGE, maxBytes = DEFAULT_MAX_IMAGE_BYTES } = limits;
@@ -256,6 +277,11 @@ export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}
 	const canvas = document.createElement('canvas');
 	try {
 		img = await loadImage(dataUrl);
+	} catch {
+		// Not a matter of size: a smaller file of the same kind fails the same way.
+		throw new ImageUnreadableError();
+	}
+	try {
 		ctx = canvas.getContext('2d');
 	} catch {
 		return asIs();
@@ -288,10 +314,20 @@ export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}
 		return { w, h };
 	};
 	const jpegs = () => QUALITY_LADDER.map((quality) => canvas.toDataURL('image/jpeg', quality));
-	/** The first candidate that fits, or the size of the smallest one. */
+	/**
+	 * Whether the canvas gave a picture. Asked for more pixels than the browser allows, it does
+	 * not throw: toDataURL returns "data:,", which is no picture and no bytes. Counted as a fit,
+	 * that was returned as the picture.
+	 */
+	const isPicture = (candidate: string) => sniffImageType(candidate) !== null;
+	/**
+	 * The first candidate that fits, or the size of the smallest one. `smallest` stays Infinity
+	 * when the canvas gave no picture at this size.
+	 */
 	const pick = (candidates: string[]): { fit: string | null; smallest: number } => {
 		let smallest = Infinity;
 		for (const candidate of candidates) {
+			if (!isPicture(candidate)) continue;
 			const bytes = dataUrlByteLength(candidate);
 			if (fits(bytes)) return { fit: candidate, smallest: bytes };
 			smallest = Math.min(smallest, bytes);
@@ -302,31 +338,55 @@ export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}
 	try {
 		let opaque: boolean | null = null;
 		let smallest = Infinity;
+		const longest = Math.max(target.width, target.height);
+		// The share of the target size the canvas can hold: all of it, until a size gives no picture.
+		let room = 1;
+		// Whether the canvas gave a picture at any size.
+		let drew = false;
 
 		// Shrink in steps until the encoded picture fits the budget. At each size a
 		// PNG source is tried as PNG first — screenshots and diagrams stay sharp and
 		// usually compress well — and only falls back to JPEG when PNG is too heavy
 		// and the image has no transparency to lose.
-		for (const scale of SIZE_LADDER) {
+		for (let step = 0; step < SIZE_LADDER.length; ) {
+			const scale = room * SIZE_LADDER[step];
 			const { w, h } = draw(scale, false);
 			const candidates: string[] = [];
-			if (!isJpeg) candidates.push(canvas.toDataURL('image/png'));
-			if (isJpeg || !fits(dataUrlByteLength(candidates[0] ?? ''))) {
-				if (opaque === null) opaque = !hasTransparency(ctx, w, h);
-				if (isJpeg || opaque) candidates.push(...jpegs());
+			if (isJpeg) {
+				candidates.push(...jpegs());
+			} else {
+				const png = canvas.toDataURL('image/png');
+				candidates.push(png);
+				if (!fits(dataUrlByteLength(png))) {
+					if (opaque === null) opaque = !hasTransparency(ctx, w, h);
+					if (opaque) candidates.push(...jpegs());
+				}
 			}
 			const picked = pick(candidates);
 			if (picked.fit) return picked.fit;
+			if (picked.smallest === Infinity) {
+				// No picture at this size: it is more than the canvas holds. Half the area becomes
+				// the full size, and the steps start again from it.
+				room = scale * Math.SQRT1_2;
+				if (longest * room < MIN_IMAGE_EDGE) break;
+				step = 0;
+				continue;
+			}
+			drew = true;
 			smallest = picked.smallest;
+			step++;
 		}
+		// The canvas gave no picture at any size, which is the canvas failing, not the picture
+		// being too heavy.
+		if (!drew) return asIs();
 
 		// Nothing fit. The limit is a ceiling, so keep going: smaller, and for a picture with
 		// transparency as a JPEG on white from full size again, which keeps far more of it than
 		// a PNG a fraction of the size. Each step is sized from how far over the last one was
 		// (the bytes of a picture go with its area), and is never less than a fifth smaller.
 		const smaller = (bytes: number) => Math.min(0.8, Math.sqrt(maxBytes / bytes) * 0.95);
-		let scale = isJpeg || opaque ? SIZE_LADDER[SIZE_LADDER.length - 1] * smaller(smallest) : 1;
-		while (Math.max(target.width, target.height) * scale >= MIN_IMAGE_EDGE) {
+		let scale = room * (isJpeg || opaque ? SIZE_LADDER[SIZE_LADDER.length - 1] * smaller(smallest) : 1);
+		while (longest * scale >= MIN_IMAGE_EDGE) {
 			draw(scale, !isJpeg);
 			const candidates = isJpeg ? jpegs() : [canvas.toDataURL('image/png'), ...jpegs()];
 			const picked = pick(candidates);
@@ -335,7 +395,7 @@ export async function toRtfSafeDataUrl(dataUrl: string, limits: ImageLimits = {}
 		}
 	} catch (err) {
 		if (err instanceof ImageTooLargeError) throw err;
-		// The canvas gave up (a picture too large for it, a tainted source).
+		// The canvas gave up by throwing (a tainted source, no memory for it).
 		return asIs();
 	}
 	throw new ImageTooLargeError(maxBytes);
@@ -366,17 +426,21 @@ export const MAX_FETCHED_IMAGE_BYTES = 25 * 1024 * 1024;
  * A picture that could not be brought under `maxBytes` is never returned as data. One fetched
  * from an address keeps its address, and so exports as the placeholder. One given as data has
  * no address to fall back to: it comes back with `tooLarge` set, and must not be inserted.
+ *
+ * Picture data the browser cannot open comes back with `unreadable` set, and must not be inserted
+ * either: it would show as a broken picture. `tooLarge` and `unreadable` are never both set.
  */
 export async function urlToImageSrc(
 	url: string,
 	limits: ImageLimits = {}
-): Promise<{ src: string; embedded: boolean; tooLarge?: true }> {
+): Promise<{ src: string; embedded: boolean; tooLarge?: true; unreadable?: true }> {
 	const value = url.trim();
 	const result = (src: string) => ({ src, embedded: src.startsWith('data:') && sniffImageType(src) !== null });
 	if (value.startsWith('data:image/')) {
 		try {
 			return result(await toRtfSafeDataUrl(value, limits));
 		} catch (err) {
+			if (err instanceof ImageUnreadableError) return { src: value, embedded: false, unreadable: true };
 			if (!(err instanceof ImageTooLargeError)) throw err;
 			// Picture data over the limit that could not be reduced. The data is the
 			// address here, so there is nothing to keep that would not also be over it:

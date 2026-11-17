@@ -6,6 +6,7 @@ import {
 	dataUrlByteLength,
 	sniffImageType,
 	ImageTooLargeError,
+	ImageUnreadableError,
 	DEFAULT_MAX_IMAGE_BYTES
 } from '../images.js';
 
@@ -16,8 +17,12 @@ import {
  * and is never put in the document over the limit with nothing said.
  *
  * The test DOM has no canvas, so one is stood in here: it records what is drawn and gives each
- * encoding a size from the picture's area, which is how real encodings behave. The real thing was
- * measured in Chromium (the README has the numbers).
+ * encoding a size from the picture's area, which is how real encodings behave. It fails the two
+ * ways a real one does: by throwing, and, asked for more pixels than it holds, by answering
+ * "data:," with no error at all. The real thing was measured in Chromium (the README has the
+ * numbers).
+ *
+ * Invented pictures.
  */
 
 const KB = 1024;
@@ -52,7 +57,13 @@ function dataUrlOf(mime: string, magic: number[], bytes: number): string {
 const sources = new Map<string, Source>();
 /** Every encoding the code asked for, in order. */
 let encodes: { type: string; quality?: number; width: number; height: number; onWhite: boolean }[] = [];
+/** Canvas sizes asked for that were more than the canvas holds, and so gave no picture. */
+let blanks: { width: number; height: number }[] = [];
 let canvasBreaks = false;
+/** The most pixels the canvas holds. Chromium's is 268,435,456; Safari's on a phone 16,777,216. */
+let canvasHolds = Infinity;
+const CHROMIUM_CANVAS = 16384 * 16384;
+const PHONE_CANVAS = 4096 * 4096;
 
 function picture(mime: string, magic: number[], bytes: number, source: Source): string {
 	// Two pictures of the same size and format would be the same string; the size sets them apart.
@@ -102,11 +113,19 @@ function installCanvas(): void {
 				drawImage: (img: FakeImage) => {
 					drawn = img.source;
 				},
-				getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, drawn?.transparent && !onWhite ? 0 : 255]) })
+				getImageData: () => {
+					// A canvas over its size holds nothing: every pixel reads as clear.
+					const blank = canvas.width * canvas.height > canvasHolds;
+					return { data: new Uint8ClampedArray([0, 0, 0, blank || (drawn?.transparent && !onWhite) ? 0 : 255]) };
+				}
 			}),
 			toDataURL: (type = 'image/png', quality = 1) => {
 				if (canvasBreaks) throw new Error('The canvas has been tainted');
 				const area = canvas.width * canvas.height;
+				if (area > canvasHolds) {
+					blanks.push({ width: canvas.width, height: canvas.height });
+					return 'data:,';
+				}
 				encodes.push({ type, quality: type === 'image/jpeg' ? quality : undefined, width: canvas.width, height: canvas.height, onWhite });
 				const cost = drawn!.cost;
 				return type === 'image/jpeg'
@@ -121,7 +140,9 @@ function installCanvas(): void {
 beforeEach(() => {
 	sources.clear();
 	encodes = [];
+	blanks = [];
 	canvasBreaks = false;
+	canvasHolds = Infinity;
 	installCanvas();
 });
 
@@ -269,12 +290,6 @@ describe('a picture that cannot be brought under the limit is refused', () => {
 		expect(await toRtfSafeDataUrl(big, { maxBytes: 8000 * KB })).toBe(big);
 	});
 
-	it('when it cannot be decoded at all', async () => {
-		const unknown = dataUrlOf('image/jpeg', JPEG_MAGIC, 900 * KB);
-		await expect(toRtfSafeDataUrl(unknown, { maxBytes: 100 * KB })).rejects.toBeInstanceOf(ImageTooLargeError);
-		expect(await toRtfSafeDataUrl(unknown, { maxBytes: 1000 * KB })).toBe(unknown);
-	});
-
 	it('where there is no canvas at all (a server, a test DOM)', async () => {
 		vi.restoreAllMocks();
 		const big = dataUrlOf('image/png', PNG_MAGIC, 900 * KB);
@@ -317,5 +332,161 @@ describe('a picture given by address', () => {
 		canvasBreaks = true;
 		const gif = picture('image/gif', GIF_MAGIC, 2 * KB, { width: 10, height: 10, transparent: false, cost: SCREENSHOT });
 		expect(await urlToImageSrc(gif, { maxBytes: 100 * KB })).toEqual({ src: gif, embedded: false });
+	});
+});
+
+describe('a picture larger than the canvas the browser has', () => {
+	// With maxEdge 0 a picture is redrawn at its own size, and a browser's canvas has a largest
+	// size. Asked for more it does not throw: toDataURL answers "data:,". That is 0 bytes, so it
+	// passed as fitting any limit and was handed back as the picture.
+
+	/** A drawing in a format the RTF cannot carry, so it has to be redrawn: 280 million pixels. */
+	const hugeDrawing = (transparent = false) =>
+		picture('image/svg+xml', GIF_MAGIC, 3 * KB, { width: 20000, height: 14000, transparent, cost: SCREENSHOT });
+	const hugePhoto = () =>
+		picture('image/jpeg', JPEG_MAGIC, 40000 * KB, { width: 20000, height: 14000, transparent: false, cost: PHOTO });
+
+	it('is never returned as the empty "data:,", with a byte limit or without one', async () => {
+		canvasHolds = CHROMIUM_CANVAS;
+		for (const limits of [{ maxEdge: 0 }, { maxEdge: 0, maxBytes: 0 }]) {
+			const out = await toRtfSafeDataUrl(hugeDrawing(), limits);
+			expect(out).not.toBe('data:,');
+			expect(sniffImageType(out)).toBe('image/png');
+			expect(sizeOf(out)).toBeGreaterThan(0);
+		}
+	});
+
+	it('is brought down to a size the canvas holds: half the area, and its shape is kept', async () => {
+		canvasHolds = CHROMIUM_CANVAS;
+		await toRtfSafeDataUrl(hugeDrawing(), { maxEdge: 0, maxBytes: 0 });
+		expect(blanks).toEqual([{ width: 20000, height: 14000 }]);
+		expect(last()).toMatchObject({ type: 'image/png', width: 14142, height: 9899 });
+	});
+
+	it('a photograph that large comes back under the byte limit, as a JPEG', async () => {
+		canvasHolds = CHROMIUM_CANVAS;
+		const out = await toRtfSafeDataUrl(hugePhoto(), { maxEdge: 0 });
+		expect(sniffImageType(out)).toBe('image/jpeg');
+		expect(sizeOf(out)).toBeLessThanOrEqual(DEFAULT_MAX_IMAGE_BYTES);
+		expect(sizeOf(out)).toBeGreaterThan(DEFAULT_MAX_IMAGE_BYTES * 0.5);
+	});
+
+	it('on a phone, where the canvas is a sixteenth the size, the result is still a picture within the limit', async () => {
+		canvasHolds = PHONE_CANVAS;
+		for (const maxBytes of [0, 5 * KB, 100 * KB, DEFAULT_MAX_IMAGE_BYTES, 20000 * KB]) {
+			for (const make of [hugeDrawing, () => hugeDrawing(true), hugePhoto, () => photoPng(true, 9000, 6000)]) {
+				const out = await toRtfSafeDataUrl(make(), { maxEdge: 0, maxBytes });
+				expect(sniffImageType(out), `limit ${maxBytes}`).not.toBeNull();
+				if (maxBytes > 0) expect(sizeOf(out), `limit ${maxBytes}`).toBeLessThanOrEqual(maxBytes);
+				expect(last().width * last().height).toBeLessThanOrEqual(PHONE_CANVAS);
+			}
+		}
+	});
+
+	it('a very large edge limit meets the same wall and is handled the same way', async () => {
+		canvasHolds = CHROMIUM_CANVAS;
+		const out = await toRtfSafeDataUrl(hugePhoto(), { maxEdge: 19000, maxBytes: 0 });
+		expect(sniffImageType(out)).toBe('image/jpeg');
+		// 19000 by 13300 is 253 million pixels and fits; nothing had to be given up.
+		expect(blanks).toEqual([]);
+		expect(last()).toMatchObject({ width: 19000, height: 13300 });
+	});
+
+	it('keeps its transparency when there is no byte limit to give it up for', async () => {
+		canvasHolds = CHROMIUM_CANVAS;
+		const out = await toRtfSafeDataUrl(hugeDrawing(true), { maxEdge: 0, maxBytes: 0 });
+		expect(sniffImageType(out)).toBe('image/png');
+		expect(encodes.every((e) => !e.onWhite)).toBe(true);
+	});
+
+	it('a picture of ordinary size is drawn once at full size, as before', async () => {
+		canvasHolds = CHROMIUM_CANVAS;
+		await toRtfSafeDataUrl(screenshot(), { maxBytes: DEFAULT_MAX_IMAGE_BYTES });
+		expect(blanks).toEqual([]);
+		expect(encodes).toEqual([{ type: 'image/png', quality: undefined, width: 1600, height: 1067, onWhite: false }]);
+	});
+
+	describe('when the canvas gives no picture at any size', () => {
+		it('a picture over the limit is refused', async () => {
+			canvasHolds = 0;
+			await expect(toRtfSafeDataUrl(photoJpeg(), { maxBytes: 20 * KB })).rejects.toBeInstanceOf(ImageTooLargeError);
+			// It stopped trying at a few pixels, and did not go round for ever.
+			expect(blanks.length).toBeLessThan(40);
+			expect(Math.max(...blanks.map((b) => Math.max(b.width, b.height)))).toBe(1600);
+			expect(Math.min(...blanks.map((b) => Math.max(b.width, b.height)))).toBeGreaterThanOrEqual(16);
+		});
+
+		it('a picture within the limit is passed through as it came, never as "data:,"', async () => {
+			canvasHolds = 0;
+			const big = photoJpeg();
+			expect(await toRtfSafeDataUrl(big, { maxBytes: 8000 * KB })).toBe(big);
+			expect(await toRtfSafeDataUrl(big, { maxBytes: 0 })).toBe(big);
+		});
+
+		it('one the RTF cannot carry is reported as not embedded, so the editor can say so', async () => {
+			canvasHolds = 0;
+			const gif = picture('image/gif', GIF_MAGIC, 2 * KB, { width: 10, height: 10, transparent: false, cost: SCREENSHOT });
+			expect(await urlToImageSrc(gif, { maxBytes: 100 * KB })).toEqual({ src: gif, embedded: false });
+		});
+	});
+});
+
+describe('a picture the browser cannot open', () => {
+	// A TIFF, a HEIC photograph in most browsers, a damaged file. It was reported as too large
+	// when it was over the limit ("could not be made small enough for the 512 KB size limit"),
+	// though a smaller file of the same kind fails the same way; under the limit it was inserted
+	// and showed as a broken picture.
+
+	const TIFF_MAGIC = [0x49, 0x49, 0x2a, 0x00];
+	/** The stand-in can open only pictures it was told about; this one it was not. */
+	const tiff = (bytes: number) => dataUrlOf('image/tiff', TIFF_MAGIC, bytes);
+	const SAID = 'This picture could not be opened: the browser cannot show its format, or the file is damaged';
+
+	it('is refused for that reason, in words that say so and do not speak of size', async () => {
+		const attempt = toRtfSafeDataUrl(tiff(600 * KB));
+		await expect(attempt).rejects.toBeInstanceOf(ImageUnreadableError);
+		await expect(toRtfSafeDataUrl(tiff(600 * KB))).rejects.toThrow(SAID);
+		await expect(toRtfSafeDataUrl(tiff(600 * KB))).rejects.not.toBeInstanceOf(ImageTooLargeError);
+	});
+
+	it('is refused whatever the limit: over it, under it, and with none', async () => {
+		for (const maxBytes of [100 * KB, 1000 * KB, 0]) {
+			await expect(toRtfSafeDataUrl(tiff(600 * KB), { maxBytes }), `limit ${maxBytes}`).rejects.toBeInstanceOf(
+				ImageUnreadableError
+			);
+		}
+	});
+
+	it('a damaged file that starts like a JPEG is refused too, not written to the RTF as a picture', async () => {
+		const damaged = dataUrlOf('image/jpeg', JPEG_MAGIC, 30 * KB);
+		expect(sniffImageType(damaged)).toBe('image/jpeg');
+		await expect(toRtfSafeDataUrl(damaged)).rejects.toBeInstanceOf(ImageUnreadableError);
+	});
+
+	it('as a file', async () => {
+		const url = tiff(600 * KB);
+		const file = new File([Buffer.from(url.slice(url.indexOf(',') + 1), 'base64')], 'slide.tiff', { type: 'image/tiff' });
+		await expect(fileToImageSrc(file)).rejects.toThrow(SAID);
+	});
+
+	it('as picture data given by address: it comes back marked, so it is not put in the document', async () => {
+		const url = tiff(600 * KB);
+		expect(await urlToImageSrc(url)).toEqual({ src: url, embedded: false, unreadable: true });
+		const small = tiff(2 * KB);
+		expect(await urlToImageSrc(small)).toEqual({ src: small, embedded: false, unreadable: true });
+	});
+
+	it('fetched from an address it keeps the address, and so exports as the placeholder', async () => {
+		const url = tiff(600 * KB);
+		const bytes = Buffer.from(url.slice(url.indexOf(',') + 1), 'base64');
+		vi.stubGlobal('fetch', async () => ({ ok: true, headers: { get: () => null }, blob: async () => new Blob([bytes], { type: 'image/tiff' }) }));
+		expect(await urlToImageSrc('https://x.test/slide.tiff')).toEqual({ src: 'https://x.test/slide.tiff', embedded: false });
+	});
+
+	it('where there is no canvas at all nothing can be opened to find out, and it is passed through as before', async () => {
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+		const url = tiff(2 * KB);
+		expect(await toRtfSafeDataUrl(url)).toBe(url);
 	});
 });

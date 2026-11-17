@@ -478,6 +478,418 @@ describe('InkEditor: maxImageBytes is a ceiling', () => {
 	});
 });
 
+describe('InkEditor: a pasted picture that is left out takes what was only there for it', () => {
+	// Review of the image limit, findings 2, 4 and 5. With a limit of 10 bytes and no canvas in
+	// the test DOM, every picture pasted as data is one that cannot be brought under the limit,
+	// and is taken out of the paste. Invented text.
+
+	beforeEach(() => {
+		unmount(editor as never);
+		host.innerHTML = '';
+		editor = mount(InkEditor, {
+			target: host,
+			props: { autosave: false, content: '<p>Report body</p>', maxImageBytes: 10 }
+		}) as unknown as EditorApi;
+		flushSync();
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.useRealTimers();
+	});
+
+	/** The paste event, then what the browser does with it, then the input event. */
+	function paste(insert: () => void): void {
+		const event = new Event('paste', { bubbles: true, cancelable: true });
+		Object.defineProperty(event, 'clipboardData', { value: { items: [], getData: () => '' } });
+		contentEl().dispatchEvent(event);
+		insert();
+		contentEl().dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+	}
+	const pasteHtml = (html: string) => paste(() => contentEl().insertAdjacentHTML('beforeend', html));
+	const toast = () => host.querySelector('.ink-toast-error')?.textContent?.trim() ?? '';
+	const IMG = `<img src="${PNG_SRC}" alt="scan">`;
+	const LEFT_OUT = 'A pasted picture was over the size limit and could not be made smaller, so it was left out';
+
+	function caretIn(el: Element, offset: number): void {
+		const range = document.createRange();
+		range.setStart(el, offset);
+		range.collapse(true);
+		const selection = window.getSelection()!;
+		selection.removeAllRanges();
+		selection.addRange(range);
+	}
+
+	it('its figure and caption go with it, and the paragraph it emptied does not stay', async () => {
+		// Left: <figure><figcaption>Figure 1. The scan</figcaption></figure><p></p>, and the RTF
+		// carried the caption of a picture that was not there, then a blank paragraph.
+		pasteHtml(`<figure>${IMG}<figcaption>Figure 1. The scan</figcaption></figure><p>${IMG}</p>`);
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p>Report body</p>');
+		expect(editor.getRTF()).not.toContain('Figure 1');
+		expect(editor.getRTF()).toBe(
+			(() => {
+				unmount(editor as never);
+				host.innerHTML = '';
+				editor = mount(InkEditor, { target: host, props: { autosave: false, content: '<p>Report body</p>' } }) as unknown as EditorApi;
+				flushSync();
+				return editor.getRTF();
+			})()
+		);
+	});
+
+	describe('as Chromium pastes a figure at the end of a line of text', () => {
+		// Seen in Chromium 156: the picture is moved into the line the caret was in, and the
+		// figure is left after it holding the caption alone.
+		const CAPTION_ALONE = '<figure><figcaption>Figure 1. The scan</figcaption></figure>';
+		const intoBody = (rest: string) =>
+			paste(() => {
+				contentEl().querySelector('p')!.insertAdjacentHTML('beforeend', IMG);
+				contentEl().insertAdjacentHTML('beforeend', rest);
+			});
+
+		it('the caption left in a figure of its own goes with the picture', async () => {
+			intoBody(`${CAPTION_ALONE}<p>${IMG}</p>`);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe('<p>Report body</p>');
+			expect(editor.getRTF()).not.toContain('Figure 1');
+		});
+
+		it('and so does a whole figure pasted after it', async () => {
+			intoBody(`${CAPTION_ALONE}<figure>${IMG}<figcaption>Figure 2. The margin</figcaption></figure>`);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe('<p>Report body</p>');
+		});
+
+		it('a caption in a figure of its own that was there before the paste stays', async () => {
+			editor.setHTML('<p>Report body</p><figure><figcaption>An older caption</figcaption></figure>');
+			flushSync();
+			intoBody('');
+			await settle();
+
+			expect(contentEl().innerHTML).toBe('<p>Report body</p><figure><figcaption>An older caption</figcaption></figure>');
+		});
+
+		it('a pasted one that does not come straight after the picture stays: words stand between', async () => {
+			pasteHtml(`<p>Scan ${IMG} is clear.</p><figure><figcaption>Kept words</figcaption></figure>`);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe(
+				'<p>Report body</p><p>Scan  is clear.</p><figure><figcaption>Kept words</figcaption></figure>'
+			);
+		});
+
+		it('a pasted figure after the picture that has a picture of its own stays', async () => {
+			vi.stubGlobal('fetch', async () => {
+				throw new TypeError('Failed to fetch');
+			});
+			intoBody('<figure><img src="https://x.test/chart.png" alt="chart"><figcaption>The chart</figcaption></figure>');
+			await settle();
+
+			expect(contentEl().querySelector('figure img')!.getAttribute('alt')).toBe('chart');
+			expect(contentEl().querySelector('figcaption')!.textContent).toBe('The chart');
+		});
+	});
+
+	it('text that shared its paragraph stays, and so does the paragraph', async () => {
+		pasteHtml(`<p>Margin ${IMG} is clear.</p><p>${IMG}Second line</p>`);
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p>Report body</p><p>Margin  is clear.</p><p>Second line</p>');
+	});
+
+	it('a link that held only the picture goes, and one with words keeps them', async () => {
+		pasteHtml(`<p><a href="https://x.test/a">${IMG}</a></p><p><a href="https://x.test/b">${IMG} the atlas</a></p>`);
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p>Report body</p><p><a href="https://x.test/b"> the atlas</a></p>');
+	});
+
+	it('a list item that held only the picture goes; the list stays while it has another item', async () => {
+		pasteHtml(`<ul><li>${IMG}</li><li>Second</li></ul><ol><li>${IMG}</li></ol>`);
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p>Report body</p><ul><li>Second</li></ul>');
+	});
+
+	it('a paragraph that still shows something without words (a rule, a drawing) stays', async () => {
+		pasteHtml(`<div>${IMG}<hr></div><p>${IMG}<svg width="10" height="10"></svg></p>`);
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(contentEl().querySelector('div > hr')).not.toBeNull();
+		expect(contentEl().querySelector('p > svg')).not.toBeNull();
+	});
+
+	it('a table cell stays, since the table needs it', async () => {
+		pasteHtml(`<table><tbody><tr><td><p>${IMG}</p></td><td>B</td></tr></tbody></table>`);
+		await settle();
+
+		expect(contentEl().querySelectorAll('td').length).toBe(2);
+		expect(contentEl().querySelector('td')!.innerHTML).toBe('');
+		expect(contentEl().querySelector('img')).toBeNull();
+	});
+
+	it('a figure with another picture in it keeps that picture and the caption', async () => {
+		vi.stubGlobal('fetch', async () => {
+			throw new TypeError('Failed to fetch');
+		});
+		pasteHtml(`<figure>${IMG}<img src="https://x.test/chart.png" alt="chart"><figcaption>Both views</figcaption></figure>`);
+		await settle();
+
+		const figure = contentEl().querySelector('figure')!;
+		expect(figure.querySelectorAll('img').length).toBe(1);
+		expect(figure.querySelector('img')!.getAttribute('alt')).toBe('chart');
+		expect(figure.querySelector('figcaption')!.textContent).toBe('Both views');
+	});
+
+	it('a figure with words of its own, outside the caption, keeps them', async () => {
+		pasteHtml(`<figure>${IMG}<p>Stained section</p><figcaption>Figure 2</figcaption></figure>`);
+		await settle();
+
+		expect(contentEl().querySelector('figure')!.innerHTML).toBe('<p>Stained section</p><figcaption>Figure 2</figcaption>');
+	});
+
+	it('a line that was in the document before the paste stays a line', async () => {
+		editor.setHTML('<p>Report body</p><p><br></p>');
+		flushSync();
+		const line = contentEl().querySelectorAll('p')[1];
+		// A browser pasting into an empty line puts the picture in place of its line break.
+		paste(() => (line.innerHTML = IMG));
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p>Report body</p><p><br></p>');
+	});
+
+	it('the caret, when it was in what went, moves to the end of the text before it', async () => {
+		pasteHtml(`<p>${IMG}</p>`);
+		const pasted = contentEl().querySelectorAll('p')[1];
+		caretIn(pasted, 1);
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p>Report body</p>');
+		const selection = window.getSelection()!;
+		expect(contentEl().querySelector('p')!.contains(selection.anchorNode)).toBe(true);
+		expect(selection.getRangeAt(0).collapsed).toBe(true);
+	});
+
+	it('with nothing else to type in, one empty line is left for the caret', async () => {
+		editor.setHTML('');
+		flushSync();
+		pasteHtml(`<p>${IMG}</p>`);
+		caretIn(contentEl().querySelector('p')!, 1);
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p><br></p>');
+		expect(contentEl().querySelector('p')!.contains(window.getSelection()!.anchorNode)).toBe(true);
+	});
+
+	it('the caret keeps its place when what held it goes in more than one step', async () => {
+		// The first paragraph goes with its picture, then the block around both with the second.
+		editor.setHTML('');
+		flushSync();
+		pasteHtml(`<div><p>${IMG}</p><p>${IMG}</p></div>`);
+		caretIn(contentEl().querySelector('div > p')!, 1);
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p><br></p>');
+		expect(contentEl().querySelector('p')!.contains(window.getSelection()!.anchorNode)).toBe(true);
+	});
+
+	it('a caret somewhere else is left where it was', async () => {
+		pasteHtml(`<p>${IMG}</p>`);
+		const body = contentEl().querySelector('p')!.firstChild!;
+		caretIn(body as unknown as Element, 6);
+		await settle();
+
+		const selection = window.getSelection()!;
+		expect(selection.anchorNode).toBe(body);
+		expect(selection.anchorOffset).toBe(6);
+	});
+
+	it('it is no longer the selected picture: Backspace is left to the text', async () => {
+		// Clicked while it was still there, it stayed the selected picture after it was gone, and
+		// the next Backspace was taken to remove it instead of a letter.
+		pasteHtml(`<p>Margin ${IMG}</p>`);
+		const img = contentEl().querySelector('img') as HTMLElement;
+		img.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		flushSync();
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		const key = new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true });
+		contentEl().dispatchEvent(key);
+		expect(key.defaultPrevented).toBe(false);
+	});
+
+	it('one picture left out and one that cannot be fetched: the editor says both', async () => {
+		// Only the first was said, and the second left as "[Image: chart]" with no word of it.
+		vi.stubGlobal('fetch', async () => {
+			throw new TypeError('Failed to fetch');
+		});
+		pasteHtml(`<p>Scan ${IMG} and chart <img src="https://x.test/chart.png" alt="chart"></p>`);
+		await settle();
+
+		expect(toast()).toBe(`${LEFT_OUT}. A pasted image could not be embedded — it will export as a placeholder`);
+		expect(editor.getRTF()).toContain('[Image: chart]');
+	});
+
+	it('a slow site does not hold up taking the picture out, or saying so', async () => {
+		vi.stubGlobal('fetch', () => new Promise(() => {}));
+		pasteHtml(`<p>Scan ${IMG} and chart <img src="https://x.test/hang.png" alt="chart"></p>`);
+		await settle();
+
+		expect(contentEl().querySelectorAll('img').length).toBe(1);
+		expect(toast()).toBe(LEFT_OUT);
+	});
+
+	it('counts each kind on its own', async () => {
+		vi.stubGlobal('fetch', async () => ({ ok: false }));
+		pasteHtml(`<p>${IMG}${IMG}<img src="https://x.test/a.png"><img src="https://x.test/b.png"><img src="https://x.test/c.png"></p>`);
+		await settle();
+
+		expect(toast()).toBe(
+			'2 pasted pictures were over the size limit and could not be made smaller, so they were left out. ' +
+				'3 pasted images could not be embedded — they will export as placeholders'
+		);
+	});
+
+	it('a message that says two things stays up long enough to read both', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('fetch', async () => {
+			throw new TypeError('Failed to fetch');
+		});
+		pasteHtml(`<p>${IMG}<img src="https://x.test/chart.png"></p>`);
+		await vi.advanceTimersByTimeAsync(100);
+		flushSync();
+		expect(toast()).toContain('left out. A pasted image');
+
+		// A message of one thing is up for four seconds; this one is twice as long.
+		await vi.advanceTimersByTimeAsync(6000);
+		flushSync();
+		expect(toast()).toContain('left out. A pasted image');
+		await vi.advanceTimersByTimeAsync(6000);
+		flushSync();
+		expect(toast()).toBe('');
+	});
+
+	it('a message of one thing is up for four seconds, as before', async () => {
+		vi.useFakeTimers();
+		pasteHtml(`<p>${IMG}</p>`);
+		await vi.advanceTimersByTimeAsync(3900);
+		flushSync();
+		expect(toast()).toBe(LEFT_OUT);
+		await vi.advanceTimersByTimeAsync(4800 - 3900);
+		flushSync();
+		expect(toast()).toBe('');
+	});
+
+	it("an earlier message's clock does not take a later message down early", async () => {
+		vi.useFakeTimers();
+		pasteHtml(`<p>${IMG}</p>`);
+		await vi.advanceTimersByTimeAsync(3000);
+		pasteHtml(`<p>${IMG}</p>`);
+		await vi.advanceTimersByTimeAsync(3000);
+		flushSync();
+		// Six seconds after the first message, three after the second.
+		expect(toast()).toBe(LEFT_OUT);
+	});
+});
+
+describe('InkEditor: a picture the browser cannot open', () => {
+	// Review of the image limit, finding 3. A TIFF, or a damaged file, was refused as too large
+	// when it was over the limit and inserted as a broken picture when under it. The limit here
+	// is the default, and the picture is far under it: size has nothing to do with it.
+	// The test DOM has no canvas and loads no pictures, so a browser that has a canvas and fails
+	// to open the picture is stood in.
+
+	const TIFF_SRC = 'data:image/tiff;base64,SUkqAAgAAAAAAAAAAAAAAA==';
+	const toast = () => host.querySelector('.ink-toast-error')?.textContent?.trim() ?? '';
+
+	beforeEach(() => {
+		const realCreate = document.createElement.bind(document);
+		vi.spyOn(document, 'createElement').mockImplementation(((tag: string) =>
+			tag === 'canvas' ? ({ getContext: () => ({}) } as unknown as HTMLElement) : realCreate(tag)) as typeof document.createElement);
+		vi.stubGlobal(
+			'Image',
+			class {
+				onload: (() => void) | null = null;
+				onerror: (() => void) | null = null;
+				set src(_value: string) {
+					queueMicrotask(() => this.onerror?.());
+				}
+			}
+		);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+	});
+
+	function tiffFile(): File {
+		return new File([new Uint8Array([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0])], 'slide.tiff', { type: 'image/tiff' });
+	}
+
+	it('dropped as a file: not inserted, and the editor says it could not be opened', async () => {
+		dropFiles([tiffFile()]);
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(toast()).toBe('This picture could not be opened: the browser cannot show its format, or the file is damaged');
+		expect(toast()).not.toContain('size limit');
+	});
+
+	it('pasted as a file: the same', async () => {
+		pasteFiles([tiffFile()]);
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(toast()).toContain('could not be opened');
+	});
+
+	it('given to the image dialog as data: not inserted, with the same reason', async () => {
+		(host.querySelector('button[title="Insert image"]') as HTMLElement).click();
+		flushSync();
+		const field = (Array.from(host.querySelectorAll('.modal input')) as HTMLInputElement[]).find((i) =>
+			(i.placeholder || '').startsWith('https://')
+		)!;
+		field.value = TIFF_SRC;
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		(Array.from(host.querySelectorAll('.modal-actions button')).find((b) => b.textContent?.trim() === 'Insert') as HTMLElement).click();
+		await settle();
+
+		expect(contentEl().querySelector('img')).toBeNull();
+		expect(toast()).toBe(
+			'That picture could not be opened (the browser cannot show its format, or it is damaged), so it was not inserted'
+		);
+	});
+
+	it('pasted with text: taken out, the text kept, and the editor says why', async () => {
+		const event = new Event('paste', { bubbles: true, cancelable: true });
+		Object.defineProperty(event, 'clipboardData', { value: { items: [], getData: () => '' } });
+		contentEl().dispatchEvent(event);
+		contentEl().insertAdjacentHTML(
+			'beforeend',
+			`<p>Slide <img src="${TIFF_SRC}" alt="slide"> at low power.</p><figure><img src="${TIFF_SRC}"><figcaption>Figure 3</figcaption></figure>`
+		);
+		contentEl().dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		await settle();
+
+		expect(contentEl().innerHTML).toBe('<p>Report body</p><p>Slide  at low power.</p>');
+		expect(toast()).toBe(
+			'2 pasted pictures could not be opened (the browser cannot show their format, or they are damaged), so they were left out'
+		);
+		expect(editor.getRTF()).not.toContain('[Image:');
+	});
+});
+
 describe('urlToImageSrc: a picture fetched by address', () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
