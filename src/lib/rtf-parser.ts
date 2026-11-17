@@ -380,9 +380,11 @@ function parseColorTable(group: RtfGroup): string[] {
 
 	for (const node of group.children) {
 		if (node.type === 'control') {
-			if (node.word === 'red') { r = node.param ?? 0; hasComponents = true; }
-			else if (node.word === 'green') { g = node.param ?? 0; hasComponents = true; }
-			else if (node.word === 'blue') { b = node.param ?? 0; hasComponents = true; }
+			// A component outside 0 to 255 is damaged: it is held to the nearest end of the range.
+			const value = Math.min(255, Math.max(0, node.param ?? 0));
+			if (node.word === 'red') { r = value; hasComponents = true; }
+			else if (node.word === 'green') { g = value; hasComponents = true; }
+			else if (node.word === 'blue') { b = value; hasComponents = true; }
 		} else if (node.type === 'text' && node.value.includes(';')) {
 			// Each ';' terminates one color entry
 			const semiCount = (node.value.match(/;/g) || []).length;
