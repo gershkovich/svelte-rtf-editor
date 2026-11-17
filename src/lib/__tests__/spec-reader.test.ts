@@ -45,8 +45,19 @@ describe('characters', () => {
 		expect(read(R`caf\'e9 \'b5m\par`)).toBe('<p>café µm</p>');
 	});
 
-	it.fails("NEW: \\'80 to \\'9f are Windows-1252, not C1 controls (the apostrophe TextEdit writes as \\'92)", () => {
+	it("\\'80 to \\'9f are Windows-1252, not C1 controls (the apostrophe TextEdit writes as \\'92)", () => {
 		expect(read(R`It\'92s \'93quoted\'94 \'85 \'80 5\par`)).toBe('<p>It’s “quoted” … € 5</p>');
+	});
+
+	it("every byte from \\'80 to \\'ff reads as Windows-1252 decodes it", () => {
+		const bytes = Array.from({ length: 128 }, (_, i) => 0x80 + i);
+		const rtf = bytes.map((b) => `\\'${b.toString(16)}`).join('');
+		const expected = new TextDecoder('windows-1252').decode(new Uint8Array(bytes));
+		expect(dom(read(`${rtf}\\par`)).textContent).toBe(expected);
+	});
+
+	it("a curly apostrophe read from \\'92 is written back as itself", () => {
+		expect(htmlToRtf(el(read(R`It\'92s\par`)))).toContain("It\\u8217\\'3fs");
 	});
 
 	it.fails("#3.10: a \\' with no hex digits after it adds no NUL character", () => {
