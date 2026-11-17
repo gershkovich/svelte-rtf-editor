@@ -225,7 +225,11 @@ const KNOWN_TAGS = new Set([
 const COUNT = Number(process.env.RTF_RANDOM_DOCUMENTS) || 400;
 const FIRST = Number(process.env.RTF_RANDOM_FIRST) || 1;
 
-describe(`${COUNT} random documents`, () => {
+// Each test below goes through every document, and a build machine is several times slower than
+// a desk: the usual five seconds for a test are not enough there (the paste set took 5.05).
+const ROOM = { timeout: 120_000 };
+
+describe(`${COUNT} random documents`, ROOM, () => {
 	const documents = Array.from({ length: COUNT }, (_, i) => ({ seed: FIRST + i, html: documentHtml(FIRST + i) }));
 
 	it('use every construct, so the checks below mean something', () => {
@@ -284,7 +288,7 @@ describe(`${COUNT} random documents`, () => {
 	});
 });
 
-describe(`${COUNT} random documents as a paste brings them`, () => {
+describe(`${COUNT} random documents as a paste brings them`, ROOM, () => {
 	const documents = Array.from({ length: COUNT }, (_, i) => ({ seed: FIRST + i, html: pastedDocumentHtml(FIRST + i) }));
 
 	it('use every pasted shape, so the checks below mean something', () => {

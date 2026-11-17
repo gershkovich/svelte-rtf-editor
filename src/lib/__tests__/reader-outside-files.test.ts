@@ -419,20 +419,34 @@ describe('files built to freeze or exhaust the page (issue 21, items 25 to 27)',
 		expect(ms).toBeLessThan(2000);
 	});
 
-	it('a row of 100,000 cells merged down reads in well under two seconds', () => {
-		const n = 100_000;
-		const definition = (flag: string) => Array.from({ length: n }, (_, i) => `\\${flag}\\cellx${(i + 1) * 100}`).join('');
-		const rtf = `\\trowd${definition('clvmgf')}\\intbl ${'x\\cell '.repeat(n)}\\row\\trowd${definition('clvmrg')}\\intbl ${'\\cell '.repeat(n)}\\row`;
+	it('a row of 50,000 cells merged down takes about as long to read as the same row not merged', () => {
+		// Timed against the same two rows without the merge, not against the clock: a build
+		// machine can be several times slower than a desk, and both readings slow down together.
+		// Through 1.9.0 the merged rows took 17 to 80 times as long; now about the same.
+		const n = 50_000;
+		const definition = (flag: string) => Array.from({ length: n }, (_, i) => `${flag}\\cellx${(i + 1) * 100}`).join('');
+		const rows = (first: string, second: string) =>
+			`\\trowd${definition(first)}\\intbl ${'x\\cell '.repeat(n)}\\row\\trowd${definition(second)}\\intbl ${'\\cell '.repeat(n)}\\row`;
 		let html = '';
-		const ms = timed(() => (html = read(rtf)));
+		// The faster of two readings each, so that one pause of the machine does not decide it.
+		const fastest = (rtf: string) => Math.min(timed(() => (html = read(rtf))), timed(() => (html = read(rtf))));
+		const plain = fastest(rows('', ''));
+		const merged = fastest(rows('\\clvmgf', '\\clvmrg'));
 		expect(html.match(/rowspan="2"/g)?.length).toBe(n);
-		expect(ms).toBeLessThan(2000);
-	});
+		expect(merged).toBeLessThan(plain * 5);
+	}, 60_000);
 
 	it('a file of more than five million parts is refused, not read until memory runs out', () => {
-		expect(() => rtfToHtml(`{\\rtf1 ${'{}'.repeat(5_000_001)}}`)).toThrow(/too complex to show/);
-		expect(() => rtfToHtml(`{\\rtf1 ${'{}'.repeat(5_000_001)}}`)).toThrow(RangeError);
-	});
+		// (Read once: it is the largest file here, and a slow machine has five seconds for a test.)
+		let thrown: unknown;
+		try {
+			rtfToHtml(`{\\rtf1 ${'{}'.repeat(5_000_001)}}`);
+		} catch (err) {
+			thrown = err;
+		}
+		expect(thrown).toBeInstanceOf(RangeError);
+		expect((thrown as Error).message).toMatch(/too complex to show/);
+	}, 60_000);
 
 	it('picture data is one part for each line of it: a large picture is not refused', () => {
 		const html = rtfToHtml(`{\\rtf1 {\\pict\\pngblip\\picw1\\pich1 ${PNG.repeat(20_000)}}\\par}`);

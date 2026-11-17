@@ -315,5 +315,7 @@ describe('htmlToMarkdown: no shape of elements lets code or text out as HTML', (
 			}
 		}
 		expect(cases).toBe(wrappers.length * (wrappers.length + 1) * contents.length * leads.length);
-	});
+		// Some thirteen thousand documents: four seconds on a desk, ten on a build machine,
+		// where the usual five seconds for a test are not enough.
+	}, 120_000);
 });

@@ -83,6 +83,11 @@ interface WalkContext {
 	inTableCell: boolean;
 	/** The element htmlToRtf was called on — used to detect top-level images. */
 	root: Node | null;
+	/**
+	 * For a node, the nearest sibling before it that shows something (see shownBefore). Kept for
+	 * the length of one write, during which the document does not change.
+	 */
+	shownBefore: Map<Node, Node | null>;
 	/*
 	 * The character formatting in effect where the walker is. A closing tag restores
 	 * this, the ENCLOSING state, rather than a fixed default: an inner </b> must not
@@ -896,6 +901,7 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 		listCounter: 0,
 		inTableCell: false,
 		root: editorEl,
+		shownBefore: new Map(),
 		bold: false,
 		italic: false,
 		underline: false,
@@ -1681,6 +1687,28 @@ function followsInlineContent(el: HTMLElement, root: Node | null = null): boolea
 	}
 }
 
+/**
+ * The nearest sibling before a node that shows something, past white space, comments and hidden
+ * elements. Each node passed on the way is remembered with the same answer, so a page of
+ * thousands of comments in a row is looked back over once, not from every piece of text among
+ * them: that took seconds, and in a test DOM, where stepping to a sibling is itself slow, far more.
+ */
+function shownBefore(node: Node, ctx: WalkContext): Node | null {
+	const passed: Node[] = [];
+	let found = ctx.shownBefore.get(node);
+	for (let at: Node = node; found === undefined; ) {
+		passed.push(at);
+		const prev: Node | null = at.previousSibling;
+		if (!prev || !showsNothing(prev)) found = prev;
+		else {
+			found = ctx.shownBefore.get(prev);
+			at = prev;
+		}
+	}
+	for (const each of passed) ctx.shownBefore.set(each, found);
+	return found;
+}
+
 /** Whether the nearest sibling after this element, skipping collapsible whitespace, is text or an inline element. */
 function followedByInline(el: HTMLElement): boolean {
 	let next = el.nextSibling;
@@ -1703,12 +1731,7 @@ const FORMATTED_BLOCK_TAGS = new Set(['ul', 'ol', 'li', 'blockquote', 'figure', 
  * nothing is written, as before.
  */
 function restateAfterBlock(node: Node, ctx: WalkContext): string {
-	let prev = node.previousSibling;
-	// (Not past more than a hundred nodes that show nothing: a page of thousands of
-	// comments in a row is looked back over from every piece of text among them.)
-	for (let skipped = 0; prev && showsNothing(prev); prev = prev.previousSibling) {
-		if (++skipped > 100) return '';
-	}
+	const prev = shownBefore(node, ctx);
 	if (!isBlock(prev)) return '';
 	const block = prev as HTMLElement;
 	const tag = tagOf(block);

@@ -470,6 +470,39 @@ describe('found by a second reader of this change', () => {
 		expect(body(root).startsWith('{\\trowd')).toBe(true);
 	});
 
+	it('loose text after a block and a long run of comments still starts a plain paragraph', () => {
+		// For a while the look back over comments stopped at a hundred, to save time, and the
+		// text then kept the centering of the paragraph before it.
+		const after = (comments: number) => htmlToRtf(el(`<p style="text-align:center">c</p>${'<!--x-->'.repeat(comments)}loose`));
+		expect(after(3)).toContain('\\pard\\qc c\\par \\pard loose}');
+		expect(after(150)).toBe(after(3));
+	});
+
+	it('a long run of comments is looked back over once, not from every piece of text among them', () => {
+		// Counted, not timed: the steps from a node to the one before it. Looking back from each
+		// piece of text took a hundred steps for every one of them, and before that all of them.
+		const root = el(`<p>a</p>${' <!--x-->'.repeat(4000)}b`);
+		let owner: object | null = root.firstChild;
+		while (owner && !Object.getOwnPropertyDescriptor(owner, 'previousSibling')) owner = Object.getPrototypeOf(owner);
+		const original = Object.getOwnPropertyDescriptor(owner!, 'previousSibling')!;
+		let steps = 0;
+		Object.defineProperty(owner!, 'previousSibling', {
+			configurable: true,
+			get(this: Node) {
+				steps++;
+				return original.get!.call(this);
+			}
+		});
+		try {
+			htmlToRtf(root);
+		} finally {
+			Object.defineProperty(owner!, 'previousSibling', original);
+		}
+		// Eight thousand nodes; a few steps for each.
+		expect(steps).toBeGreaterThan(0);
+		expect(steps).toBeLessThan(8000 * 4);
+	});
+
 	it('four thousand comments in a row do not take seconds to write', () => {
 		const root = el(`<p>a</p>${' <!--x-->'.repeat(4000)}b`);
 		const start = performance.now();
