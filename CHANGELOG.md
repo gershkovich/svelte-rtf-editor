@@ -1,5 +1,30 @@
 # svelte-rtf-editor
 
+## 1.8.3
+
+### Patch Changes
+
+- 5977f50: `rtfToHtml` holds a color table component outside 0 to 255 to the nearest end of the range:
+  `\red999\green-5` reads as `rgb(255,0,0)`. Through 1.8.2 the value went into the HTML as it was. A
+  browser shows such a color clamped, but where the style kept the raw value, `htmlToRtf` dropped the
+  color on save.
+
+## 1.8.2
+
+### Patch Changes
+
+- b4f628b: `rtfToHtml` no longer throws "Maximum call stack size exceeded" on RTF with thousands of nested
+  groups. Groups nested deeper than 500 are folded into the group at that depth: their text is kept,
+  and their formatting ends where that group ends. Real documents nest a few dozen deep at most.
+
+## 1.8.1
+
+### Patch Changes
+
+- 6cf3f0f: `rtfToHtml` drops a damaged `\'` (one without two hex digits after it) and reads what follows as
+  usual. Through 1.8.0 it became an invisible NUL character, or a control character when one digit
+  followed: `abc\'zz` held a NUL, and `a\'9z b` held a tab.
+
 ## 1.8.0
 
 ### Minor Changes

@@ -70,6 +70,13 @@ describe('characters', () => {
 		expect(rtfToHtml("{\\rtf1\\ansi abc\\'zz def\\par}")).not.toContain('\u0000');
 	});
 
+	it("a damaged \\' is dropped and the text after it is kept as it is", () => {
+		expect(read(R`abc\'zz def\par`)).toBe('<p>abczz def</p>');
+		expect(read(R`a\'9z b\par`)).toBe('<p>a9z b</p>');
+		expect(read(R`a\'\b b\b0\par`)).toBe('<p>a<strong>b</strong></p>');
+		expect(rtfToHtml("{\\rtf1\\ansi abc\\'9")).toBe('<p>abc9</p>');
+	});
+
 	it('escaped backslash and braces are text', () => {
 		expect(read(R`a \\ b \{ c \}\par`)).toBe('<p>a \\ b { c }</p>');
 	});
@@ -289,6 +296,16 @@ describe('input that is damaged, hostile or not RTF', () => {
 	it('#3.10: deeply nested groups do not overflow the stack', () => {
 		const depth = 30000;
 		expect(() => rtfToHtml(`{\\rtf1 ${'{'.repeat(depth)}x${'}'.repeat(depth)}}`)).not.toThrow();
+	});
+
+	it('the text of groups nested past the limit is kept, and the text after them too', () => {
+		const depth = 2000;
+		expect(rtfToHtml(`{\\rtf1 a${'{'.repeat(depth)}b${'}'.repeat(depth)}c\\par d\\par}`)).toBe('<p>abc</p>\n<p>d</p>');
+	});
+
+	it('formatting inside groups nested past the limit ends where the group at the limit ends', () => {
+		const deep = `${'{'.repeat(600)}\\b x${'}'.repeat(600)}`;
+		expect(rtfToHtml(`{\\rtf1 ${deep} y\\par}`)).toBe('<p><strong>x</strong> y</p>');
 	});
 
 	it('#3.10: color components are kept within 0 to 255', () => {

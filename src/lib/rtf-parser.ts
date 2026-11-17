@@ -464,19 +464,34 @@ function tokenize(rtf: string): Token[] {
 
 // ── AST Builder ──
 
+/**
+ * The deepest group the tree holds. The renderer walks groups recursively, and thousands of
+ * nested groups (damaged or hostile input) would overflow the stack; real documents nest a few
+ * dozen deep at most. Groups below this depth are folded into the one at it: their text is kept,
+ * and their formatting carries on to the end of that group.
+ */
+const MAX_GROUP_DEPTH = 500;
+
 function buildTree(tokens: Token[]): RtfGroup {
 	const root: RtfGroup = { type: 'group', children: [] };
 	const stack: RtfGroup[] = [root];
+	/** Groups opened past MAX_GROUP_DEPTH and not closed yet. */
+	let folded = 0;
 
 	for (const tok of tokens) {
 		const current = stack[stack.length - 1];
 
 		if (tok.type === 'open') {
+			if (stack.length > MAX_GROUP_DEPTH) {
+				folded++;
+				continue;
+			}
 			const group: RtfGroup = { type: 'group', children: [] };
 			current.children.push(group);
 			stack.push(group);
 		} else if (tok.type === 'close') {
-			if (stack.length > 1) stack.pop();
+			if (folded > 0) folded--;
+			else if (stack.length > 1) stack.pop();
 		} else if (tok.type === 'control') {
 			current.children.push({ type: 'control', word: tok.word, param: tok.param ?? null });
 		} else if (tok.type === 'text') {
