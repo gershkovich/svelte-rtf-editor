@@ -19,7 +19,15 @@
     const screenFontFamily = $derived(cssFontFamily(fontFamily));
     const screenFontSize = $derived(normalizeFontSize(fontSize));
 
-    const htmlContent = $derived(rtfToHtml(content, { fontSize }));
+    // rtfToHtml refuses a document over its size limit by throwing. The viewer then says so in
+    // place of the document, rather than taking the page down with it.
+    const parsed = $derived.by(() => {
+        try {
+            return { html: rtfToHtml(content, { fontSize }), error: '' };
+        } catch (err) {
+            return { html: '', error: (err as Error).message || 'This document could not be read' };
+        }
+    });
 
     let copied = $state(false);
 
@@ -45,7 +53,11 @@
         style:font-family={screenFontFamily}
         style:font-size="{screenFontSize}pt"
     >
-        {@html htmlContent}
+        {#if parsed.error}
+            <p class="rtf-viewer-error" role="alert">{parsed.error}</p>
+        {:else}
+            {@html parsed.html}
+        {/if}
     </div>
 </div>
 
@@ -111,6 +123,43 @@
 
     .rtf-viewer :global(p:last-child) {
         margin-bottom: 0;
+    }
+
+    .rtf-viewer-error {
+        color: var(--text-muted, #8a7e72);
+        font-style: italic;
+    }
+
+    /* A list item's text starts half an inch in, where the RTF puts it (\li720), and each
+       level is half an inch further. */
+    .rtf-viewer :global(ul),
+    .rtf-viewer :global(ol) {
+        margin: 0 0 0.2em;
+        padding-left: 36pt;
+    }
+
+    .rtf-viewer :global(li ul),
+    .rtf-viewer :global(li ol) {
+        margin-bottom: 0;
+    }
+
+    /* Code keeps the font the RTF names for it. A code block wraps, so a long line stays in
+       the viewer. */
+    .rtf-viewer :global(code),
+    .rtf-viewer :global(pre) {
+        font-family: 'Courier New', monospace;
+    }
+
+    .rtf-viewer :global(pre) {
+        margin: 0 0 0.2em;
+        font-size: calc(5em / 6);
+        white-space: pre-wrap;
+    }
+
+    /* A page break in the RTF (\page). */
+    .rtf-viewer :global(hr[style*='break-after']) {
+        border: 0;
+        border-top: 1px dashed currentColor;
     }
 
     /* Pictures decoded from \pict groups keep their stored width but never

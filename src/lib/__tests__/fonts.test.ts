@@ -208,11 +208,11 @@ describe('reading back a document written at another size', () => {
 	for (const fontSize of [9, 10, 11, 12, 14]) {
 		it(`keeps headings and paragraphs apart at ${fontSize} pt, read at that size`, () => {
 			const back = rtfToHtml(htmlToRtf(htmlEl(html), { fontSize }), { fontSize });
-			// The heading level is what matters; the parser keeps the bold and
-			// size wrapper inside a heading at every size, 12 pt included.
-			expect(back).toMatch(/<h1>[^\n]*Title[^\n]*<\/h1>/);
-			expect(back).toMatch(/<h2>[^\n]*Section[^\n]*<\/h2>/);
-			expect(back).toMatch(/<h3>[^\n]*Sub[^\n]*<\/h3>/);
+			// A heading is the element and its text: its own size and bold are not
+			// repeated inside it, at any body size.
+			expect(back).toContain('<h1>Title</h1>');
+			expect(back).toContain('<h2>Section</h2>');
+			expect(back).toContain('<h3>Sub</h3>');
 			expect(back).toContain('<p>Body text.</p>');
 			expect(back).toContain('<p>More body.</p>');
 		});

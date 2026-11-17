@@ -9,9 +9,8 @@ import { htmlToMarkdown } from '../utils.js';
  * paragraph formatting, fonts, tabs and pictures have test files of their own. htmlToMarkdown is
  * at the end.
  *
- * A test marked `it.fails` states the expected behavior for something that is still open; the
- * title names the issue. It passes while the bug is there and turns red when the bug is fixed,
- * which is the cue to drop `.fails`. Invented text.
+ * A title that starts with "#3.13" or "#2" names the item of the issue the test was written for
+ * (github.com/jcelano/svelte-rtf-editor/issues); each was red before its fix. Invented text.
  */
 
 const el = (html: string) => {
@@ -113,11 +112,11 @@ describe('blocks', () => {
 		expect(body('<p>a</p><p><br></p><p>b</p>')).toBe('\\pard a\\par \\par \\pard b\\par ');
 	});
 
-	it.fails('NEW: the <br> a browser leaves at the end of a paragraph adds no line', () => {
+	it('the <br> a browser leaves at the end of a paragraph adds no line', () => {
 		expect(body('<p>text<br></p>')).toBe('\\pard text\\par ');
 	});
 
-	it.fails('NEW: <h4>, <h5> and <h6> (pasted text) are paragraphs of their own', () => {
+	it('<h4>, <h5> and <h6> (pasted text) are paragraphs of their own', () => {
 		const html = rtfToHtml(htmlToRtf(el('<h4>title</h4><p>x</p>')));
 		expect(Array.from(el(html).children).map((c) => c.textContent)).toEqual(['title', 'x']);
 	});
@@ -132,18 +131,18 @@ describe('blocks', () => {
 		expect(body('<ol><li>a</li><li>b</li></ol>')).toBe('\\pard\\li720\\fi-360 1.\\tab a\\par \\pard\\li720\\fi-360 2.\\tab b\\par ');
 	});
 
-	it.fails('#3.13: <ol start="5"> counts from 5', () => {
+	it('#3.13: <ol start="5"> counts from 5', () => {
 		expect(body('<ol start="5"><li>a</li><li>b</li></ol>')).toContain('5.\\tab a');
 	});
 
-	it.fails('#3.13: a nested list is its own paragraphs, indented further, with no empty one after', () => {
+	it('#3.13: a nested list is its own paragraphs, indented further, with no empty one after', () => {
 		const rtf = body('<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul>');
 		expect(rtf).toContain('\\tab a\\par ');
 		expect(rtf).toContain('\\li1440');
 		expect(rtf).not.toContain('\\par \\par ');
 	});
 
-	it.fails('NEW: a list item that holds a paragraph (<li><p>, pasted from Word or Docs) is written like one that holds text', () => {
+	it('a list item that holds a paragraph (<li><p>, pasted from Word or Docs) is written like one that holds text', () => {
 		expect(body('<ul><li><p>x</p></li></ul>')).toBe(body('<ul><li>x</li></ul>'));
 	});
 
@@ -180,26 +179,26 @@ describe('tables', () => {
 		expect(count(data, '\\clbrdrb')).toBe(0);
 	});
 
-	it.fails('#3.13: in a row with one <th>, only that cell gets the header border', () => {
+	it('#3.13: in a row with one <th>, only that cell gets the header border', () => {
 		expect(count(body('<table><tr><th>h</th><td>d</td></tr></table>'), '\\clbrdrb')).toBe(1);
 	});
 
-	it.fails('#3.13: a <thead> written after <tbody> is still the first row', () => {
+	it('#3.13: a <thead> written after <tbody> is still the first row', () => {
 		const rtf = body('<table><tbody><tr><td>body</td></tr></tbody><thead><tr><th>head</th></tr></thead></table>');
 		expect(rtf.indexOf('head')).toBeLessThan(rtf.indexOf('body'));
 	});
 
-	it.fails('NEW: a cell\'s own alignment (<td style="text-align:right">, as rtfToHtml writes it) is written', () => {
+	it('a cell\'s own alignment (<td style="text-align:right">, as rtfToHtml writes it) is written', () => {
 		expect(body('<table><tr><td style="text-align:right">1.5</td><td>b</td></tr></table>')).toContain('\\qr');
 	});
 
-	it.fails('NEW: a right-aligned cell read from RTF is written back right-aligned', () => {
+	it('a right-aligned cell read from RTF is written back right-aligned', () => {
 		const html = rtfToHtml('{\\rtf1\\ansi \\trowd\\cellx4320\\cellx8640 \\pard\\intbl\\qr 1.5\\cell \\pard\\intbl b\\cell\\row}');
 		expect((el(html).querySelector('td') as HTMLElement).style.textAlign).toBe('right');
 		expect(htmlToRtf(el(html))).toContain('\\qr');
 	});
 
-	it.fails('#2: rowspan keeps one set of column edges, with \\clvmgf on the first row and \\clvmrg below it', () => {
+	it('#2: rowspan keeps one set of column edges, with \\clvmgf on the first row and \\clvmrg below it', () => {
 		const rtf = body('<table><tr><td rowspan="2">Group</td><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>');
 		const [first, second] = rows(rtf);
 		expect(edges(second)).toEqual(edges(first));
@@ -207,12 +206,12 @@ describe('tables', () => {
 		expect(second).toContain('\\clvmrg');
 	});
 
-	it.fails('#2: a colspan cell ends at the right edge of the last column it covers', () => {
+	it('#2: a colspan cell ends at the right edge of the last column it covers', () => {
 		const rtf = body('<table><tr><td colspan="2">wide</td><td>c</td></tr><tr><td>a</td><td>b</td><td>c</td></tr></table>');
 		expect(edges(rows(rtf)[0])).toEqual([5760, 8640]);
 	});
 
-	it.fails('#2: a table inside a cell does not open a row inside that cell', () => {
+	it('#2: a table inside a cell does not open a row inside that cell', () => {
 		expect(body('<table><tr><td><table><tr><td>in</td></tr></table></td></tr></table>')).not.toContain('\\fi0 {\\trowd');
 	});
 });
@@ -224,7 +223,7 @@ describe('links', () => {
 		);
 	});
 
-	it.fails('#3.13: a link has a color of its own, so it can be told from underlined text', () => {
+	it('#3.13: a link has a color of its own, so it can be told from underlined text', () => {
 		const rtf = htmlToRtf(el('<p><a href="https://x.test/a">click</a></p>'));
 		const table = rtf.match(/\{\\colortbl[^}]*\}/)![0];
 		expect(table).not.toBe('{\\colortbl;\\red0\\green0\\blue0;}');
@@ -246,17 +245,17 @@ describe('htmlToMarkdown', () => {
 		expect(md('<figure><img src="a.png" alt="dot"><figcaption>cap</figcaption></figure>')).toBe('![dot](a.png)\n\n*cap*\n\n');
 	});
 
-	it.fails('#3.13: a table is written as a Markdown table', () => {
+	it('#3.13: a table is written as a Markdown table', () => {
 		expect(md('<table><tr><th>H1</th><th>H2</th></tr><tr><td>a</td><td>b</td></tr></table>')).toBe(
 			'| H1 | H2 |\n| --- | --- |\n| a | b |\n\n'
 		);
 	});
 
-	it.fails('#3.13: characters that mean something in Markdown are escaped in text', () => {
+	it('#3.13: characters that mean something in Markdown are escaped in text', () => {
 		expect(md('<p>1*2*3 _x_ # [y]</p>')).toBe('1\\*2\\*3 \\_x\\_ \\# \\[y\\]\n\n');
 	});
 
-	it.fails('NEW: an unsafe link is written as its text alone, as in the RTF', () => {
+	it('an unsafe link is written as its text alone, as in the RTF', () => {
 		expect(md('<p><a href="javascript:alert(1)">x</a></p>')).toBe('x\n\n');
 	});
 });
