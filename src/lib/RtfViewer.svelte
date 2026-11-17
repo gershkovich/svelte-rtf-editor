@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { rtfToHtml } from "./rtf-parser.js";
+    import { rtfToHtml, DEFAULT_MAX_RTF_BYTES } from "./rtf-parser.js";
     import {
         cssFontFamily,
         normalizeFontSize,
@@ -9,22 +9,37 @@
 
     // fontFamily and fontSize (points) set how the document is shown, and
     // default to the font the editor writes, so a document reads the same in
-    // the viewer as in the editor.
+    // the viewer as in the editor. maxRtfBytes is the largest document it will
+    // read (rtfToHtml's maxBytes): a picture costs two characters per byte, so
+    // raise it where reports can carry large pictures, or pass 0 for no limit.
     let {
         content,
         fontFamily = DEFAULT_FONT_FAMILY,
-        fontSize = DEFAULT_FONT_SIZE
-    }: { content: string; fontFamily?: string; fontSize?: number } = $props();
+        fontSize = DEFAULT_FONT_SIZE,
+        maxRtfBytes = DEFAULT_MAX_RTF_BYTES
+    }: { content: string | null | undefined; fontFamily?: string; fontSize?: number; maxRtfBytes?: number } = $props();
 
     const screenFontFamily = $derived(cssFontFamily(fontFamily));
     const screenFontSize = $derived(normalizeFontSize(fontSize));
 
-    const htmlContent = $derived(rtfToHtml(content, { fontSize }));
+    // rtfToHtml refuses a document over its size limit by throwing. The viewer then says so in
+    // place of the document, rather than taking the page down with it.
+    const parsed = $derived.by(() => {
+        try {
+            // A report that has not loaded yet shows as an empty document.
+            return { html: rtfToHtml(content ?? '', { fontSize, maxBytes: maxRtfBytes }), error: '' };
+        } catch (err) {
+            // Only the size limit's message is meant for the reader; anything else is a fault in
+            // the reader, not something the person looking at the report can act on.
+            const message = err instanceof RangeError && /too large/.test(err.message) ? err.message : '';
+            return { html: '', error: message || 'This document could not be read' };
+        }
+    });
 
     let copied = $state(false);
 
     async function copyRtf() {
-        await navigator.clipboard.writeText(content);
+        await navigator.clipboard.writeText(content ?? "");
         copied = true;
         setTimeout(() => (copied = false), 2000);
     }
@@ -45,7 +60,11 @@
         style:font-family={screenFontFamily}
         style:font-size="{screenFontSize}pt"
     >
-        {@html htmlContent}
+        {#if parsed.error}
+            <p class="rtf-viewer-error" role="alert">{parsed.error}</p>
+        {:else}
+            {@html parsed.html}
+        {/if}
     </div>
 </div>
 
@@ -111,6 +130,43 @@
 
     .rtf-viewer :global(p:last-child) {
         margin-bottom: 0;
+    }
+
+    .rtf-viewer-error {
+        color: var(--text-muted, #8a7e72);
+        font-style: italic;
+    }
+
+    /* A list item's text starts half an inch in, where the RTF puts it (\li720), and each
+       level is half an inch further. */
+    .rtf-viewer :global(ul),
+    .rtf-viewer :global(ol) {
+        margin: 0 0 0.2em;
+        padding-left: 36pt;
+    }
+
+    .rtf-viewer :global(li ul),
+    .rtf-viewer :global(li ol) {
+        margin-bottom: 0;
+    }
+
+    /* Code keeps the font the RTF names for it. A code block wraps, so a long line stays in
+       the viewer. */
+    .rtf-viewer :global(code),
+    .rtf-viewer :global(pre) {
+        font-family: 'Courier New', monospace;
+    }
+
+    .rtf-viewer :global(pre) {
+        margin: 0 0 0.2em;
+        font-size: calc(5em / 6);
+        white-space: pre-wrap;
+    }
+
+    /* A page break in the RTF (\page). */
+    .rtf-viewer :global(hr[style*='break-after']) {
+        border: 0;
+        border-top: 1px dashed currentColor;
     }
 
     /* Pictures decoded from \pict groups keep their stored width but never

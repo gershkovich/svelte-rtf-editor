@@ -281,33 +281,53 @@ export async function fileToImageSrc(file: File, limits: ImageLimits = {}): Prom
 	return toRtfSafeDataUrl(dataUrl, limits);
 }
 
+/** How long a pasted or typed picture address may take to answer before it is given up on. */
+export const IMAGE_FETCH_TIMEOUT_MS = 15_000;
+/** The most a fetched picture may weigh before it is scaled down: 25 MB. */
+export const MAX_FETCHED_IMAGE_BYTES = 25 * 1024 * 1024;
+
 /**
  * Resolve a URL to an embeddable data URL. Remote images are fetched so they
- * survive export; when the fetch is blocked (CORS, offline) the original URL is
- * kept and the image still displays — it just exports as a text placeholder.
+ * survive export; when the fetch is blocked (CORS, offline), takes longer than
+ * IMAGE_FETCH_TIMEOUT_MS or is larger than MAX_FETCHED_IMAGE_BYTES, the original
+ * URL is kept and the image still displays — it just exports as a text
+ * placeholder. `embedded` is true only for PNG or JPEG data, the two formats the
+ * RTF writer carries: a GIF, WebP or SVG that could not be converted is not.
  */
 export async function urlToImageSrc(
 	url: string,
 	limits: ImageLimits = {}
 ): Promise<{ src: string; embedded: boolean }> {
 	const value = url.trim();
+	const result = (src: string) => ({ src, embedded: src.startsWith('data:') && sniffImageType(src) !== null });
 	if (value.startsWith('data:image/')) {
-		return { src: await toRtfSafeDataUrl(value, limits), embedded: true };
+		return result(await toRtfSafeDataUrl(value, limits));
 	}
 
 	// A picture that could not be inlined still displays, but it leaves the
 	// document as a text placeholder instead of picture data. The caller is told
 	// so it can say as much, rather than letting the image vanish at export.
+	const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+	const timer = controller ? setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS) : null;
 	try {
-		const response = await fetch(value, { mode: 'cors' });
+		const response = await fetch(value, { mode: 'cors', signal: controller?.signal });
 		if (!response.ok) return { src: value, embedded: false };
+		const declared = Number(response.headers?.get('content-length') ?? '');
+		if (declared > MAX_FETCHED_IMAGE_BYTES) {
+			controller?.abort();
+			return { src: value, embedded: false };
+		}
 		const blob = await response.blob();
-		if (!blob.type.startsWith('image/')) return { src: value, embedded: false };
+		if (blob.size > MAX_FETCHED_IMAGE_BYTES || !blob.type.startsWith('image/')) {
+			return { src: value, embedded: false };
+		}
 		const dataUrl = await readFileAsDataUrl(blob);
-		const src = await toRtfSafeDataUrl(dataUrl, limits);
-		return { src, embedded: src.startsWith('data:') };
+		const converted = result(await toRtfSafeDataUrl(dataUrl, limits));
+		return converted.embedded ? converted : { src: value, embedded: false };
 	} catch {
 		return { src: value, embedded: false };
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
 }
 

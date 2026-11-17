@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
 import InkEditor from '../components/InkEditor.svelte';
+import { urlToImageSrc, IMAGE_FETCH_TIMEOUT_MS, MAX_FETCHED_IMAGE_BYTES } from '../images.js';
 
 /**
  * Drives the editor component itself (not just the converters) to check the
@@ -254,6 +255,171 @@ describe('InkEditor insert dialog', () => {
 
 		expect(editor.getHTML()).not.toContain('<img');
 		expect(host.querySelector('.ink-toast-error')?.textContent).toContain('not supported');
+	});
+});
+
+describe('InkEditor: a picture pasted with its text', () => {
+	// A page copied from a browser brings its pictures as addresses (<img src="https://…">). Only
+	// picture data held in the document reaches the RTF (issue #3, item 13).
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	/** What a browser does with a paste of HTML: the paste event, the markup, then the input event. */
+	function pasteHtml(html: string): void {
+		const event = new Event('paste', { bubbles: true, cancelable: true });
+		Object.defineProperty(event, 'clipboardData', { value: { items: [], getData: () => '' } });
+		contentEl().dispatchEvent(event);
+		contentEl().insertAdjacentHTML('beforeend', html);
+		contentEl().dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+	}
+
+	function serveImages(): string[] {
+		const fetched: string[] = [];
+		vi.stubGlobal('fetch', async (url: string) => {
+			fetched.push(url);
+			return { ok: true, blob: async () => pngFile('fetched.png') };
+		});
+		return fetched;
+	}
+
+	it('is fetched and held in the document, so it reaches the RTF as a picture', async () => {
+		const fetched = serveImages();
+		pasteHtml('<p>Figure 1 <img src="https://x.test/figure.png" alt="figure"></p>');
+		await settle();
+
+		expect(fetched).toEqual(['https://x.test/figure.png']);
+		const img = contentEl().querySelector('img')!;
+		expect(img.getAttribute('src')).toBe(PNG_SRC);
+		expect(img.getAttribute('alt')).toBe('figure');
+		expect(editor.getRTF()).toContain('{\\pict\\pngblip');
+		expect(editor.getRTF()).not.toContain('[Image:');
+		expect(host.querySelector('.ink-toast-error')).toBeNull();
+	});
+
+	it('says so when it cannot be fetched, instead of leaving a placeholder to be found downstream', async () => {
+		vi.stubGlobal('fetch', async () => {
+			throw new TypeError('Failed to fetch');
+		});
+		pasteHtml('<p>Figure 1 <img src="https://x.test/blocked.png" alt="figure"></p>');
+		await settle();
+
+		expect(contentEl().querySelector('img')!.getAttribute('src')).toBe('https://x.test/blocked.png');
+		expect(host.querySelector('.ink-toast-error')?.textContent).toContain('A pasted image could not be embedded');
+		expect(editor.getRTF()).toContain('[Image: figure]');
+	});
+
+	it('counts the pictures it could not embed', async () => {
+		vi.stubGlobal('fetch', async () => ({ ok: false }));
+		pasteHtml('<p><img src="https://x.test/a.png"><img src="https://x.test/b.png"></p>');
+		await settle();
+
+		expect(host.querySelector('.ink-toast-error')?.textContent).toContain('2 pasted images could not be embedded');
+	});
+
+	it('leaves alone a picture that is already data, and one that was in the document before the paste', async () => {
+		editor.setHTML('<p>Body <img src="https://x.test/old.png" alt="old"></p>');
+		const fetched = serveImages();
+		pasteHtml(`<p><img src="${PNG_SRC}" alt="inline"></p>`);
+		await settle();
+
+		expect(fetched).toEqual([]);
+		expect(contentEl().querySelector('img[alt="old"]')!.getAttribute('src')).toBe('https://x.test/old.png');
+		expect(host.querySelector('.ink-toast-error')).toBeNull();
+	});
+
+	it('does not put data into a picture that was deleted while it was fetched', async () => {
+		let release: () => void = () => {};
+		vi.stubGlobal(
+			'fetch',
+			() => new Promise((resolve) => (release = () => resolve({ ok: true, blob: async () => pngFile('late.png') })))
+		);
+		pasteHtml('<p>Figure <img src="https://x.test/slow.png"></p>');
+		const img = contentEl().querySelector('img')!;
+		img.remove();
+		release();
+		await settle();
+
+		expect(img.getAttribute('src')).toBe('https://x.test/slow.png');
+		expect(host.querySelector('.ink-toast-error')).toBeNull();
+	});
+
+	it('typing after a paste does not fetch anything again', async () => {
+		const fetched = serveImages();
+		pasteHtml('<p><img src="https://x.test/figure.png"></p>');
+		await settle();
+		contentEl().insertAdjacentHTML('beforeend', '<p><img src="https://x.test/typed.png"></p>');
+		contentEl().dispatchEvent(new Event('input', { bubbles: true }));
+		await settle();
+
+		expect(fetched).toEqual(['https://x.test/figure.png']);
+	});
+
+	it('one slow site does not hold up the other pictures in the paste', async () => {
+		const fetched: string[] = [];
+		vi.stubGlobal('fetch', (url: string) => {
+			fetched.push(url);
+			// The first site accepts the request and never answers.
+			if (url.includes('hang')) return new Promise(() => {});
+			return Promise.resolve({ ok: true, blob: async () => pngFile('b.png') });
+		});
+		pasteHtml('<p><img src="https://x.test/hang.png" alt="a"><img src="https://x.test/b.png" alt="b"></p>');
+		await settle();
+
+		expect(fetched).toEqual(['https://x.test/hang.png', 'https://x.test/b.png']);
+		expect(contentEl().querySelector('img[alt="b"]')!.getAttribute('src')).toBe(PNG_SRC);
+	});
+
+	it('a picture pasted as GIF data, which the RTF cannot carry, is converted or reported', async () => {
+		// happy-dom cannot draw a picture, so here the conversion a browser makes is unavailable and
+		// the editor has to say so rather than let it leave as "[Image: …]".
+		const GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+		const fetched = serveImages();
+		pasteHtml(`<p><img src="${GIF}" alt="gif"></p>`);
+		await settle();
+
+		expect(fetched).toEqual([]);
+		expect(host.querySelector('.ink-toast-error')?.textContent).toContain('A pasted image could not be embedded');
+	});
+});
+
+describe('urlToImageSrc: a picture fetched by address', () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.useRealTimers();
+	});
+
+	it('gives up after IMAGE_FETCH_TIMEOUT_MS, and the picture keeps its address', async () => {
+		vi.useFakeTimers();
+		let aborted = false;
+		vi.stubGlobal('fetch', (_url: string, init: RequestInit) =>
+			new Promise((_resolve, reject) => {
+				init.signal?.addEventListener('abort', () => {
+					aborted = true;
+					reject(new DOMException('aborted', 'AbortError'));
+				});
+			})
+		);
+		const pending = urlToImageSrc('https://x.test/slow.png');
+		await vi.advanceTimersByTimeAsync(IMAGE_FETCH_TIMEOUT_MS + 1);
+		expect(await pending).toEqual({ src: 'https://x.test/slow.png', embedded: false });
+		expect(aborted).toBe(true);
+	});
+
+	it('refuses a picture that says it is larger than MAX_FETCHED_IMAGE_BYTES, without reading it', async () => {
+		let read = false;
+		vi.stubGlobal('fetch', async () => ({
+			ok: true,
+			headers: { get: (name: string) => (name === 'content-length' ? String(MAX_FETCHED_IMAGE_BYTES + 1) : null) },
+			blob: async () => {
+				read = true;
+				return pngFile('huge.png');
+			}
+		}));
+		expect(await urlToImageSrc('https://x.test/huge.png')).toEqual({ src: 'https://x.test/huge.png', embedded: false });
+		expect(read).toBe(false);
 	});
 });
 

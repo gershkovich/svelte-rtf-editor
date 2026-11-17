@@ -1,0 +1,25 @@
+name: CI
+
+# Every push and every pull request: the type check, the tests, and the package build with its
+# lint (publint). publish.yml runs the same three before it publishes.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run prepack

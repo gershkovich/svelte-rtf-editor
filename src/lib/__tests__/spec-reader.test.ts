@@ -7,9 +7,8 @@ import { htmlToRtf } from '../rtf-writer.js';
  * paragraph formatting, headings, lists, links, tables, damaged input, and the escaping that
  * RtfViewer's {@html} depends on.
  *
- * A test marked `it.fails` states the expected behavior for something that is still open; the
- * title names the issue. It passes while the bug is there and turns red when the bug is fixed,
- * which is the cue to drop `.fails`. Invented text.
+ * A title that starts with "#3.5" or "#2" names the item of the issue the test was written for
+ * (github.com/jcelano/svelte-rtf-editor/issues); each was red before its fix. Invented text.
  */
 
 const R = String.raw;
@@ -52,7 +51,13 @@ describe('characters', () => {
 	it("every byte from \\'80 to \\'ff reads as Windows-1252 decodes it", () => {
 		const bytes = Array.from({ length: 128 }, (_, i) => 0x80 + i);
 		const rtf = bytes.map((b) => `\\'${b.toString(16)}`).join('');
-		const expected = new TextDecoder('windows-1252').decode(new Uint8Array(bytes));
+		// Written out, not asked of TextDecoder('windows-1252'): Node 20, which CI and the
+		// publish workflow run, decodes that label as Latin-1. The five bytes the code page
+		// leaves undefined keep their own value, as a browser's decoder gives them.
+		const expected =
+			'\u20ac\u0081\u201a\u0192\u201e\u2026\u2020\u2021\u02c6\u2030\u0160\u2039\u0152\u008d\u017d\u008f' +
+			'\u0090\u2018\u2019\u201c\u201d\u2022\u2013\u2014\u02dc\u2122\u0161\u203a\u0153\u009d\u017e\u0178' +
+			String.fromCharCode(...bytes.slice(32));
 		expect(dom(read(`${rtf}\\par`)).textContent).toBe(expected);
 	});
 
@@ -82,7 +87,7 @@ describe('characters', () => {
 		);
 	});
 
-	it.fails('NEW: a formatted character outside the BMP stays one character, in one element', () => {
+	it('a formatted character outside the BMP stays one character, in one element', () => {
 		const html = rtfToHtml(htmlToRtf(el('<p><b>\u{1F600}</b></p>')));
 		expect(html).toBe('<p><strong>\u{1F600}</strong></p>');
 	});
@@ -109,8 +114,9 @@ describe('character formatting', () => {
 		);
 	});
 
-	it.fails('#3.5: \\pard resets the paragraph, not the characters: bold carries on', () => {
-		expect(read(R`\b bold\pard  still bold\par`)).toBe('<p><strong>bold</strong><strong> still bold</strong></p>');
+	it('#3.5: \\pard resets the paragraph, not the characters: bold carries on', () => {
+		expect(read(R`\b bold\pard  still bold\par`)).toBe('<p><strong>bold still bold</strong></p>');
+		expect(read(R`\i\ul\strike a\pard b\plain c\par`)).toBe('<p><s><u><em>ab</em></u></s>c</p>');
 	});
 
 	it('super- and subscript, ended by \\nosupersub', () => {
@@ -127,7 +133,7 @@ describe('paragraphs', () => {
 		expect(read(R`one\par two`)).toBe('<p>one</p>\n<p>two</p>');
 	});
 
-	it.fails('NEW: \\sect ends the paragraph before a section break', () => {
+	it('\\sect ends the paragraph before a section break', () => {
 		expect(read(R`A\sect B\par`)).toBe('<p>A</p>\n<p>B</p>');
 	});
 
@@ -154,16 +160,16 @@ describe('headings', () => {
 		expect(Array.from(dom(html).children).map((c) => `${c.tagName}:${c.textContent}`)).toEqual(['H1:One', 'H2:Two', 'H3:Three', 'P:Body']);
 	});
 
-	it.fails('#3.7: a heading the writer sent comes back with no size of its own inside it', () => {
+	it('#3.7: a heading the writer sent comes back with no size of its own inside it', () => {
 		expect(rtfToHtml(htmlToRtf(el('<h1>One</h1>')))).not.toContain('font-size');
 	});
 
-	it.fails('#3.7: one large word does not make its paragraph a heading', () => {
+	it('#3.7: one large word does not make its paragraph a heading', () => {
 		const html = read(R`normal text \fs48 BIG\fs24  more normal\par`);
 		expect(html.startsWith('<p>')).toBe(true);
 	});
 
-	it.fails('#3.7: a heading with mixed formatting keeps no size span inside it', () => {
+	it('#3.7: a heading with mixed formatting keeps no size span inside it', () => {
 		const html = read(R`\pard\b\fs28 Title \i it\i0\b0\fs24\par`);
 		expect(html.startsWith('<h3>')).toBe(true);
 		expect(html).not.toContain('font-size');
@@ -171,7 +177,7 @@ describe('headings', () => {
 });
 
 describe('lists, rules and links the writer sent', () => {
-	it.fails('#3.6: a bullet list reads back as <ul>, a numbered one as <ol>', () => {
+	it('#3.6: a bullet list reads back as <ul>, a numbered one as <ol>', () => {
 		const html = rtfToHtml(htmlToRtf(el('<ul><li>one</li><li>two</li></ul><ol><li>x</li></ol>')));
 		const d = dom(html);
 		expect(Array.from(d.querySelectorAll('ul > li')).map((li) => li.textContent)).toEqual(['one', 'two']);
@@ -186,11 +192,11 @@ describe('lists, rules and links the writer sent', () => {
 		expect(htmlToRtf(el(rtfToHtml(second)))).toBe(second);
 	});
 
-	it.fails('#3.8: a rule reads back as <hr>', () => {
+	it('#3.8: a rule reads back as <hr>', () => {
 		expect(rtfToHtml(htmlToRtf(el('<p>a</p><hr><p>b</p>')))).toBe('<p>a</p>\n<hr>\n<p>b</p>');
 	});
 
-	it.fails('#3.4: a link reads back with its address', () => {
+	it('#3.4: a link reads back with its address', () => {
 		const html = rtfToHtml(htmlToRtf(el('<p><a href="https://x.test/a">click</a></p>')));
 		expect(dom(html).querySelector('a')?.getAttribute('href')).toBe('https://x.test/a');
 	});
@@ -211,7 +217,8 @@ describe('tables', () => {
 		const html = read(R`\trowd\cellx2880\cellx8640 \intbl a\cell b\cell\row \trowd\cellx2880\cellx8640 \intbl c\cell d\cell\row`);
 		expect(cells(html)).toEqual([['a', 'b'], ['c', 'd']]);
 		const first = dom(html).querySelector('td') as HTMLElement;
-		expect(first.style.width).toBe('33.3%');
+		// To a hundredth of a percent, so the writer puts the edge back at 2880 and not near it.
+		expect(first.style.width).toBe('33.33%');
 	});
 
 	it('a header row (a bottom border on its cells) reads as <th>', () => {
@@ -231,27 +238,44 @@ describe('tables', () => {
 		expect(html.endsWith('</table>\n<p>after</p>')).toBe(true);
 	});
 
-	it.fails('#3.9: \\intbl with no \\row does not swallow the paragraphs after it', () => {
+	it('#3.9: \\intbl with no \\row does not swallow the paragraphs after it', () => {
 		const html = read(R`\intbl x\par \pard after\par more\par`);
 		expect(dom(html).querySelectorAll('p').length).toBeGreaterThanOrEqual(2);
 		expect(html).toContain('<p>more</p>');
 	});
 
-	it.fails('#3.10: a row that is started again does not keep the abandoned row\'s cell alignment', () => {
-		const html = read(R`\trowd\cellx4320 \pard\intbl\qc lost\cell \trowd\cellx4320\cellx8640 \pard\intbl a\cell b\cell\row`);
-		const first = dom(html).querySelector('td') as HTMLElement;
-		expect(first.textContent).toBe('a');
-		expect(first.style.textAlign).toBe('');
+	it('a row whose definition is written again before \\row, as Word writes every row, keeps its cells', () => {
+		const html = read(R`\trowd\cellx4320\cellx8640\pard\plain\intbl {a\cell b\cell }\pard\plain\intbl {\trowd\cellx4320\cellx8640\row }\pard after\par`);
+		expect(cells(html)).toEqual([['a', 'b']]);
+		expect(html.endsWith('<p>after</p>')).toBe(true);
 	});
 
-	it.fails('#2: \\clvmgf and \\clvmrg read back as one cell with rowspan', () => {
+	it('#3.10: a definition written again leaves each cell with its own alignment', () => {
+		const html = read(R`\trowd\cellx4320\cellx8640 \pard\intbl\qc mid\cell \pard\intbl a\cell \trowd\cellx4320\cellx8640\row \trowd\cellx4320\cellx8640 \pard\intbl b\cell \pard\intbl\qr 2\cell\row`);
+		const aligns = Array.from(dom(html).querySelectorAll<HTMLElement>('td')).map((td) => `${td.textContent}:${td.style.textAlign}`);
+		expect(aligns).toEqual(['mid:center', 'a:', 'b:', '2:right']);
+	});
+
+	it('a row with no definition of its own repeats the one before it', () => {
+		const html = read(R`\trowd\cellx2880\cellx8640 \intbl a\cell b\cell\row \intbl c\cell d\cell\row`);
+		expect(cells(html)).toEqual([['a', 'b'], ['c', 'd']]);
+		const widths = Array.from(dom(html).querySelectorAll<HTMLElement>('td')).map((td) => td.style.width);
+		expect(widths).toEqual(['33.33%', '66.67%', '33.33%', '66.67%']);
+	});
+
+	it('two paragraphs in one cell are two lines, not one word', () => {
+		const html = read(R`\trowd\cellx8640 {\pard\intbl one\par \pard\intbl two\par}\cell\row`);
+		expect(dom(html).querySelector('td')!.innerHTML).toBe('one<br>two');
+	});
+
+	it('#2: \\clvmgf and \\clvmrg read back as one cell with rowspan', () => {
 		const html = read(R`\trowd\clvmgf\cellx2880\cellx5760 \intbl Group\cell a\cell\row \trowd\clvmrg\cellx2880\cellx5760 \intbl \cell c\cell\row`);
 		const d = dom(html);
 		expect(d.querySelector('td')!.getAttribute('rowspan')).toBe('2');
 		expect(cells(html)).toEqual([['Group', 'a'], ['c']]);
 	});
 
-	it.fails('#2: a cell that spans two of the columns below it reads back with colspan', () => {
+	it('#2: a cell that spans two of the columns below it reads back with colspan', () => {
 		const html = read(R`\trowd\cellx5760\cellx8640 \intbl wide\cell c\cell\row \trowd\cellx2880\cellx5760\cellx8640 \intbl a\cell b\cell c\cell\row`);
 		expect(dom(html).querySelector('td')!.getAttribute('colspan')).toBe('2');
 	});
@@ -295,11 +319,27 @@ describe('input that is damaged, hostile or not RTF', () => {
 });
 
 describe('the HTML is safe to hand to {@html} (RtfViewer)', () => {
+	// Everything rtfToHtml may produce. Adding to these lists is a decision, not a fix for a red
+	// test: each element and attribute here is one more thing a hostile file can try to reach.
 	const ALLOWED_TAGS = new Set([
 		'P', 'BR', 'STRONG', 'EM', 'U', 'S', 'SUP', 'SUB', 'SPAN', 'H1', 'H2', 'H3', 'HR',
-		'TABLE', 'TBODY', 'TR', 'TD', 'TH', 'FIGURE', 'FIGCAPTION', 'IMG'
+		'TABLE', 'TBODY', 'TR', 'TD', 'TH', 'FIGURE', 'FIGCAPTION', 'IMG',
+		// Lists, code and links are rebuilt from RTF (#3).
+		'UL', 'OL', 'LI', 'PRE', 'CODE', 'A'
 	]);
-	const ALLOWED_ATTRIBUTES = new Set(['style', 'src', 'alt']);
+	/** Each attribute with the only values it may take. */
+	const ALLOWED_ATTRIBUTES: Record<string, RegExp> = {
+		style: /^[a-z-]+:[a-z0-9 ,.()%#-]+(;[a-z-]+:[a-z0-9 ,.()%#-]+)*$/i,
+		src: /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/,
+		alt: /^$/,
+		// A link goes only where the writer itself would send one: see linkTarget.
+		href: /^(https?:\/\/|mailto:|tel:)[^\s"<>]*$/i,
+		target: /^_blank$/,
+		rel: /^noopener noreferrer$/,
+		start: /^-?\d+$/,
+		colspan: /^\d+$/,
+		rowspan: /^\d+$/
+	};
 
 	const hostile = [
 		R`{\rtf1\ansi <script>alert(1)</script>\par}`,
@@ -312,7 +352,25 @@ describe('the HTML is safe to hand to {@html} (RtfViewer)', () => {
 		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "javascript:alert(1)"}{\fldrslt click}}\par}`,
 		R`{\rtf1\ansi {\pict\pngblip\picw1\pich1 "><script>alert(1)</script>}\par}`,
 		R`{\rtf1\ansi \trowd\cellx100 \intbl <b onclick=alert(1)>x</b>\cell\row}`,
-		R`{\rtf1\ansi &lt;script&gt; &amp;#60;script&amp;#62;\par}`
+		R`{\rtf1\ansi &lt;script&gt; &amp;#60;script&amp;#62;\par}`,
+		// Links: an address that tries to leave its attribute, or is not a web, mail or phone one.
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "https://x.test/" onmouseover="alert(1)"}{\fldrslt a}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "https://x.test/\'22 onmouseover=\'22alert(1)"}{\fldrslt b}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "https://x.test/'><script>alert(1)</script>"}{\fldrslt c}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "https://x.test/?a=1&b=<i>2</i>"}{\fldrslt d}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK " JaVaScRiPt:alert(1)"}{\fldrslt e}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "java\tab script:alert(1)"}{\fldrslt f}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "data:text/html,<script>alert(1)</script>"}{\fldrslt g}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "vbscript:msgbox(1)"}{\fldrslt h}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "file:///etc/passwd"}{\fldrslt i}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "\\\\\\\\server\\\\share"}{\fldrslt j}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "https://x.test/"}{\fldrslt <a href="javascript:alert(1)">k</a>}}\par}`,
+		R`{\rtf1\ansi {\field{\*\fldinst HYPERLINK "https://x.test/"}{\fldrslt one\par two\cell three}}\par}`,
+		// Lists and tables: numbers and spans come from the file.
+		R`{\rtf1\ansi \pard\li720\fi-360 99999999999999999999.\tab x<script>\par}`,
+		R`{\rtf1\ansi \pard\li720\fi-360\bullet\tab <img src=x onerror=alert(1)>\par}`,
+		R`{\rtf1\ansi \trowd\clvmgf\cellx-5\clvmrg\cellx99999999999 \intbl a\cell b\cell\row \trowd\clvmrg\cellx100 \intbl c\cell\row}`,
+		R`{\rtf1\ansi{\fonttbl{\f1\fmodern Courier New;}}\pard\f1\fs20 </pre><script>alert(1)</script>\par}`
 	];
 
 	for (const rtf of hostile) {
@@ -321,17 +379,54 @@ describe('the HTML is safe to hand to {@html} (RtfViewer)', () => {
 			for (const node of Array.from(dom(html).querySelectorAll('*'))) {
 				expect(ALLOWED_TAGS.has(node.tagName), `<${node.tagName}> in ${html}`).toBe(true);
 				for (const attr of Array.from(node.attributes)) {
-					expect(ALLOWED_ATTRIBUTES.has(attr.name), `${attr.name} in ${html}`).toBe(true);
+					const allowed = ALLOWED_ATTRIBUTES[attr.name];
+					expect(allowed, `${attr.name} in ${html}`).toBeDefined();
+					expect(attr.value, `${attr.name}="${attr.value}" in ${html}`).toMatch(allowed);
 					expect(attr.value).not.toMatch(/javascript:|expression\(|url\(/i);
 				}
-				if (node.tagName === 'IMG') {
-					expect(node.getAttribute('src')).toMatch(/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/);
-				}
 			}
+			// What the parser hands back is what a browser builds from it: nothing is left
+			// for the browser to repair, where repair could move text into markup.
+			// (A browser adds the <tbody> a table is not written with.)
+			const built = dom(html).innerHTML.replace(/<\/?tbody>/g, '').replace(/&nbsp;/g, '\u00a0');
+			expect(built).toBe(html.replace(/&emsp;/g, '\u2003').replace(/&quot;/g, '"'));
 		});
 	}
 
+	it('a link reaches the page with its address escaped and no way to open on top of the app', () => {
+		const html = read(R`{\field{\*\fldinst HYPERLINK "https://x.test/a?b=1&c=2"}{\fldrslt go}} {\field{\*\fldinst HYPERLINK "mailto:lab@x.test"}{\fldrslt mail}}\par`);
+		expect(html).toBe(
+			'<p><a href="https://x.test/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">go</a> <a href="mailto:lab@x.test">mail</a></p>'
+		);
+	});
+
 	it('text that looks like markup is escaped, and an entity in the text stays text', () => {
 		expect(rtfToHtml(R`{\rtf1\ansi <b>x</b> &amp; "q"\par}`)).toBe('<p>&lt;b&gt;x&lt;/b&gt; &amp;amp; "q"</p>');
+	});
+});
+
+describe('which table cells are headers', () => {
+	const grid = R`\clbrdrt\brdrs\brdrw10 \clbrdrl\brdrs\brdrw10 \clbrdrb\brdrs\brdrw10 \clbrdrr\brdrs\brdrw10 `;
+	const tags = (html: string) => Array.from(dom(html).querySelectorAll('td, th')).map((c) => `${c.tagName}:${c.textContent}`);
+
+	it('a Word table in the Table Grid style (four borders on every cell) has no header cells', () => {
+		const html = read(R`\trowd` + grid + R`\cellx4567` + grid + R`\cellx9242\pard\plain\intbl ER\cell Positive (95%)\cell\row`);
+		expect(tags(html)).toEqual(['TD:ER', 'TD:Positive (95%)']);
+	});
+
+	it('a cell with a bottom border and no other is a header, as the writer marks one', () => {
+		const html = rtfToHtml(htmlToRtf(el('<table><tr><th>Marker</th><th>Result</th></tr><tr><td>ER</td><td>Positive</td></tr></table>')));
+		expect(tags(html)).toEqual(['TH:Marker', 'TH:Result', 'TD:ER', 'TD:Positive']);
+	});
+
+	it('a header row above a gridded body keeps the two apart', () => {
+		const head = R`\trowd\clbrdrb\brdrs\cellx4320\clbrdrb\brdrs\cellx8640\intbl Marker\cell Result\cell\row`;
+		const row = R`\trowd` + grid + R`\cellx4320` + grid + R`\cellx8640\intbl ER\cell Positive\cell\row`;
+		expect(tags(read(head + row))).toEqual(['TH:Marker', 'TH:Result', 'TD:ER', 'TD:Positive']);
+	});
+
+	it('a side named with no border (\\brdrnone) does not count', () => {
+		const html = read(R`\trowd\clbrdrt\brdrnone\clbrdrb\brdrs\cellx8640\intbl H\cell\row`);
+		expect(tags(html)).toEqual(['TH:H']);
 	});
 });

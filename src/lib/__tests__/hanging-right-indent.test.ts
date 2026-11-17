@@ -243,10 +243,19 @@ describe('the reader', () => {
 	});
 
 	it('a \\pard inside a list marker group does not reach the list item around it (Word)', () => {
+		// Only the first item sets its indents; the next two have them because the \pard in
+		// their marker groups did not reach them. A marker that is no bullet or number keeps
+		// each line a paragraph, where its indents can be read off.
+		const dash = '{\\listtext\\pard\\plain -\\tab}';
+		const lines = rtfToHtml(wrap(`${dash}\\pard\\plain\\fi-360\\li720 Item 1\\par ${dash}Item 2\\par ${dash}Item 3\\par `));
+		const styles = Array.from(lines.matchAll(/<p([^>]*)>/g)).map((m) => m[1]);
+		expect(styles).toEqual(Array(3).fill(' style="margin-left:36pt;text-indent:-18pt"'));
+
+		// With Word's bullet the same three lines are a list, which they can only be if each
+		// kept the indents of a list item.
 		const item = "{\\listtext\\pard\\plain \\'b7\\tab}";
 		const html = rtfToHtml(wrap(`${item}\\pard\\plain\\fi-360\\li720 Item 1\\par ${item}Item 2\\par ${item}Item 3\\par `));
-		const styles = Array.from(html.matchAll(/<p([^>]*)>/g)).map((m) => m[1]);
-		expect(styles).toEqual(Array(3).fill(' style="margin-left:36pt;text-indent:-18pt"'));
+		expect(html).toBe('<ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul>');
 	});
 
 	it('indents set inside a group end with the group', () => {

@@ -4,14 +4,22 @@
  * Parses RTF control words and groups into an HTML string.
  * Supports: bold, italic, underline, strikethrough, super/subscript,
  * font size, foreground color (\cf), highlight background color (\highlight),
- * color table, font table, paragraphs, bullet/numbered lists, tables,
- * embedded pictures (\pict PNG/JPEG blips, with captions),
- * Unicode characters, hex escapes, and nested groups.
+ * color table, font table (monospace text reads as code), paragraphs with their
+ * alignment and indents, headings, bullet/numbered lists, hyperlinks, tables with
+ * merged cells, embedded pictures (\pict PNG/JPEG blips, with captions),
+ * Unicode characters, Windows-1252 hex escapes, and nested groups.
  *
  * \cb (character background) is silently ignored on import.
  */
 
-import { HEADING_SCALE, normalizeFontSize } from './rtf-writer.js';
+import {
+	HEADING_SCALE,
+	PRE_SCALE,
+	LINK_COLOR,
+	isMonospaceFontName,
+	linkTarget,
+	normalizeFontSize
+} from './rtf-writer.js';
 
 // ── Types ──
 
@@ -29,6 +37,8 @@ interface RtfControl {
 interface RtfText {
 	type: 'text';
 	value: string;
+	/** A \'xx escape: one character to a \u fallback count, even when it decodes to nothing. */
+	hex?: boolean;
 }
 
 type RtfNode = RtfGroup | RtfControl | RtfText;
@@ -37,7 +47,7 @@ type Token =
 	| { type: 'open' }
 	| { type: 'close' }
 	| { type: 'control'; word: string; param: number | null }
-	| { type: 'text'; value: string };
+	| { type: 'text'; value: string; hex?: boolean };
 
 interface RenderState {
 	bold: boolean;
@@ -52,6 +62,8 @@ interface RenderState {
 	fontIndex: number;
 	ucSkip: number;
 	inList: boolean;
+	/** The address of the link this text is in ({\field{\*\fldinst HYPERLINK …}}), or ''. */
+	link: string;
 	/**
 	 * Paragraph indents in twips: \li (left), \ri (right) and \fi (first line, negative when the
 	 * paragraph hangs). They hold from one paragraph to the next until \pard, and like the rest of
@@ -61,6 +73,94 @@ interface RenderState {
 	leftIndent: number;
 	rightIndent: number;
 	firstLineIndent: number;
+}
+
+/**
+ * The character formatting one piece of text is shown with. Only what shows is kept: a color
+ * index with no entry in the table, black, and the underline and color a link has anyway are all
+ * "none" here, so two pieces that look the same are the same, and are joined.
+ */
+interface RunFormat {
+	bold: boolean;
+	italic: boolean;
+	underline: boolean;
+	strike: boolean;
+	super_: boolean;
+	sub: boolean;
+	/** In half-points. */
+	fontSize: number;
+	/** The text color as CSS, or '' for the reader's own. */
+	color: string;
+	/** The highlight color as CSS, or ''. */
+	background: string;
+	/** Set in a monospace font that is not the document's own font: code. */
+	mono: boolean;
+	link: string;
+}
+
+/**
+ * A paragraph is kept as its pieces until the whole document is read, because what a piece
+ * becomes depends on the paragraph around it: the size on a heading's text is the heading's, the
+ * bullet and tab that open a list item are the list's, and a paragraph set wholly in the code
+ * font is a code block.
+ */
+type Run =
+	| { type: 'text'; text: string; fmt: RunFormat }
+	| { type: 'html'; kind: 'br' | 'tab' | 'gap' | 'img'; html: string; fmt: RunFormat };
+
+/** A bullet or a number, then a tab, at the start of a paragraph. */
+interface ListMarker {
+	kind: 'ul' | 'ol';
+	/** The number of a numbered item. */
+	number: number;
+	/** Index of the first run after the marker and its tab. */
+	end: number;
+}
+
+interface ParagraphBlock {
+	kind: 'paragraph';
+	runs: Run[];
+	align: string;
+	/** \li, \ri and \fi in twips. */
+	left: number;
+	right: number;
+	first: number;
+	/** Tagged by {\*\inkcap}: the description of the figure above it. */
+	caption: boolean;
+	marker: ListMarker | null;
+	/** Cell text that never met its \cell: its indents are the cell's, not a paragraph's. */
+	inTable: boolean;
+}
+
+type Block =
+	| ParagraphBlock
+	| { kind: 'table'; html: string }
+	| { kind: 'rule'; pageBreak: boolean };
+
+/** One \cellx of a row definition, with the cell properties written before it. */
+interface CellDef {
+	right: number;
+	/**
+	 * A header cell, as the writer marks one: a bottom border and no other. Word and TextEdit put
+	 * all four borders on every cell of a gridded table, and those cells are not headers.
+	 */
+	header: boolean;
+	/** \clvmgf: the first cell of a vertical merge. \clvmrg: a cell merged into the one above. */
+	vmgf: boolean;
+	vmrg: boolean;
+	/** \clmgf and \clmrg, the same for a horizontal merge. */
+	hmgf: boolean;
+	hmrg: boolean;
+}
+
+interface RowCell {
+	html: string;
+	align: string;
+}
+
+interface TableRow {
+	cells: RowCell[];
+	defs: CellDef[];
 }
 
 // ── Highlight palette (RTF \highlight 1-16) ──
@@ -108,8 +208,54 @@ const HEX_NIBBLE = (() => {
 /** A tab as the editor's Tab key inserts it (Chromium's own shape for a typed tab). */
 const TAB_HTML = '<span style="white-space:pre">\t</span>';
 
-/** A paragraph so far holding only a list marker: a bullet, or a number and a period. */
-const LIST_MARKER = /^(?:<[^>]+>)*\s*(?:\u2022|\d+\.)\s*(?:<\/[^>]+>)*$/;
+/** Text so far holding only a list marker: a bullet, or a number and a period. */
+const LIST_MARKER = /^\s*(?:\u2022|(\d+)\.)\s*$/;
+
+/**
+ * The bullet Word writes inside {\listtext …} and {\pntext …}: byte B7 of the Symbol font, which
+ * arrives as a middle dot or as the font's private-use character.
+ */
+const SYMBOL_BULLET = /^\s*[\u00b7\uf0b7]\s*$/;
+
+/** Text a browser shows as nothing but space. */
+const ONLY_SPACES = /^[ \t\r\n\f]*$/;
+
+/** The rule the writer sends for <hr>: a centered line of this many em dashes. */
+const RULE_DASHES = '\u2014'.repeat(20);
+
+/** A hanging indent of this many twips is the one the writer gives a list item (\fi-360). */
+const LIST_HANG = 360;
+
+/** The longest number a numbered list item is read with. */
+const MAX_LIST_NUMBER_DIGITS = 9;
+
+/** Each level of a list is indented this much further (\li720). */
+const LIST_STEP = 720;
+
+/**
+ * The largest RTF string rtfToHtml reads unless told otherwise: 50 MB. A document is parsed in
+ * one go on the main thread, and a picture is decoded from two characters per byte, so the size
+ * of what is handed in is the only bound on how long the page stops responding.
+ */
+export const DEFAULT_MAX_RTF_BYTES = 50 * 1024 * 1024;
+
+/** A byte count as people read it: "52.4 MB", rounded up when asked. */
+function megabytes(n: number, roundUp = false): string {
+	const tenths = (n / (1024 * 1024)) * 10;
+	return `${((roundUp ? Math.ceil(tenths) : Math.round(tenths)) / 10).toFixed(1)} MB`;
+}
+
+/**
+ * "52.4 MB, and the limit is 50.0 MB". A size just over the limit is rounded up, so it does not
+ * read as "50.0 MB, and the limit is 50.0 MB".
+ */
+function overLimit(size: number, limit: number): string {
+	let shown = megabytes(size);
+	if (shown === megabytes(limit)) shown = megabytes(size, true);
+	// Still the same at a tenth of a megabyte (a limit of its own, just under the size): bytes.
+	if (shown === megabytes(limit)) return `${size} bytes, and the limit is ${limit} bytes`;
+	return `${shown}, and the limit is ${megabytes(limit)}`;
+}
 
 /** Hex picture data → base64, without depending on btoa/Buffer. */
 function hexToBase64(hex: string): string {
@@ -216,6 +362,15 @@ const WINDOWS_1252_C1 = [
 	0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x9d, 0x017e, 0x0178
 ];
 
+/**
+ * The character a \'xx byte stands for. A NUL is no character and decodes to nothing: it would
+ * end the text where a browser or a receiving system reads it.
+ */
+function cp1252Char(byte: number): string {
+	const code = WINDOWS_1252_C1[byte - 0x80] ?? byte;
+	return code ? String.fromCharCode(code) : '';
+}
+
 function tokenize(rtf: string): Token[] {
 	const tokens: Token[] = [];
 	let i = 0;
@@ -236,15 +391,17 @@ function tokenize(rtf: string): Token[] {
 
 			const next = rtf[i];
 
-			// Hex escape \'xx. One without two hex digits after it is damaged: it is dropped, and
-			// what follows it is read as usual, rather than turned into a NUL or a control character.
+			// Hex escape \'xx: one byte of Windows-1252.
 			if (next === "'") {
 				i++;
-				const hex = rtf.substring(i, i + 2);
-				if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+				const hi = HEX_NIBBLE[rtf.charCodeAt(i)] ?? -1;
+				const lo = HEX_NIBBLE[rtf.charCodeAt(i + 1)] ?? -1;
+				// A \' with no two hex digits after it is damage, not a character: it is
+				// dropped, and what follows is read as it stands. (parseInt on it gave NaN,
+				// which became a NUL in the HTML.)
+				if (hi >= 0 && lo >= 0) {
 					i += 2;
-					const code = parseInt(hex, 16);
-					tokens.push({ type: 'text', value: String.fromCharCode(WINDOWS_1252_C1[code - 0x80] ?? code) });
+					tokens.push({ type: 'text', value: cp1252Char((hi << 4) | lo), hex: true });
 				}
 			}
 			// Special escapes
@@ -290,7 +447,9 @@ function tokenize(rtf: string): Token[] {
 						numStr += rtf[i];
 						i++;
 					}
-					param = parseInt(numStr, 10);
+					// A lone "-" is no number.
+					const value = parseInt(numStr, 10);
+					param = Number.isFinite(value) ? value : null;
 				}
 				// Consume optional trailing space delimiter
 				if (i < len && rtf[i] === ' ') i++;
@@ -357,7 +516,7 @@ function buildTree(tokens: Token[]): RtfGroup {
 		} else if (tok.type === 'control') {
 			current.children.push({ type: 'control', word: tok.word, param: tok.param ?? null });
 		} else if (tok.type === 'text') {
-			current.children.push({ type: 'text', value: tok.value });
+			current.children.push(tok.hex ? { type: 'text', value: tok.value, hex: true } : { type: 'text', value: tok.value });
 		}
 	}
 
@@ -365,6 +524,11 @@ function buildTree(tokens: Token[]): RtfGroup {
 }
 
 // ── Color table parser ──
+
+/** A color component as a reader may use it: a damaged table can hold \red999 or \green-5. */
+function colorComponent(value: number | null): number {
+	return Math.min(255, Math.max(0, value ?? 0));
+}
 
 function parseColorTable(group: RtfGroup): string[] {
 	const colors: string[] = [''];  // index 0 = auto/default
@@ -380,11 +544,9 @@ function parseColorTable(group: RtfGroup): string[] {
 
 	for (const node of group.children) {
 		if (node.type === 'control') {
-			// A component outside 0 to 255 is damaged: it is held to the nearest end of the range.
-			const value = Math.min(255, Math.max(0, node.param ?? 0));
-			if (node.word === 'red') { r = value; hasComponents = true; }
-			else if (node.word === 'green') { g = value; hasComponents = true; }
-			else if (node.word === 'blue') { b = value; hasComponents = true; }
+			if (node.word === 'red') { r = colorComponent(node.param); hasComponents = true; }
+			else if (node.word === 'green') { g = colorComponent(node.param); hasComponents = true; }
+			else if (node.word === 'blue') { b = colorComponent(node.param); hasComponents = true; }
 		} else if (node.type === 'text' && node.value.includes(';')) {
 			// Each ';' terminates one color entry
 			const semiCount = (node.value.match(/;/g) || []).length;
@@ -401,28 +563,97 @@ function parseColorTable(group: RtfGroup): string[] {
 
 // ── Font table parser ──
 
-function parseFontTable(group: RtfGroup): Map<number, string> {
-	const fonts = new Map<number, string>();
+/**
+ * The numbers of the fonts that are monospace: named like one (Courier New, Consolas), or declared
+ * \fmodern or fixed-pitch (\fprq1). Reads both shapes a font table comes in: one group per font
+ * ({\f1\fmodern Courier New;}), and TextEdit's run of entries with no groups
+ * (\f0\fswiss Helvetica;\f1\fmodern Courier;).
+ */
+function monospaceFonts(group: RtfGroup): Set<number> {
+	const mono = new Set<number>();
+	let num: number | null = null;
+	let name = '';
+	let fixed = false;
+
+	const finish = () => {
+		if (num != null && (fixed || isMonospaceFontName(name))) mono.add(num);
+		num = null;
+		name = '';
+		fixed = false;
+	};
+
+	const read = (nodes: RtfNode[]) => {
+		for (const node of nodes) {
+			if (node.type === 'control') {
+				if (node.word === 'f' && node.param != null) {
+					if (num != null) finish();
+					num = node.param;
+				} else if (node.word === 'fmodern' || (node.word === 'fprq' && node.param === 1)) {
+					fixed = true;
+				}
+			} else if (node.type === 'text') {
+				// A name ends at its ';'.
+				const parts = node.value.split(';');
+				name += parts[0];
+				if (parts.length > 1) finish();
+			}
+			// A group inside an entry ({\*\panose …}, {\*\falt …}) is not part of the name.
+		}
+	};
 
 	for (const child of group.children) {
 		if (child.type === 'group') {
-			let fNum = 0;
-			let fName = '';
-			for (const node of child.children) {
-				if (node.type === 'control' && node.word === 'f' && node.param != null) {
-					fNum = node.param;
-				}
-				if (node.type === 'text') {
-					fName += node.value;
-				}
-			}
-			// Remove trailing semicolons
-			fName = fName.replace(/;$/, '').trim();
-			if (fName) fonts.set(fNum, fName);
+			read(child.children);
+			finish();
 		}
 	}
+	read(group.children.filter((n) => n.type !== 'group'));
+	finish();
 
-	return fonts;
+	return mono;
+}
+
+// ── Links ──
+
+/** The longest field instruction looked at for a link's address. */
+const MAX_FIELD_INSTRUCTION = 8192;
+
+/**
+ * The text of a field's instruction group, {\*\fldinst HYPERLINK "…"}, or null when it holds a
+ * \u escape: the address would then be the fallback character's, not the one meant.
+ */
+function fieldInstruction(group: RtfGroup): string | null {
+	let text = '';
+	const pending: RtfNode[] = [...group.children].reverse();
+	while (pending.length > 0) {
+		const node = pending.pop()!;
+		if (node.type === 'group') {
+			for (let i = node.children.length - 1; i >= 0; i--) pending.push(node.children[i]);
+		} else if (node.type === 'control') {
+			if (node.word === 'u') return null;
+		} else {
+			text += node.value;
+			if (text.length > MAX_FIELD_INSTRUCTION) return null;
+		}
+	}
+	return text;
+}
+
+/**
+ * The address a {\field …} group links to, or '' when it is not a link, or not one that may be
+ * followed. Only what the writer itself would write is accepted (linkTarget): an absolute web,
+ * mail or phone address. A javascript: or file: address, or a link to a bookmark, stays text.
+ */
+function fieldLink(field: RtfGroup): string {
+	const instruction = field.children.find(
+		(n): n is RtfGroup => n.type === 'group' && n.children.some((c) => c.type === 'control' && c.word === 'fldinst')
+	);
+	if (!instruction) return '';
+	const text = fieldInstruction(instruction);
+	if (text == null) return '';
+	const m = text.match(/^\s*HYPERLINK\s+(?:"([^"]*)"|([^\s"\\]\S*))/i);
+	if (!m) return '';
+	return linkTarget(m[1] ?? m[2] ?? '') ?? '';
 }
 
 // ── Body size ──
@@ -433,6 +664,8 @@ const destinationWords = new Set([
 	'headerl', 'headerr', 'headerf', 'footerl', 'footerr', 'footerf',
 	// \nonshppict duplicates the picture already carried by \*\shppict
 	'nonshppict',
+	// {\nonesttables \par} is for readers that do not know nested tables; \nestrow is read here
+	'nonesttables',
 	'object', 'fldinst', 'xmlnstbl', 'listtable', 'listoverridetable',
 	'rsidtbl', 'generator', 'datafield', 'themedata', 'colorschememapping',
 	'latentstyles', 'datastore', 'mmathPr', 'author', 'operator',
@@ -451,6 +684,12 @@ export interface RtfReadOptions {
 	 * a document exactly as 1.4.0 did.
 	 */
 	fontSize?: number;
+	/**
+	 * The largest RTF string to read, in characters (RTF is ASCII, so also bytes). A longer one
+	 * is refused with a RangeError before any of it is parsed. Default: DEFAULT_MAX_RTF_BYTES
+	 * (50 MB). 0 reads a document of any size.
+	 */
+	maxBytes?: number;
 }
 
 /** Twips as a CSS length in points (20 twips), which the writer reads back as the same twips. */
@@ -464,70 +703,133 @@ function resetIndents(state: RenderState): void {
 	state.firstLineIndent = 0;
 }
 
+/**
+ * A paragraph's indents as CSS, in points (20 twips), which the writer reads back as the same
+ * \li, \ri and \fi: "margin-left:36pt;text-indent:-36pt". A first line may not start left of
+ * the page margin, where a browser would clip it.
+ */
+function indentStyle(block: ParagraphBlock): string {
+	const left = Math.max(0, block.left);
+	const first = Math.max(-left, block.first);
+	const parts: string[] = [];
+	if (left > 0) parts.push(`margin-left:${twipsToPt(left)}`);
+	if (block.right > 0) parts.push(`margin-right:${twipsToPt(block.right)}`);
+	if (first !== 0) parts.push(`text-indent:${twipsToPt(first)}`);
+	return parts.join(';');
+}
+
+/**
+ * The indent of a picture's paragraph: where its one line starts, as a left margin. A figure
+ * is written back with a left indent only, and a first-line indent on it would be passed on to
+ * its caption.
+ */
+function figureIndentStyle(block: ParagraphBlock): string {
+	const left = Math.max(0, block.left);
+	const start = left + Math.max(-left, block.first);
+	return start > 0 ? `margin-left:${twipsToPt(start)}` : '';
+}
+
+/**
+ * A paragraph's HTML without the spaces at its ends, which a browser does not show. Only those:
+ * a non-breaking space or an em space there is text someone put there, and is kept.
+ */
+function trimSpaces(html: string): string {
+	return html.replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/g, '');
+}
+
+function escapeText(text: string): string {
+	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** Text as an attribute value in double quotes. */
+function escapeAttribute(text: string): string {
+	return escapeText(text).replace(/"/g, '&quot;');
+}
+
+function sameFormat(a: RunFormat, b: RunFormat): boolean {
+	return (
+		a.bold === b.bold &&
+		a.italic === b.italic &&
+		a.underline === b.underline &&
+		a.strike === b.strike &&
+		a.super_ === b.super_ &&
+		a.sub === b.sub &&
+		a.fontSize === b.fontSize &&
+		sameFormatButSize(a, b)
+	);
+}
+
+function sameFormatButSize(a: RunFormat, b: RunFormat): boolean {
+	return (
+		a.bold === b.bold &&
+		a.italic === b.italic &&
+		a.underline === b.underline &&
+		a.strike === b.strike &&
+		a.super_ === b.super_ &&
+		a.sub === b.sub &&
+		a.color === b.color &&
+		a.background === b.background &&
+		a.mono === b.mono &&
+		a.link === b.link
+	);
+}
+
+/** How a paragraph's pieces are written out, where it is not as an ordinary paragraph. */
+interface RenderOptions {
+	/** A font size, in half-points, the element around the text already gives it. */
+	dropSize?: number;
+	/** The element around the text is bold already (a heading). */
+	dropBold?: boolean;
+	/** Inside <pre>: no <code>, a line break is a newline and a tab is a tab. */
+	pre?: boolean;
+}
+
 export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): string {
+	const maxBytes = options.maxBytes ?? DEFAULT_MAX_RTF_BYTES;
+	if (maxBytes > 0 && rtfString.length > maxBytes) {
+		throw new RangeError(
+			`This document is too large to show: ${overLimit(rtfString.length, maxBytes)}`
+		);
+	}
+
 	const tokens = tokenize(rtfString);
 	const tree = buildTree(tokens);
 
 	let colorTable: string[] = [''];
-	let fontTable = new Map<number, string>();
-	let currentParagraph = '';
-	const paragraphs: string[] = [];
-	const paragraphAligns: string[] = [];
-	const paragraphIndents: string[] = [];
-	const paragraphFigureIndents: string[] = [];
-	const paragraphCaptions: boolean[] = [];
-	let paragraphHasText = false;
+	let monoFonts = new Set<number>();
+	let defaultFont = 0;
+
+	const blocks: Block[] = [];
+
+	// The paragraph being read
+	let runs: Run[] = [];
+	let marker: ListMarker | null = null;
 	let paragraphHasListMarker = false;
 	let paragraphIsCaption = false;
-
-	/** Append a finished paragraph, keeping the parallel metadata arrays in sync. */
-	function pushParagraph(html: string, align: string, isCaption = false): void {
-		paragraphs.push(html);
-		paragraphAligns.push(align);
-		const inTable = inTableCell || html.startsWith('<table');
-		paragraphIndents.push(inTable ? '' : indentStyle());
-		paragraphFigureIndents.push(inTable ? '' : figureIndentStyle());
-		paragraphCaptions.push(isCaption);
-	}
 
 	// Paragraph alignment (reset by \pard, affects cells and paragraphs)
 	let currentAlign = 'left';
 
-	/**
-	 * The current indents as CSS, in points (20 twips), which the writer reads back as the same
-	 * \li, \ri and \fi: "margin-left:36pt;text-indent:-36pt". A first line may not start left of
-	 * the page margin, where a browser would clip it.
-	 */
-	function indentStyle(): string {
-		const { leftIndent, rightIndent, firstLineIndent } = currentState();
-		const left = Math.max(0, leftIndent);
-		const first = Math.max(-left, firstLineIndent);
-		const parts: string[] = [];
-		if (left > 0) parts.push(`margin-left:${twipsToPt(left)}`);
-		if (rightIndent > 0) parts.push(`margin-right:${twipsToPt(rightIndent)}`);
-		if (first !== 0) parts.push(`text-indent:${twipsToPt(first)}`);
-		return parts.join(';');
-	}
-
-	/**
-	 * The indent of a picture's paragraph: where its one line starts, as a left margin. A figure
-	 * is written back with a left indent only, and a first-line indent on it would be passed on to
-	 * its caption.
-	 */
-	function figureIndentStyle(): string {
-		const { leftIndent, firstLineIndent } = currentState();
-		const start = Math.max(0, leftIndent) + Math.max(-Math.max(0, leftIndent), firstLineIndent);
-		return start > 0 ? `margin-left:${twipsToPt(start)}` : '';
-	}
-
 	// Table state
-	let tableRows: Array<{ cells: string[]; isHeader: boolean; cellRights: number[]; cellAligns: string[] }> = [];
-	let currentRowCells: string[] = [];
-	let currentRowIsHeader = false;
-	let currentRowCellRights: number[] = [];
-	let currentRowCellAligns: string[] = [];
+	let tableRows: TableRow[] = [];
+	let currentRowCells: RowCell[] = [];
+	let currentRowDefs: CellDef[] = [];
+	/** The definition of the row before, which a row with no \trowd of its own repeats. */
+	let lastRowDefs: CellDef[] = [];
+	let pendingDef = newCellDef();
+	/** The side a \clbrdrX just named, until a border type (\brdrs...) confirms or \brdrnone clears it. */
+	let pendingSide: 'b' | 'other' | null = null;
+	/** The sides of the cell being defined that have a real border. */
+	let cellBorders = { b: false, other: false };
 	let inTableCell = false;
-	let pendingBottomBorder = false; // set by \clbrdrb, confirmed by a real border type
+	/** \par seen in a table cell since its last text: line breaks owed if more text follows. */
+	let cellBreaks = 0;
+	/** \nestcell seen: a tab is owed if more text follows on the line. */
+	let nestTabPending = false;
+
+	function newCellDef(): CellDef {
+		return { right: 0, header: false, vmgf: false, vmrg: false, hmgf: false, hmrg: false };
+	}
 
 	// First pass: extract color table and font table from the root group
 	const rootGroup = tree.children[0]?.type === 'group' ? (tree.children[0] as RtfGroup) : tree;
@@ -539,14 +841,22 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			if (firstControl?.word === 'colortbl') {
 				colorTable = parseColorTable(child);
 			} else if (firstControl?.word === 'fonttbl') {
-				fontTable = parseFontTable(child);
+				monoFonts = monospaceFonts(child);
 			}
+		} else if (child.type === 'control' && child.word === 'deff' && child.param != null) {
+			defaultFont = child.param;
 		}
 	}
+
+	// In a document whose own font is monospace, code cannot be told from text by its font.
+	const documentIsMono = monoFonts.has(defaultFont);
+	const linkColor = `rgb(${LINK_COLOR.r},${LINK_COLOR.g},${LINK_COLOR.b})`;
 
 	// The screen's body size, in half-points. It is given, not guessed from the
 	// document: guessing misread short documents and ones set below 12 pt.
 	const bodySize = normalizeFontSize(options.fontSize) * 2;
+	/** The size the writer sets a code block in, in half-points. */
+	const preSize = Math.round(bodySize * PRE_SCALE);
 
 	// State stack for nested groups
 	function defaultState(): RenderState {
@@ -560,9 +870,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			fontSize: 24, // 12pt default
 			colorIndex: 0,
 			highlightIndex: 0,
-			fontIndex: 0,
+			fontIndex: defaultFont,
 			ucSkip: 1,
 			inList: false,
+			link: '',
 			leftIndent: 0,
 			rightIndent: 0,
 			firstLineIndent: 0,
@@ -579,415 +890,892 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		return { ...currentState() };
 	}
 
-	function buildSpanOpen(state: RenderState, withSize = true): string {
-		const styles: string[] = [];
-
-		if (state.colorIndex > 0 && state.colorIndex < colorTable.length) {
-			const color = colorTable[state.colorIndex];
-			if (color && color !== 'rgb(0,0,0)') {
-				styles.push(`color:${color}`);
-			}
-		}
-
-		if (state.highlightIndex > 0) {
-			const bg = HIGHLIGHT_COLORS[state.highlightIndex];
-			if (bg) styles.push(`background-color:${bg}`);
-		}
-
-		if (withSize && state.fontSize && state.fontSize !== bodySize) {
-			styles.push(`font-size:${state.fontSize / 2}pt`);
-		}
-
-		if (styles.length === 0) return '';
-		return `<span style="${styles.join(';')}">`;
+	function formatOf(state: RenderState): RunFormat {
+		let color = state.colorIndex > 0 && state.colorIndex < colorTable.length ? colorTable[state.colorIndex] : '';
+		// Black is the color text has anyway, and a link's own color is the <a>'s to give.
+		if (color === 'rgb(0,0,0)' || (state.link && color === linkColor)) color = '';
+		return {
+			bold: state.bold,
+			italic: state.italic,
+			// A link is underlined as a link; the writer adds that underline itself.
+			underline: state.underline && !state.link,
+			strike: state.strike,
+			super_: state.super_,
+			sub: state.sub,
+			fontSize: state.fontSize || bodySize,
+			color,
+			background: (state.highlightIndex > 0 && HIGHLIGHT_COLORS[state.highlightIndex]) || '',
+			// A list marker is set in whatever font the list uses (Word's second-level "o" is in
+			// Courier New): it is not code.
+			mono: !documentIsMono && !state.inList && monoFonts.has(state.fontIndex),
+			link: state.link
+		};
 	}
 
-	function wrapText(text: string, state: RenderState): string {
+	// ── Writing a paragraph's pieces as HTML ──
+
+	function renderText(text: string, fmt: RunFormat, opts: RenderOptions): string {
 		if (!text) return '';
 		// A size on spaces alone is not shown and would be read as the
 		// paragraph's size, so it is dropped. Underline, strikethrough and
 		// highlight are kept: an underlined blank is a signature line.
-		const onlySpaces = /^[ \t\r\n\f]*$/.test(text);
+		const onlySpaces = ONLY_SPACES.test(text);
 
-		let result = text
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;');
+		let result = escapeText(text);
 
-		// Apply span styles
-		const spanOpen = buildSpanOpen(state, !onlySpaces);
-		if (spanOpen) {
-			result = `${spanOpen}${result}</span>`;
+		const styles: string[] = [];
+		if (fmt.color) styles.push(`color:${fmt.color}`);
+		if (fmt.background) styles.push(`background-color:${fmt.background}`);
+		if (!onlySpaces && fmt.fontSize !== bodySize && fmt.fontSize !== opts.dropSize) {
+			styles.push(`font-size:${fmt.fontSize / 2}pt`);
 		}
+		if (styles.length > 0) result = `<span style="${styles.join(';')}">${result}</span>`;
 
-		if (state.bold) result = `<strong>${result}</strong>`;
-		if (state.italic) result = `<em>${result}</em>`;
-		if (state.underline) result = `<u>${result}</u>`;
-		if (state.strike) result = `<s>${result}</s>`;
-		if (state.super_) result = `<sup>${result}</sup>`;
-		if (state.sub) result = `<sub>${result}</sub>`;
+		if (fmt.mono && !opts.pre) result = `<code>${result}</code>`;
+		if (fmt.bold && !opts.dropBold) result = `<strong>${result}</strong>`;
+		if (fmt.italic) result = `<em>${result}</em>`;
+		if (fmt.underline) result = `<u>${result}</u>`;
+		if (fmt.strike) result = `<s>${result}</s>`;
+		if (fmt.super_) result = `<sup>${result}</sup>`;
+		if (fmt.sub) result = `<sub>${result}</sub>`;
 
 		return result;
 	}
 
-	let skipDepth = 0;
+	function renderRun(run: Run, opts: RenderOptions): string {
+		if (run.type === 'text') return renderText(run.text, run.fmt, opts);
+		if (opts.pre && run.kind === 'br') return '\n';
+		if (opts.pre && run.kind === 'tab') return '\t';
+		return run.html;
+	}
+
+	/** The opening tag of a link. The address has been through linkTarget; a web page opens in a tab of its own. */
+	function linkOpen(href: string): string {
+		const newTab = /^https?:/i.test(href) ? ' target="_blank" rel="noopener noreferrer"' : '';
+		return `<a href="${escapeAttribute(href)}"${newTab}>`;
+	}
+
+	function renderRuns(list: Run[], opts: RenderOptions = {}): string {
+		// A line break that ends the paragraph (\line\par) leaves an empty last line. A browser
+		// shows nothing for a <br> at the end of a block, so that one is written twice; the
+		// writer, which drops a closing <br>, then sends the one \line back.
+		let closing = -1;
+		if (!opts.pre) {
+			let k = list.length - 1;
+			while (k >= 0 && list[k].type === 'text' && ONLY_SPACES.test((list[k] as { text: string }).text)) k--;
+			if (k >= 0 && list[k].type === 'html' && (list[k] as { kind: string }).kind === 'br') closing = k;
+		}
+		const render = (i: number) => renderRun(list[i], opts) + (i === closing ? '<br>' : '');
+
+		let out = '';
+		for (let i = 0; i < list.length; ) {
+			const link = list[i].fmt.link;
+			if (!link) {
+				out += render(i++);
+				continue;
+			}
+			// Every piece in a row that carries the same address is one link.
+			let inner = '';
+			while (i < list.length && list[i].fmt.link === link) inner += render(i++);
+			out += `${linkOpen(link)}${inner}</a>`;
+		}
+		return out;
+	}
+
+	// ── Collecting a paragraph ──
+
+	/** Half of a surrogate pair read from \uN, waiting for the \uN that completes the character. */
+	let pendingHighSurrogate = 0;
+
+	function pushText(text: string, state: RenderState): void {
+		if (!text) return;
+		const fmt = formatOf(state);
+		const last = runs[runs.length - 1];
+		if (last && last.type === 'text') {
+			// Text in the same formatting as the text before it is one piece: "caf" and the
+			// \'e9 after it, or the two \u halves of an emoji, are not two elements.
+			if (sameFormat(last.fmt, fmt)) {
+				last.text += text;
+				return;
+			}
+			// A size does not show on spaces, so spaces go with the text beside them
+			// whatever size they were set in.
+			if (sameFormatButSize(last.fmt, fmt)) {
+				if (ONLY_SPACES.test(text)) {
+					last.text += text;
+					return;
+				}
+				if (ONLY_SPACES.test(last.text)) {
+					last.text += text;
+					last.fmt = fmt;
+					return;
+				}
+			}
+		}
+		runs.push({ type: 'text', text, fmt });
+	}
+
+	/** What is owed before the next piece of a paragraph: see cellBreaks and nestTabPending. */
+	function beforeContent(state: RenderState): void {
+		if (pendingHighSurrogate) {
+			// A lone half of a pair is no character.
+			pendingHighSurrogate = 0;
+			pushText('\ufffd', state);
+		}
+		if (cellBreaks > 0) {
+			const count = cellBreaks;
+			cellBreaks = 0;
+			if (inTableCell) {
+				// A paragraph mark inside a cell: the cell's text goes on, on a new line.
+				for (let k = 0; k < count; k++) runs.push({ type: 'html', kind: 'br', html: '<br>', fmt: formatOf(state) });
+			} else {
+				// \pard has left the table without a \cell: what was read is a paragraph.
+				for (let k = 0; k < count; k++) flushParagraph();
+			}
+		}
+		if (nestTabPending) {
+			nestTabPending = false;
+			runs.push({ type: 'html', kind: 'tab', html: TAB_HTML, fmt: formatOf(state) });
+		}
+	}
+
+	function appendText(text: string, state: RenderState): void {
+		if (!text) return;
+		beforeContent(state);
+		pushText(text, state);
+	}
+
+	function appendHtml(kind: 'br' | 'tab' | 'gap' | 'img', html: string, state: RenderState): void {
+		beforeContent(state);
+		runs.push({ type: 'html', kind, html, fmt: formatOf(state) });
+	}
+
+	/** The text of the line being read, back to the last line break, if text is all it holds. */
+	function lineText(): string | null {
+		let text = '';
+		for (let i = runs.length - 1; i >= 0; i--) {
+			const run = runs[i];
+			if (run.type === 'html' && run.kind === 'br') break;
+			if (run.type !== 'text') return null;
+			text = run.text + text;
+		}
+		return text;
+	}
+
+	function appendTab(state: RenderState): void {
+		beforeContent(state);
+		// A real tab, in the shape the editor's Tab key inserts, so it shows as
+		// one and is written back as \tab (an em space came back as 膕).
+		// After a list marker ("\bullet\tab", "1.\tab") the gap stays an em
+		// space where the line is read as a plain one: a full tab there is too wide.
+		const lead = lineText();
+		// Only a marker that opens the paragraph can make it a list item.
+		const opensParagraph = marker === null && runs.every((r) => r.type === 'text');
+		const listed = lead != null ? lead.match(LIST_MARKER) : null;
+		if (listed) {
+			runs.push({ type: 'html', kind: 'gap', html: '&emsp;', fmt: formatOf(state) });
+			// (A number too long to be an item's number is text, and so is one written with a
+			// leading zero, "01.": a list would show it as "1.".)
+			if (opensParagraph && (!listed[1] || (listed[1].length <= MAX_LIST_NUMBER_DIGITS && !/^0\d/.test(listed[1])))) {
+				marker = listed[1]
+					? { kind: 'ol', number: Number(listed[1]), end: runs.length }
+					: { kind: 'ul', number: 0, end: runs.length };
+			}
+			return;
+		}
+		runs.push({ type: 'html', kind: 'tab', html: TAB_HTML, fmt: formatOf(state) });
+		// Word's bullet, inside {\listtext …} or {\pntext …}.
+		if (opensParagraph && lead != null && state.inList && SYMBOL_BULLET.test(lead)) {
+			marker = { kind: 'ul', number: 0, end: runs.length };
+		}
+	}
+
+	// ── Tables ──
+
+	/** Column edges closer than this, in twips (2 px), are the same edge. */
+	const EDGE_TOLERANCE = 30;
 
 	function flushTable() {
 		if (tableRows.length === 0) return;
-		let html = '<table style="border-collapse:collapse;width:100%;margin:4px 0">';
-		for (const row of tableRows) {
-			html += '<tr>';
-			const tag = row.isHeader ? 'th' : 'td';
-			const total = row.cellRights[row.cellRights.length - 1] || 1;
+		const rows = tableRows;
+		tableRows = [];
+
+		// Each row as its cells with their right edges. A cell with no \cellx of its own takes
+		// an edge past the last one, so its text is kept; a cell merged to the left (\clmrg)
+		// joins the cell before it.
+		interface Placed {
+			html: string;
+			align: string;
+			def: CellDef;
+			left: number;
+			right: number;
+			start: number;
+			end: number;
+			rowspan: number;
+			merged: boolean;
+		}
+		const placedRows: Placed[][] = rows.map((row) => {
+			const placed: Placed[] = [];
 			let prevRight = 0;
+			let step = 0;
 			for (let ci = 0; ci < row.cells.length; ci++) {
-				const right = row.cellRights[ci] ?? total;
-				const pct = ((right - prevRight) / total * 100).toFixed(1);
-				prevRight = right;
-				const align = row.cellAligns[ci] ?? 'left';
-				const alignStyle = align !== 'left' ? `;text-align:${align}` : '';
-				const style = row.isHeader
-					? `border-bottom:1px solid;padding:2px 6px;text-align:${align};width:${pct}%`
+				const def = row.defs[ci] ?? { ...newCellDef(), right: prevRight + (step || 1440) };
+				const cell = row.cells[ci];
+				const last = placed[placed.length - 1];
+				if (def.hmrg && last) {
+					last.right = Math.max(last.right, def.right);
+					if (cell.html) last.html += (last.html ? ' ' : '') + cell.html;
+				} else {
+					placed.push({
+						html: cell.html, align: cell.align, def,
+						left: prevRight, right: Math.max(def.right, prevRight),
+						start: 0, end: 0, rowspan: 1, merged: false
+					});
+				}
+				step = Math.max(1, def.right - prevRight);
+				prevRight = Math.max(def.right, prevRight);
+			}
+			return placed;
+		});
+
+		// One set of columns for the table: every edge any row has. A cell that crosses edges
+		// of other rows spans those columns.
+		const allEdges = placedRows.flatMap((row) => row.map((c) => c.right)).sort((a, b) => a - b);
+		const edges: number[] = [];
+		for (const e of allEdges) {
+			if (edges.length === 0 || e - edges[edges.length - 1] > EDGE_TOLERANCE) edges.push(e);
+		}
+		// The column whose edge is nearest, the earlier one on a tie. A binary search over the
+		// sorted edges: a scan of every edge for every cell froze the page on a row of 100,000
+		// cells (14 s for 2 MB).
+		const columnOf = (right: number): number => {
+			let lo = 0;
+			let hi = edges.length - 1;
+			while (lo < hi) {
+				const mid = (lo + hi) >> 1;
+				if (edges[mid] < right) lo = mid + 1;
+				else hi = mid;
+			}
+			if (lo > 0 && Math.abs(edges[lo - 1] - right) <= Math.abs(edges[lo] - right)) return lo - 1;
+			return lo;
+		};
+		for (const row of placedRows) {
+			let start = 0;
+			for (const cell of row) {
+				cell.start = start;
+				cell.end = Math.max(start, columnOf(cell.right));
+				start = cell.end + 1;
+			}
+		}
+
+		// A vertical merge: the cell marked \clvmgf takes in each \clvmrg cell under it, row
+		// after row. A \clvmrg cell with nothing above it to join stays an ordinary cell.
+		for (let r = 0; r < placedRows.length; r++) {
+			for (const cell of placedRows[r]) {
+				if (!cell.def.vmgf || cell.merged) continue;
+				for (let below = r + 1; below < placedRows.length; below++) {
+					const under = placedRows[below].find((c) => c.start === cell.start && c.def.vmrg && !c.merged);
+					if (!under) break;
+					under.merged = true;
+					cell.rowspan++;
+					// A merged cell is empty; if a damaged file has text there, it is kept.
+					if (under.html) cell.html += (cell.html ? '<br>' : '') + under.html;
+				}
+			}
+		}
+
+		const total = edges[edges.length - 1] || 1;
+		// A cell's width is the difference of where it ends and where it starts, each as a
+		// share of the table rounded to a hundredth of a percent. Written that way the widths
+		// of a row add up exactly, and the writer puts every column edge back where it was;
+		// each width rounded by itself moved an edge a few twips on every save.
+		const shareAt = (edge: number) => Math.round((edge / total) * 10000) / 100;
+		let html = '<table style="border-collapse:collapse;width:100%;margin:4px 0">';
+		for (const row of placedRows) {
+			html += '<tr>';
+			for (const cell of row) {
+				if (cell.merged) continue;
+				const tag = cell.def.header ? 'th' : 'td';
+				const pct = (shareAt(cell.right) - shareAt(cell.left)).toFixed(2).replace(/0$/, '');
+				const alignStyle = cell.align !== 'left' ? `;text-align:${cell.align}` : '';
+				const style = cell.def.header
+					? `border-bottom:1px solid;padding:2px 6px;text-align:${cell.align};width:${pct}%`
 					: `padding:2px 6px;width:${pct}%${alignStyle}`;
-				html += `<${tag} style="${style}">${row.cells[ci] || ''}</${tag}>`;
+				const colspan = cell.end > cell.start ? ` colspan="${cell.end - cell.start + 1}"` : '';
+				const rowspan = cell.rowspan > 1 ? ` rowspan="${cell.rowspan}"` : '';
+				html += `<${tag}${colspan}${rowspan} style="${style}">${cell.html}</${tag}>`;
 			}
 			html += '</tr>';
 		}
 		html += '</table>';
-		pushParagraph(html, 'left');
-		tableRows = [];
+		blocks.push({ kind: 'table', html });
 	}
 
 	function flushParagraph() {
-		flushTable();
-		const trimmed = currentParagraph.trim();
-		if (trimmed || !paragraphHasListMarker) {
-			pushParagraph(currentParagraph, currentAlign, paragraphIsCaption);
+		const state = currentState();
+		if (pendingHighSurrogate) {
+			pendingHighSurrogate = 0;
+			pushText('\ufffd', state);
 		}
-		currentParagraph = '';
-		paragraphHasText = false;
+		flushTable();
+		// A paragraph that held a list marker and nothing else is no line of its own.
+		if (!paragraphHasListMarker || trimSpaces(renderRuns(runs))) {
+			blocks.push({
+				kind: 'paragraph',
+				runs,
+				align: currentAlign,
+				left: state.leftIndent,
+				right: state.rightIndent,
+				first: state.firstLineIndent,
+				caption: paragraphIsCaption,
+				marker,
+				inTable: inTableCell
+			});
+		}
+		runs = [];
+		marker = null;
 		paragraphHasListMarker = false;
 		paragraphIsCaption = false;
 		currentAlign = 'left';
+		nestTabPending = false;
 	}
 
 	let pendingUnicodeSkip = 0;
 
-	function walk(nodes: RtfNode[]) {
-		for (let i = 0; i < nodes.length; i++) {
-			const node = nodes[i];
+	// ── Walking the document ──
+	// With a stack of its own rather than a call per group: a document nested tens of
+	// thousands of groups deep, which a damaged or hostile file can be, overflowed the call stack.
 
-			if (skipDepth > 0 && node.type !== 'group') {
+	interface Frame {
+		nodes: RtfNode[];
+		index: number;
+		/** Whether leaving this group ends a formatting state. */
+		scoped: boolean;
+	}
+	const frames: Frame[] = [{ nodes: rootGroup.children, index: 0, scoped: false }];
+
+	const enterGroup = (group: RtfGroup, state: RenderState) => {
+		stateStack.push(state);
+		frames.push({ nodes: group.children, index: 0, scoped: true });
+	};
+
+	while (frames.length > 0) {
+		const frame = frames[frames.length - 1];
+		if (frame.index >= frame.nodes.length) {
+			frames.pop();
+			if (frame.scoped) stateStack.pop();
+			continue;
+		}
+		const node = frame.nodes[frame.index++];
+
+		if (node.type === 'group') {
+			const firstCtrl = node.children.find((n) => n.type === 'control') as RtfControl | undefined;
+
+			if (firstCtrl?.word === 'pict') {
+				const img = renderPicture(node);
+				if (img) appendHtml('img', img, currentState());
 				continue;
 			}
 
-			if (node.type === 'group') {
-				if (skipDepth > 0) {
-					skipDepth++;
-					walk(node.children);
-					skipDepth--;
-					continue;
-				}
-
-				const firstCtrl = node.children.find((n) => n.type === 'control') as RtfControl | undefined;
-
-				if (firstCtrl?.word === 'pict') {
-					const img = renderPicture(node);
-					if (img) {
-						currentParagraph += img;
-						paragraphHasText = true;
-					}
-					continue;
-				}
-
-				if (firstCtrl && destinationWords.has(firstCtrl.word)) {
-					continue;
-				}
-
-				const hasStarDest = node.children.length >= 2 &&
-					node.children[0].type === 'control' && (node.children[0] as RtfControl).word === '*';
-				if (hasStarDest) {
-					const dest = node.children.find(
-						(n) => n.type === 'control' && n.word !== '*'
-					) as RtfControl | undefined;
-
-					// Word wraps pictures in {\*\shppict{\pict …}} — descend into it
-					// rather than dropping the picture with the rest of the ignorables.
-					if (dest?.word === 'shppict') {
-						stateStack.push(cloneState());
-						walk(node.children);
-						stateStack.pop();
-					} else if (dest?.word === 'inkcap') {
-						// Marks the paragraph that follows as a picture caption.
-						paragraphIsCaption = true;
-					}
-					continue;
-				}
-
-				stateStack.push(cloneState());
-				walk(node.children);
-				stateStack.pop();
-			} else if (node.type === 'control') {
-				const state = currentState();
-				const w = node.word;
-				const p = node.param;
-
-				switch (w) {
-					case 'b':
-						state.bold = p !== 0;
-						break;
-					case 'i':
-						state.italic = p !== 0;
-						break;
-					case 'ul':
-					case 'ulnone':
-						state.underline = w === 'ul' && p !== 0;
-						break;
-					case 'strike':
-						state.strike = p !== 0;
-						break;
-					case 'super':
-						state.super_ = true;
-						state.sub = false;
-						break;
-					case 'sub':
-						state.sub = true;
-						state.super_ = false;
-						break;
-					case 'nosupersub':
-						state.super_ = false;
-						state.sub = false;
-						break;
-					case 'fs':
-						if (p != null) state.fontSize = p;
-						break;
-					case 'cf':
-						if (p != null) state.colorIndex = p;
-						break;
-					case 'cb':
-						break; // \cb not rendered on import
-					case 'highlight':
-						if (p != null) state.highlightIndex = p;
-						break;
-					case 'f':
-						if (p != null) state.fontIndex = p;
-						break;
-					case 'ql':
-						currentAlign = 'left';
-						break;
-					case 'qr':
-						currentAlign = 'right';
-						break;
-					case 'qc':
-						currentAlign = 'center';
-						break;
-					case 'qj':
-						currentAlign = 'justify';
-						break;
-					case 'li':
-						state.leftIndent = p ?? 0;
-						break;
-					case 'ri':
-						state.rightIndent = p ?? 0;
-						break;
-					case 'fi':
-						state.firstLineIndent = p ?? 0;
-						break;
-					case 'par':
-						if (!inTableCell) flushParagraph();
-						break;
-					case 'trowd':
-						currentRowCells = [];
-						currentRowIsHeader = false;
-						currentRowCellRights = [];
-						pendingBottomBorder = false;
-						break;
-					case 'trgaph':
-					case 'trkeep':
-					case 'trleft':
-					case 'trhdr':
-					case 'clbrdrr':
-					case 'clbrdrl':
-					case 'clbrdrt':
-						pendingBottomBorder = false;
-						break; // table formatting, ignored
-					case 'clbrdrb':
-						pendingBottomBorder = true;
-						break;
-					case 'brdrnone':
-					case 'brdrnil':
-						pendingBottomBorder = false;
-						break;
-					case 'brdrs':
-					case 'brdrdb':
-					case 'brdrth':
-					case 'brdrdot':
-					case 'brdrdash':
-						if (pendingBottomBorder) currentRowIsHeader = true;
-						pendingBottomBorder = false;
-						break;
-					case 'cellx':
-						if (p != null) currentRowCellRights.push(p);
-						break;
-					case 'intbl':
-						inTableCell = true;
-						break;
-					case 'cell':
-						currentRowCells.push(currentParagraph.trim());
-						currentRowCellAligns.push(currentAlign);
-						currentParagraph = '';
-						paragraphHasText = false;
-						currentAlign = 'left';
-						break;
-					case 'row':
-						tableRows.push({ cells: currentRowCells, isHeader: currentRowIsHeader, cellRights: currentRowCellRights, cellAligns: currentRowCellAligns });
-						currentRowCells = [];
-						currentRowIsHeader = false;
-						currentRowCellRights = [];
-						currentRowCellAligns = [];
-						inTableCell = false;
-						// The cell's indents end with the table, in whichever group set them:
-						// \row may sit in a group of its own ({\row}).
-						stateStack.forEach(resetIndents);
-						break;
-					case 'pard':
-						state.bold = false;
-						state.italic = false;
-						state.underline = false;
-						state.strike = false;
-						currentAlign = 'left';
-						resetIndents(state);
-						break;
-					case 'line':
-						currentParagraph += '<br>';
-						paragraphHasText = true;
-						break;
-					case 'tab':
-						// A real tab, in the shape the editor's Tab key inserts, so it shows as
-						// one and is written back as \tab (an em space came back as \u8195).
-						// After a list marker ("\bullet\tab", "1.\tab") the gap stays an em
-						// space: lists are read as plain lines, and a full tab there is too wide.
-						currentParagraph += LIST_MARKER.test(currentParagraph) ? '&emsp;' : TAB_HTML;
-						paragraphHasText = true;
-						break;
-					case 'pntext':
-					case 'listtext':
-						state.inList = true;
-						paragraphHasListMarker = true;
-						break;
-					case 'u': {
-						if (p != null) {
-							let codePoint = p;
-							if (codePoint < 0) codePoint += 65536;
-							currentParagraph += wrapText(String.fromCodePoint(codePoint), state);
-							paragraphHasText = true;
-							pendingUnicodeSkip = state.ucSkip ?? 1;
-						}
-						break;
-					}
-					case 'uc':
-						if (p != null) {
-							state.ucSkip = p;
-						}
-						break;
-					case 'plain':
-						state.bold = false;
-						state.italic = false;
-						state.underline = false;
-						state.strike = false;
-						state.super_ = false;
-						state.sub = false;
-						state.fontSize = 24;
-						state.colorIndex = 0;
-						state.highlightIndex = 0;
-						state.fontIndex = 0;
-						break;
-					case 'page':
-						flushParagraph();
-						pushParagraph('<hr>', 'left');
-						break;
-					case 'emspace':
-					case 'enspace':
-						currentParagraph += '&emsp;';
-						paragraphHasText = true;
-						break;
-					case 'emdash':
-						currentParagraph += '—';
-						paragraphHasText = true;
-						break;
-					case 'endash':
-						currentParagraph += '–';
-						paragraphHasText = true;
-						break;
-					case 'lquote':
-						currentParagraph += '\u2018';
-						paragraphHasText = true;
-						break;
-					case 'rquote':
-						currentParagraph += '\u2019';
-						paragraphHasText = true;
-						break;
-					case 'ldblquote':
-						currentParagraph += '\u201C';
-						paragraphHasText = true;
-						break;
-					case 'rdblquote':
-						currentParagraph += '\u201D';
-						paragraphHasText = true;
-						break;
-					case 'bullet':
-						currentParagraph += '\u2022';
-						paragraphHasText = true;
-						break;
-					default:
-						break;
-				}
-			} else if (node.type === 'text') {
-				if (skipDepth > 0) continue;
-				const state = currentState();
-				if (pendingUnicodeSkip > 0) {
-					const skipCount = Math.min(pendingUnicodeSkip, node.value.length);
-					pendingUnicodeSkip -= skipCount;
-					const remainder = node.value.slice(skipCount);
-					if (remainder) {
-						currentParagraph += wrapText(remainder, state);
-						if (/[^\s]/.test(remainder)) paragraphHasText = true;
-					}
-					continue;
-				}
-				currentParagraph += wrapText(node.value, state);
-				if (/[^\s]/.test(node.value)) paragraphHasText = true;
+			if (firstCtrl && destinationWords.has(firstCtrl.word)) {
+				continue;
 			}
+
+			const hasStarDest = node.children.length >= 2 &&
+				node.children[0].type === 'control' && (node.children[0] as RtfControl).word === '*';
+			if (hasStarDest) {
+				const dest = node.children.find(
+					(n) => n.type === 'control' && n.word !== '*'
+				) as RtfControl | undefined;
+
+				// Word wraps pictures in {\*\shppict{\pict …}} — descend into it
+				// rather than dropping the picture with the rest of the ignorables.
+				if (dest?.word === 'shppict') {
+					enterGroup(node, cloneState());
+				} else if (dest?.word === 'inkcap') {
+					// Marks the paragraph that follows as a picture caption.
+					paragraphIsCaption = true;
+				} else if (dest?.word === 'nesttableprops') {
+					// Word ends each row of a table inside a cell with this group, which holds
+					// the row's definition and its \nestrow.
+					nestTabPending = false;
+					cellBreaks++;
+				}
+				continue;
+			}
+
+			const state = cloneState();
+			// {\field{\*\fldinst HYPERLINK "…"}{\fldrslt text}}: the text is a link, if the
+			// address is one the writer would write.
+			if (firstCtrl?.word === 'field') {
+				const href = fieldLink(node);
+				if (href) state.link = href;
+			}
+			enterGroup(node, state);
+		} else if (node.type === 'control') {
+			const state = currentState();
+			const w = node.word;
+			const p = node.param;
+
+			switch (w) {
+				case 'b':
+					state.bold = p !== 0;
+					break;
+				case 'i':
+					state.italic = p !== 0;
+					break;
+				case 'ul':
+				case 'ulnone':
+					state.underline = w === 'ul' && p !== 0;
+					break;
+				case 'strike':
+					state.strike = p !== 0;
+					break;
+				case 'super':
+					state.super_ = true;
+					state.sub = false;
+					break;
+				case 'sub':
+					state.sub = true;
+					state.super_ = false;
+					break;
+				case 'nosupersub':
+					state.super_ = false;
+					state.sub = false;
+					break;
+				case 'fs':
+					if (p != null) state.fontSize = p;
+					break;
+				case 'cf':
+					if (p != null) state.colorIndex = p;
+					break;
+				case 'cb':
+					break; // \cb not rendered on import
+				case 'highlight':
+					if (p != null) state.highlightIndex = p;
+					break;
+				case 'f':
+					if (p != null) state.fontIndex = p;
+					break;
+				case 'ql':
+					currentAlign = 'left';
+					break;
+				case 'qr':
+					currentAlign = 'right';
+					break;
+				case 'qc':
+					currentAlign = 'center';
+					break;
+				case 'qj':
+					currentAlign = 'justify';
+					break;
+				case 'li':
+					state.leftIndent = p ?? 0;
+					break;
+				case 'ri':
+					state.rightIndent = p ?? 0;
+					break;
+				case 'fi':
+					state.firstLineIndent = p ?? 0;
+					break;
+				case 'par':
+				case 'sect':
+					// \sect ends a section, and with it the paragraph: "A\sect B" is two lines.
+					if (inTableCell) {
+						cellBreaks++;
+					} else {
+						// Paragraph marks from a cell that \pard has since left end paragraphs too.
+						for (; cellBreaks > 0; cellBreaks--) flushParagraph();
+						flushParagraph();
+					}
+					break;
+				case 'trowd':
+					// A row's definition, not its start: Word writes the definition before the
+					// cells and again before \row, so the cells read so far are kept.
+					currentRowDefs = [];
+					pendingDef = newCellDef();
+					pendingSide = null;
+					cellBorders = { b: false, other: false };
+					break;
+				case 'trgaph':
+				case 'trkeep':
+				case 'trleft':
+				case 'trhdr':
+					pendingSide = null;
+					break; // table formatting, ignored
+				case 'clbrdrr':
+				case 'clbrdrl':
+				case 'clbrdrt':
+					pendingSide = 'other';
+					break;
+				case 'clbrdrb':
+					pendingSide = 'b';
+					break;
+				case 'brdrnone':
+				case 'brdrnil':
+					pendingSide = null;
+					break;
+				// Every border style RTF names: any of them makes the side a border.
+				case 'brdrs':
+				case 'brdrdb':
+				case 'brdrth':
+				case 'brdrsh':
+				case 'brdrdot':
+				case 'brdrdash':
+				case 'brdrhair':
+				case 'brdrdashsm':
+				case 'brdrdashd':
+				case 'brdrdashdd':
+				case 'brdrdashdotstr':
+				case 'brdrtriple':
+				case 'brdrtnthsg':
+				case 'brdrthtnsg':
+				case 'brdrtnthtnsg':
+				case 'brdrtnthmg':
+				case 'brdrthtnmg':
+				case 'brdrtnthtnmg':
+				case 'brdrtnthlg':
+				case 'brdrthtnlg':
+				case 'brdrtnthtnlg':
+				case 'brdrwavy':
+				case 'brdrwavydb':
+				case 'brdremboss':
+				case 'brdrengrave':
+				case 'brdroutset':
+				case 'brdrinset':
+					if (pendingSide) cellBorders[pendingSide] = true;
+					pendingSide = null;
+					break;
+				case 'clvmgf':
+					pendingDef.vmgf = true;
+					break;
+				case 'clvmrg':
+					pendingDef.vmrg = true;
+					break;
+				case 'clmgf':
+					pendingDef.hmgf = true;
+					break;
+				case 'clmrg':
+					pendingDef.hmrg = true;
+					break;
+				case 'cellx':
+					if (p != null) {
+						pendingDef.right = p;
+						pendingDef.header = cellBorders.b && !cellBorders.other;
+						currentRowDefs.push(pendingDef);
+					}
+					pendingDef = newCellDef();
+					pendingSide = null;
+					cellBorders = { b: false, other: false };
+					break;
+				case 'intbl':
+					inTableCell = true;
+					break;
+				case 'cell':
+					if (pendingHighSurrogate) {
+						pendingHighSurrogate = 0;
+						pushText('\ufffd', state);
+					}
+					currentRowCells.push({ html: trimSpaces(renderRuns(runs)), align: currentAlign });
+					runs = [];
+					marker = null;
+					currentAlign = 'left';
+					// The paragraph mark that ends a cell's last paragraph adds no line.
+					cellBreaks = 0;
+					nestTabPending = false;
+					break;
+				case 'nestcell':
+					// A table inside a cell is read as lines of text in that cell: its cells a
+					// tab apart, each of its rows a line. The writer sends one the same way.
+					nestTabPending = true;
+					break;
+				case 'nestrow':
+					nestTabPending = false;
+					cellBreaks++;
+					break;
+				case 'row': {
+					// Text after the row's last \cell is a cell that was not closed, not the
+					// start of the paragraph after the table.
+					if (trimSpaces(renderRuns(runs))) {
+						currentRowCells.push({ html: trimSpaces(renderRuns(runs)), align: currentAlign });
+						runs = [];
+						marker = null;
+					}
+					// A row with no definition of its own repeats the one before it.
+					const defs = currentRowDefs.length > 0 ? currentRowDefs : lastRowDefs;
+					tableRows.push({ cells: currentRowCells, defs });
+					lastRowDefs = defs;
+					currentRowCells = [];
+					currentRowDefs = [];
+					pendingDef = newCellDef();
+					inTableCell = false;
+					cellBreaks = 0;
+					nestTabPending = false;
+					// The cell's indents end with the table, in whichever group set them:
+					// \row may sit in a group of its own ({\row}).
+					stateStack.forEach(resetIndents);
+					break;
+				}
+				case 'pard':
+					// \pard resets the paragraph, not the characters: bold, italic, underline
+					// and strikethrough carry on until \plain or their own \b0. Word relies on it.
+					currentAlign = 'left';
+					resetIndents(state);
+					// Being in a table is a paragraph property too. Without this, one \intbl with
+					// no \row made a single cell of the rest of the document. The marker group
+					// of a list item ({\listtext\pard …}) resets only itself. Between a row's
+					// first \cell and its \row the table goes on whatever \pard says: a writer
+					// that leaves \intbl out there still means the next cell.
+					if (!state.inList && currentRowCells.length === 0) inTableCell = false;
+					break;
+				case 'line':
+					appendHtml('br', '<br>', state);
+					break;
+				case 'tab':
+					appendTab(state);
+					break;
+				case 'pntext':
+				case 'listtext':
+					state.inList = true;
+					paragraphHasListMarker = true;
+					break;
+				case 'u': {
+					if (p != null) {
+						pendingUnicodeSkip = state.ucSkip ?? 1;
+						// \uN is a signed 16-bit number; some writers give the code point itself.
+						const code = p < 0 ? p + 65536 : p;
+						if (code <= 0 || code > 0x10ffff) break; // no character: a NUL, or out of range
+						if (code >= 0xd800 && code <= 0xdbff) {
+							// The first half of a pair: one character with the \u that follows.
+							if (pendingHighSurrogate) appendText('\ufffd', state);
+							pendingHighSurrogate = code;
+						} else if (code >= 0xdc00 && code <= 0xdfff) {
+							const high = pendingHighSurrogate;
+							pendingHighSurrogate = 0;
+							appendText(high ? String.fromCharCode(high, code) : '\ufffd', state);
+						} else {
+							appendText(String.fromCodePoint(code), state);
+						}
+					}
+					break;
+				}
+				case 'uc':
+					if (p != null) {
+						state.ucSkip = Math.max(0, p);
+					}
+					break;
+				case 'plain':
+					state.bold = false;
+					state.italic = false;
+					state.underline = false;
+					state.strike = false;
+					state.super_ = false;
+					state.sub = false;
+					state.fontSize = 24;
+					state.colorIndex = 0;
+					state.highlightIndex = 0;
+					state.fontIndex = defaultFont;
+					break;
+				case 'page':
+					// A page break. On screen it is a rule; the writer sends it back as \page.
+					if (inTableCell) {
+						cellBreaks++;
+						break;
+					}
+					for (; cellBreaks > 0; cellBreaks--) flushParagraph();
+					if (runs.length > 0) flushParagraph();
+					flushTable();
+					blocks.push({ kind: 'rule', pageBreak: true });
+					break;
+				case 'emspace':
+				case 'enspace':
+					appendHtml('gap', '&emsp;', state);
+					break;
+				case 'emdash':
+					appendText('\u2014', state);
+					break;
+				case 'endash':
+					appendText('\u2013', state);
+					break;
+				case 'lquote':
+					appendText('\u2018', state);
+					break;
+				case 'rquote':
+					appendText('\u2019', state);
+					break;
+				case 'ldblquote':
+					appendText('\u201C', state);
+					break;
+				case 'rdblquote':
+					appendText('\u201D', state);
+					break;
+				case 'bullet':
+					appendText('\u2022', state);
+					break;
+				default:
+					break;
+			}
+		} else {
+			const state = currentState();
+			if (pendingUnicodeSkip > 0) {
+				// The characters after \uN that stand in for it where Unicode is not read.
+				if (node.hex) {
+					pendingUnicodeSkip--;
+					continue;
+				}
+				const skipCount = Math.min(pendingUnicodeSkip, node.value.length);
+				pendingUnicodeSkip -= skipCount;
+				appendText(node.value.slice(skipCount), state);
+				continue;
+			}
+			appendText(node.value, state);
 		}
 	}
 
-	walk(rootGroup.children);
+	if (pendingHighSurrogate) {
+		pendingHighSurrogate = 0;
+		pushText('\ufffd', currentState());
+	}
+	// A row the file ends in the middle of, with cells and no \row, is still a row.
+	if (currentRowCells.length > 0) {
+		tableRows.push({ cells: currentRowCells, defs: currentRowDefs.length > 0 ? currentRowDefs : lastRowDefs });
+		currentRowCells = [];
+		inTableCell = false;
+	}
 	flushTable(); // flush any trailing table rows
 	// Only flush if there's actually pending content — the final \par in most RTF
 	// files already flushed the last paragraph, so an unconditional call here
 	// would push a spurious empty paragraph that becomes a trailing <p><br></p>.
-	if (currentParagraph || paragraphHasText) {
+	if (runs.length > 0) {
 		flushParagraph();
 	}
 
-	// Build final HTML from paragraphs (collapse repeated empty lines)
-	const rendered: string[] = [];
-	const trimmedParagraphs = paragraphs.map((p) => p.trim());
-	const isListLine = (text: string) => /^[-\u2022]/.test(text.replace(/^&emsp;+/g, ''));
+	// ── Building the HTML ──
 
-	for (let i = 0; i < trimmedParagraphs.length; i++) {
-		const trimmed = trimmedParagraphs[i];
-		const align = paragraphAligns[i] ?? 'left';
+	/** Each block as an ordinary paragraph's content: what it is unless it turns out to be more. */
+	const plain = blocks.map((b) => (b.kind === 'paragraph' ? trimSpaces(renderRuns(b.runs)) : b.kind === 'table' ? b.html : '<hr>'));
+
+	/**
+	 * A list item as the writer sends one: a bullet or "N.", a tab, and a paragraph that hangs by
+	 * 360 twips with nothing else set. Only that shape is rebuilt as <ul> or <ol>, because only
+	 * that shape is written back the same. A line someone typed with a dash or a bullet, a list
+	 * hung by another distance, lettered or centered, stays the paragraph it is, marker and all.
+	 */
+	interface ListItem {
+		kind: 'ul' | 'ol';
+		number: number;
+		left: number;
+		html: string;
+	}
+	const items: (ListItem | null)[] = blocks.map((b) => {
+		if (b.kind !== 'paragraph' || !b.marker || b.inTable || b.caption) return null;
+		if (b.first !== -LIST_HANG || b.left < LIST_HANG || b.right !== 0 || b.align !== 'left') return null;
+		return {
+			kind: b.marker.kind,
+			number: b.marker.number,
+			left: b.left,
+			html: trimSpaces(renderRuns(b.runs.slice(b.marker.end)))
+		};
+	});
+
+	/** Consecutive list items as nested <ul> and <ol>, one string per list at the top level. */
+	function renderLists(list: ListItem[]): string[] {
+		const out: string[] = [];
+		let html = '';
+		const open: { kind: 'ul' | 'ol'; left: number; next: number }[] = [];
+		const closeList = () => {
+			const done = open.pop()!;
+			html += `</li></${done.kind}>`;
+			if (open.length === 0) {
+				out.push(html);
+				html = '';
+			}
+		};
+		for (const item of list) {
+			// A smaller indent ends the lists nested deeper than it.
+			while (open.length > 0 && item.left < open[open.length - 1].left) closeList();
+			const top = open[open.length - 1];
+			if (top && item.left === top.left && item.kind === top.kind && (item.kind === 'ul' || item.number === top.next)) {
+				html += '</li><li>';
+				top.next = item.number + 1;
+			} else {
+				// A change from bullets to numbers, or a number out of sequence, is a new list
+				// in the same place.
+				if (top && item.left === top.left) closeList();
+				const parent = open[open.length - 1];
+				// What the indent adds to the half inch a list level has by itself.
+				const margin = item.left - (parent ? parent.left : 0) - LIST_STEP;
+				const style = margin !== 0 ? ` style="margin-left:${twipsToPt(margin)}"` : '';
+				const start = item.kind === 'ol' && item.number !== 1 ? ` start="${item.number}"` : '';
+				html += `<${item.kind}${start}${style}><li>`;
+				open.push({ kind: item.kind, left: item.left, next: item.number + 1 });
+			}
+			html += item.html || '<br>';
+		}
+		while (open.length > 0) closeList();
+		return out;
+	}
+
+	/** Whether a paragraph is a heading or a code block, from the formatting of all its text. */
+	function classify(b: ParagraphBlock): { tag: 'h1' | 'h2' | 'h3'; options: RenderOptions } | { tag: 'pre' } | null {
+		const visible = b.runs.filter((r): r is Extract<Run, { type: 'text' }> => r.type === 'text' && !ONLY_SPACES.test(r.text));
+		if (visible.length === 0 || b.runs.some((r) => r.type === 'html' && r.kind === 'img')) return null;
+		// The size must be the whole paragraph's: one large word does not make a heading.
+		const size = visible[0].fmt.fontSize;
+		if (visible.some((r) => r.fmt.fontSize !== size)) return null;
+		if (size === preSize && visible.every((r) => r.fmt.mono)) return { tag: 'pre' };
+		if (size === bodySize) return null;
+		const allBold = visible.every((r) => r.fmt.bold);
+		// At the default 12 pt, size alone makes a heading, as it always has. At
+		// another screen size, ordinary 12 pt text can be a step above the body,
+		// so a heading must also be bold, as every heading the writer emits is.
+		if (bodySize !== 24 && !allBold) return null;
+		// Compared in half-points, rounded the way the writer rounds them, so
+		// a heading written at any body size is read back as the same level.
+		for (const tag of ['h1', 'h2', 'h3'] as const) {
+			const nominal = Math.round(bodySize * HEADING_SCALE[tag]);
+			// The heading's own size and bold are the element's: only a size that differs
+			// from it is kept inside.
+			if (size >= nominal) return { tag, options: { dropSize: nominal, dropBold: true } };
+		}
+		return null;
+	}
+
+	const rendered: string[] = [];
+	// A typed line that starts with a dash or a bullet; a rebuilt list item is not one.
+	const isListLine = (i: number) =>
+		i >= 0 && i < plain.length && !items[i] && /^[-\u2022]/.test(plain[i].replace(/^&emsp;+/g, ''));
+
+	for (let i = 0; i < blocks.length; i++) {
+		const block = blocks[i];
+		const trimmed = plain[i];
+
+		if (block.kind === 'rule') {
+			rendered.push(block.pageBreak ? '<hr style="break-after:page">' : '<hr>');
+			continue;
+		}
+		if (block.kind === 'table') {
+			rendered.push(trimmed);
+			continue;
+		}
+
+		if (items[i]) {
+			const list: ListItem[] = [];
+			for (; i < blocks.length && items[i]; i++) list.push(items[i]!);
+			i--;
+			rendered.push(...renderLists(list));
+			continue;
+		}
+
+		const align = block.align;
 		// The paragraph's style attribute: its alignment, then its indents.
-		const blockStyle = [align !== 'left' ? `text-align:${align}` : '', paragraphIndents[i] ?? '']
+		const blockStyle = [align !== 'left' ? `text-align:${align}` : '', block.inTable ? '' : indentStyle(block)]
 			.filter(Boolean)
 			.join(';');
 		const styleAttr = blockStyle ? ` style="${blockStyle}"` : '';
-		const prev = i > 0 ? trimmedParagraphs[i - 1] : '';
-		const next = i + 1 < trimmedParagraphs.length ? trimmedParagraphs[i + 1] : '';
 
 		if (!trimmed) {
-			if (isListLine(prev) && isListLine(next)) {
+			if (isListLine(i - 1) && isListLine(i + 1)) {
 				continue;
 			}
 			const last = rendered[rendered.length - 1];
@@ -998,17 +1786,18 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			continue;
 		}
 
-		if (trimmed === '<hr>') {
+		// The rule the writer sends for <hr>: a centered line of em dashes, and nothing else.
+		if (
+			align === 'center' &&
+			block.runs.every((r) => r.type === 'text' && !r.fmt.bold && !r.fmt.italic && !r.fmt.underline && !r.fmt.strike && !r.fmt.link) &&
+			block.runs.map((r) => (r.type === 'text' ? r.text : '')).join('') === RULE_DASHES
+		) {
 			rendered.push('<hr>');
-			continue;
-		}
-		if (trimmed.startsWith('<table')) {
-			rendered.push(trimmed);
 			continue;
 		}
 
 		// A paragraph tagged by {\*\inkcap} is the description of the figure above it.
-		if (paragraphCaptions[i]) {
+		if (block.caption) {
 			const last = rendered.length - 1;
 			if (last >= 0 && rendered[last].startsWith('<figure') && !rendered[last].includes('<figcaption')) {
 				rendered[last] = rendered[last].replace(
@@ -1022,39 +1811,40 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		// A paragraph holding nothing but pictures becomes a figure, so it can carry
 		// a caption and be aligned/resized as a unit in the editor.
 		if (IMAGE_ONLY_PARAGRAPH.test(trimmed)) {
-			const figureStyle = [align !== 'left' ? `text-align:${align}` : '', paragraphFigureIndents[i] ?? '']
+			const figureStyle = [align !== 'left' ? `text-align:${align}` : '', block.inTable ? '' : figureIndentStyle(block)]
 				.filter(Boolean)
 				.join(';');
 			rendered.push(`<figure${figureStyle ? ` style="${figureStyle}"` : ''}>${trimmed}</figure>`);
 			continue;
 		}
-		const sizeMatch = trimmed.match(/font-size:\s*([\d.]+)pt/);
-		if (sizeMatch) {
-			// Compared in half-points, rounded the way the writer rounds them, so
-			// a heading written at any body size is read back as the same level.
-			const halfPoints = Math.round(parseFloat(sizeMatch[1]) * 2);
-			const atLeast = (scale: number) => halfPoints >= Math.round(bodySize * scale);
-			// At the default 12 pt, size alone makes a heading, as it always has. At
-			// another screen size, ordinary 12 pt text can be a step above the body,
-			// so a heading must also be bold, as every heading the writer emits is.
-			const looksLikeHeading = bodySize === 24 || /^<strong>/.test(trimmed);
-			if (looksLikeHeading && atLeast(HEADING_SCALE.h1)) { rendered.push(`<h1${styleAttr}>${stripSizeSpan(trimmed)}</h1>`); continue; }
-			if (looksLikeHeading && atLeast(HEADING_SCALE.h2)) { rendered.push(`<h2${styleAttr}>${stripSizeSpan(trimmed)}</h2>`); continue; }
-			if (looksLikeHeading && atLeast(HEADING_SCALE.h3)) { rendered.push(`<h3${styleAttr}>${stripSizeSpan(trimmed)}</h3>`); continue; }
+
+		const kind = classify(block);
+		if (kind?.tag === 'pre') {
+			// A code block keeps its spaces, and is written back with a left indent only.
+			const left = block.inTable ? 0 : Math.max(0, block.left);
+			const preStyle = left > 0 ? ` style="margin-left:${twipsToPt(left)}"` : '';
+			rendered.push(`<pre${preStyle}>${renderRuns(block.runs, { pre: true, dropSize: preSize })}</pre>`);
+			continue;
+		}
+		if (kind) {
+			// A heading is bold throughout, on screen and when it is written again, so its
+			// pieces are joined as if they all were: what differed only in bold is one piece.
+			const bold: Run[] = [];
+			for (const run of block.runs) {
+				const fmt = { ...run.fmt, bold: true };
+				const last = bold[bold.length - 1];
+				if (run.type === 'text' && last?.type === 'text' && sameFormat(last.fmt, fmt)) last.text += run.text;
+				else bold.push({ ...run, fmt });
+			}
+			rendered.push(`<${kind.tag}${styleAttr}>${trimSpaces(renderRuns(bold, kind.options))}</${kind.tag}>`);
+			continue;
 		}
 		rendered.push(`<p${styleAttr}>${trimmed}</p>`);
 	}
 
 	const output = rendered.join('\n');
 
-	// fontTable is parsed (for future font rendering) but not yet used in output
-	void fontTable;
-
 	return output || '<p></p>';
-}
-
-function stripSizeSpan(html: string): string {
-	return html.replace(/^<span style="[^"]*font-size:[^"]*">([\s\S]*)<\/span>$/, '$1');
 }
 
 /** Captions are written as italic text; <figcaption> supplies its own styling. */
@@ -1064,6 +1854,12 @@ function stripWrappingEm(html: string): string {
 
 export function readRtfFile(file: File, options: RtfReadOptions = {}): Promise<string> {
 	return new Promise((resolve, reject) => {
+		const maxBytes = options.maxBytes ?? DEFAULT_MAX_RTF_BYTES;
+		// Refused before it is read: reading is what takes the memory.
+		if (maxBytes > 0 && file.size > maxBytes) {
+			reject(new Error(`This file is too large to import: ${overLimit(file.size, maxBytes)}`));
+			return;
+		}
 		const reader = new FileReader();
 		reader.onload = () => {
 			try {

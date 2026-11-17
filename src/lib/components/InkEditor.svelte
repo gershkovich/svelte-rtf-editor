@@ -23,6 +23,8 @@
 	 *                   which is what bounds the RTF payload — it costs two hex
 	 *                   characters per byte. 0 disables. Default: 524288 (512 KB,
 	 *                   about 1 MB of document per image).
+	 *   maxRtfBytes   — The largest RTF file Import reads. Default: 52428800 (50 MB);
+	 *                   0 reads any size.
 	 *   fontFamily    — Font for the document, both on screen and in the RTF.
 	 *                   Default: 'Arial'.
 	 *   fontSize      — Body text size in points, both on screen and in the RTF.
@@ -52,7 +54,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
-	import { readRtfFile } from '../rtf-parser.js';
+	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
 		estimateRtfBytes,
@@ -97,6 +99,8 @@
 		maxImageEdge?: number;
 		maxImageBytes?: number;
 		maxImageDisplayWidth?: number;
+		/** The largest RTF file Import reads (readRtfFile's maxBytes); 0 for no limit. */
+		maxRtfBytes?: number;
 		fontFamily?: string;
 		fontSize?: number;
 		onchange?: (payload: ChangePayload) => void;
@@ -117,6 +121,7 @@
 		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
 		maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
 		maxImageDisplayWidth = DEFAULT_MAX_IMAGE_DISPLAY_WIDTH,
+		maxRtfBytes = DEFAULT_MAX_RTF_BYTES,
 		fontFamily = DEFAULT_FONT_FAMILY,
 		fontSize = DEFAULT_FONT_SIZE,
 		onchange,
@@ -1316,7 +1321,7 @@
 		importing = true;
 
 		try {
-			const html = await readRtfFile(file, { fontSize });
+			const html = await readRtfFile(file, { fontSize, maxBytes: maxRtfBytes });
 			if (editorEl) {
 				selectedImage = null;
 				documentReplaced();
@@ -1563,6 +1568,53 @@
 				if (!inline && getComputedStyle(el).getPropertyValue(prop) !== shown) el.style.setProperty(prop, value);
 			}
 			if (!el.getAttribute('style')) el.removeAttribute('style');
+		}
+		// A picture copied with its text comes in by address (<img src="https://…">), or as data in
+		// a format the RTF cannot carry (GIF, WebP, SVG) or larger than maxImageBytes. Only PNG or
+		// JPEG data held in the document reaches the RTF, so each one goes through the same step as
+		// the image dialog: fetched, converted and scaled as needed.
+		const pasted = Array.from(editorEl.querySelectorAll('img')).filter((img) => !before.has(img));
+		if (pasted.length > 0) void embedPastedImages(pasted);
+	}
+
+	/**
+	 * Fetch each pasted picture and hold its data in the document. One that cannot be fetched
+	 * (the site forbids it, or there is no network) still shows, but leaves in the RTF as an
+	 * "[Image: …]" placeholder: the editor says so now, rather than letting it be found downstream.
+	 */
+	async function embedPastedImages(images: HTMLImageElement[]): Promise<void> {
+		let failed = 0;
+		let changed = false;
+		// All at once, each with its own timeout, so one slow site does not hold up the rest.
+		await Promise.all(
+			images.map(async (img) => {
+				const url = img.getAttribute('src') || '';
+				if (!isSafeImageUrl(url)) {
+					failed++;
+					return;
+				}
+				const { src, embedded } = await urlToImageSrc(url, imageLimits());
+				// It may have been deleted or replaced while it was fetched.
+				if (!img.isConnected || img.getAttribute('src') !== url) return;
+				if (!embedded) {
+					failed++;
+				} else if (src !== url) {
+					img.setAttribute('src', src);
+					changed = true;
+				}
+			})
+		);
+		if (failed > 0) {
+			showError(
+				failed === 1
+					? 'A pasted image could not be embedded — it will export as a placeholder'
+					: `${failed} pasted images could not be embedded — they will export as placeholders`
+			);
+		}
+		if (changed) {
+			updateCounts();
+			fireChange();
+			if (autosave) scheduleAutoSave();
 		}
 	}
 
@@ -2030,6 +2082,13 @@
 		height: 1px;
 		background: var(--border, #e5e2dc);
 		margin: 32px 0;
+	}
+
+	/* A page break read from RTF (\page): a dashed rule, written back as \page. */
+	.ink-content :global(hr[style*='break-after']) {
+		height: 0;
+		background: none;
+		border-top: 1px dashed var(--text-muted, #8a7e72);
 	}
 
 	/* ── Status Bar ── */

@@ -47,7 +47,7 @@ describe('closing a format restores the enclosing one', () => {
 
 	it('a heading inside bold text does not end the bold after it', () => {
 		// 1.5.2 wrote the heading's \b0 unconditionally, so "ghi" arrived plain.
-		expect(body('<b>abc<h2>def</h2>ghi</b>')).toBe('\\b abc\\pard\\f0\\fs36\\b def\\fs24\\par ghi\\b0 }');
+		expect(body('<b>abc<h2>def</h2>ghi</b>')).toBe('\\b abc\\par \\pard\\f0\\fs36\\b def\\fs24\\par ghi\\b0 }');
 	});
 
 	it('superscript inside superscript, and code inside code, do not leak', () => {
