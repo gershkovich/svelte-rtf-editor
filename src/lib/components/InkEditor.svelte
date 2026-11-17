@@ -515,11 +515,14 @@
 
 		// The stop an earlier hang put at the old indent goes with that hang. Any other stop the
 		// paragraph has (data-rtf-tab-stops="1.75in,3.5in") is not this command's to remove.
+		// A tab stop counts from the page margin, as \tx does, while the indents above count from the
+		// block around the paragraph: a quotation or a pasted indent moves the stop with it.
+		const outer = surroundingIndentPx(block);
 		const hung = textIndentPx(block) < 0;
 		const stops = (stopsBefore ?? '')
 			.split(',')
 			.map((v) => v.trim())
-			.filter((v) => v && !(hung && Math.abs((lengthPx(v) ?? NaN) - left) < 0.5));
+			.filter((v) => v && !(hung && Math.abs((lengthPx(v) ?? NaN) - (outer + left)) < 0.5));
 		// tab-size shows one stop, the one at the hang: it goes when that stop does.
 		block.style.tabSize = '';
 		if (hang < 1) {
@@ -530,7 +533,8 @@
 			block.style.textIndent = `${-hang}px`;
 			if (tabBefore) {
 				block.style.tabSize = `${hang}px`;
-				if (!stops.some((v) => Math.abs((lengthPx(v) ?? NaN) - at) < 0.5)) stops.push(`${at}px`);
+				const stop = outer + at;
+				if (!stops.some((v) => Math.abs((lengthPx(v) ?? NaN) - stop) < 0.5)) stops.push(`${stop}px`);
 			}
 		}
 		if (stops.length > 0) block.setAttribute(TAB_STOPS, stops.join(','));
@@ -541,6 +545,20 @@
 		if (!wrapped && after === before && stopsAfter === stopsBefore) return;
 		indentUndo.push([{ el: block, before, after, wrapped, stops: { before: stopsBefore, after: stopsAfter } }]);
 		indentChanged();
+	}
+
+	/**
+	 * The left indent the RTF writer gives a paragraph from the blocks around it, in px: a pasted
+	 * indent's margin, a <div>'s margin, and a quotation's margin plus the half inch every
+	 * quotation is indented (rtf-writer's blockquote case).
+	 */
+	function surroundingIndentPx(block: HTMLElement): number {
+		let px = 0;
+		for (let a = block.parentElement; a && a !== editorEl; a = a.parentElement) {
+			if (a.tagName === 'BLOCKQUOTE') px += marginLeftPx(a) + (isIndentBlockquote(a) ? 0 : INDENT_STEP_PX);
+			else if (a.tagName === 'DIV') px += marginLeftPx(a);
+		}
+		return px;
 	}
 
 	/** Take away the paragraph wrapLooseLine made, leaving the loose line as it was. */
@@ -1810,8 +1828,9 @@
 			copy !important;
 	}
 
-	.ink-content.copy-format-pick :global(:is(p, h1, h2, h3, h4, h5, h6):hover),
-	.ink-content.copy-format-apply :global(:is(p, h1, h2, h3, h4, h5, h6):hover) {
+	/* A <div> line counts as a paragraph (isPlainParagraph) unless it holds other blocks. */
+	.ink-content.copy-format-pick :global(:is(p, h1, h2, h3, h4, h5, h6, div:not(:has(p, div, h1, h2, h3, h4, h5, h6, pre, ul, ol, blockquote, figure, table, hr))):hover),
+	.ink-content.copy-format-apply :global(:is(p, h1, h2, h3, h4, h5, h6, div:not(:has(p, div, h1, h2, h3, h4, h5, h6, pre, ul, ol, blockquote, figure, table, hr))):hover) {
 		background: var(--accent-soft, #ede9fe);
 		border-radius: 3px;
 	}

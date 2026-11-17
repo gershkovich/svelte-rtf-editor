@@ -151,6 +151,34 @@ describe('Hang at caret', () => {
 		expect(p.hasAttribute('style')).toBe(false);
 	});
 
+	it('inside a quotation, puts the tab stop where the RTF indent is, not half an inch short', () => {
+		// The writer indents a quotation's paragraphs 0.5 in (\li720 more), and \tx counts from the
+		// page margin, so the stop at the hang is the quotation's indent plus the hang.
+		const { editor, api } = open('<blockquote><p>A.<span style="white-space:pre">\t</span>text</p></blockquote>');
+		layout(148);
+		caretIn(editor, 'text', 0);
+		hang();
+		const p = editor.querySelector('p')!;
+		expect(p.getAttribute('style')).toBe('margin-left: 48px; text-indent: -48px; tab-size: 48px;');
+		expect(p.getAttribute('data-rtf-tab-stops')).toBe('96px');
+		expect(api.getRTF()).toContain('\\tx1440\\li1440\\fi-720 ');
+		// Hanging it again from the start of the line takes that stop away with the hang.
+		layout(100);
+		caretIn(editor, 'A.', 0);
+		hang();
+		expect(p.hasAttribute('data-rtf-tab-stops')).toBe(false);
+		expect(p.hasAttribute('style')).toBe(false);
+	});
+
+	it('inside a pasted indent, counts the indent around the paragraph in the tab stop', () => {
+		const { editor, api } = open('<blockquote style="margin: 0 0 0 40px; border: none; padding: 0px;"><p>A.<span style="white-space:pre">\t</span>text</p></blockquote>');
+		layout(148);
+		caretIn(editor, 'text', 0);
+		hang();
+		expect(editor.querySelector('p')!.getAttribute('data-rtf-tab-stops')).toBe('88px');
+		expect(api.getRTF()).toContain('\\tx1320\\li1320\\fi-720 ');
+	});
+
 	it('a new hang with no tab before the caret takes the earlier hang\'s stop with it', () => {
 		const { editor } = open('<p data-rtf-tab-stops="48px" style="margin-left: 48px; text-indent: -48px; tab-size: 48px;">A.<span style="white-space:pre">\t</span>text</p>');
 		layout(124);
