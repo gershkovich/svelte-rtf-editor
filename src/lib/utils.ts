@@ -71,10 +71,12 @@ function escapeMarkdown(text: string, ctx: MarkdownContext): string {
 
 /**
  * Code as a Markdown code span: fenced with more backticks than it holds, and in a table cell its
- * pipes escaped. A code span is one line, so a line break in it is a space, as Markdown reads it.
+ * pipes escaped. A line break in it is a space, which is how Markdown shows one in a code span:
+ * left as it is, an empty line would end the paragraph and the span with it, and the rest of the
+ * code would be read as Markdown and as HTML.
  */
 function codeSpan(code: string, ctx: MarkdownContext): string {
-	const line = code.replace(/\r\n|\r|\n/g, ' ');
+	const line = code.replace(/[\r\n]+/g, ' ');
 	const longest = Math.max(0, ...Array.from(line.matchAll(/`+/g), (m) => m[0].length));
 	const fence = '`'.repeat(longest + 1);
 	const pad = /^`|`$/.test(line) ? ' ' : '';
@@ -198,13 +200,15 @@ function emphasisFormat(mark: string, ctx: MarkdownContext): { inner: MarkdownCo
  * A finished line of text. White space at its ends shows as nothing and is dropped, and so is a
  * line break at its end. A line break inside it is one Markdown keeps: two spaces before the new
  * line. A second break in a row is an empty line, which Markdown would read as the end of the
- * paragraph (and of any bold running through it), so it is written as a <br> on a line of its own.
+ * paragraph (and of any bold running through it), so it is written as a <br> at the end of the
+ * line before it. Never on a line of its own: a line that holds one tag and nothing else opens a
+ * block of HTML, in which "\<" is no escape and the text after it is read as HTML.
  * Where the text must stay on one line (a table cell, a heading), every break is a <br>.
  */
 function finishLine(line: string, ctx: MarkdownContext): string {
 	const text = line.replace(/ *\n */g, '\n').replace(/^[ \n]+|[ \n]+$/g, '');
 	if (ctx.oneLine) return text.replace(/\n/g, '<br>');
-	return text.replace(/\n+/g, (breaks) => `  \n${'<br>\n'.repeat(breaks.length - 1)}`);
+	return text.replace(/\n+/g, (breaks) => `${'<br>'.repeat(breaks.length - 1)}  \n`);
 }
 
 /** End the line of text being written: loose text before a block is a paragraph of its own. */
@@ -288,10 +292,16 @@ function codeText(el: HTMLElement, ctx: MarkdownContext): string {
 function formatOf(el: HTMLElement, tag: string, ctx: MarkdownContext): { inner: MarkdownContext } & MarkdownFormat {
 	const plain = { key: '', inner: ctx, wrap: (text: string) => text };
 	const marked = (mark: string) => emphasisFormat(mark, ctx);
+	// What is written around the text goes around the text itself, and white space and line
+	// breaks at either end stay outside it. For an HTML tag this is what keeps the text text: a
+	// tag alone on a line opens a block of HTML, in which "\<" is no escape.
 	const around = (open: string, close: string) => ({
 		key: open + close,
 		inner: ctx,
-		wrap: (text: string) => (text.trim() ? `${open}${text}${close}` : text)
+		wrap: (text: string) => {
+			const [, lead, core, trail] = text.match(/^(\s*)([\s\S]*?)(\s*)$/)!;
+			return core ? `${lead}${open}${core}${close}${trail}` : text;
+		}
 	});
 	switch (tag) {
 		case 'strong':
@@ -548,10 +558,13 @@ function blockToMarkdown(el: HTMLElement, tag: string, ctx: MarkdownContext, out
 			break;
 		}
 		case 'pre': {
-			const code = codeText(el, ctx);
+			// A lone carriage return ends a line in Markdown too, and the lines of a code block
+			// are indented and quoted one by one: left in, it would start a line without the
+			// ">" or the indent, outside the block.
+			const code = codeText(el, ctx).replace(/\r\n?/g, '\n');
 			if (ctx.oneLine) {
 				// A table cell holds one line: each line of the block is a code span of its own.
-				const spans = code.split(/\r\n|\r|\n/).map((line) => (line ? codeSpan(line, ctx) : '')).join('<br>');
+				const spans = code.split('\n').map((line) => (line ? codeSpan(line, ctx) : '')).join('<br>');
 				if (spans) out.blocks.push(spans);
 				break;
 			}

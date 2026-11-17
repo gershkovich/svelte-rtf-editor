@@ -102,7 +102,7 @@ describe('lines made of <div> are paragraphs, and none becomes a heading', () =>
 	});
 
 	it('an empty line inside a paragraph is kept as one', () => {
-		expect(md('<p>above<br><br>below</p>')).toBe('above  \n<br>\nbelow\n\n');
+		expect(md('<p>above<br><br>below</p>')).toBe('above<br>  \nbelow\n\n');
 	});
 
 	it('a line break in a heading stays in the heading', () => {

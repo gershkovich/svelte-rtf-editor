@@ -76,3 +76,9 @@ should not be. Three things change for documents that already work, and are list
   renders. `- ` and `1. ` at the start of a list item, and `&copy;` typed as text, are escaped. A
   table's caption, text in a figure, and the blocks of a pasted page are written; hidden elements
   are not.
+- With the rule that code stays code (the changeset beside this one), three things are written
+  differently from what that changeset says. A code block inside a heading is a code span on the
+  heading's line, and inside bold text or a link it is the block alone, with no marks around it.
+  Underline around a quotation, a list or a table is written on the text inside, not dropped. An
+  empty line in a paragraph is a `<br>` at the end of the line before it, so no tag stands alone
+  on a line; `<ins>`, `<sup>` and `<sub>` go around the text itself as `<u>` does.
