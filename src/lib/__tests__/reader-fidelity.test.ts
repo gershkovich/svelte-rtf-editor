@@ -530,3 +530,16 @@ describe('deep nesting around many rows reads in time', () => {
 		expect(performance.now() - t0).toBeLessThan(2000);
 	});
 });
+
+describe('a numbered line written with a leading zero', () => {
+	it('"01.", "02." stay as typed instead of becoming a list that shows "1.", "2."', () => {
+		const html = rtfToHtml(R`{\rtf1\ansi \pard\li720\fi-360 01.\tab First\par \pard\li720\fi-360 02.\tab Second\par}`);
+		expect(html).not.toContain('<ol');
+		expect(html).toContain('01.');
+		expect(html).toContain('02.');
+	});
+
+	it('"1.", "2." still make a list', () => {
+		expect(rtfToHtml(R`{\rtf1\ansi \pard\li720\fi-360 1.\tab First\par \pard\li720\fi-360 2.\tab Second\par}`)).toContain('<ol>');
+	});
+});

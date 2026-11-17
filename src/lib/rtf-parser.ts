@@ -1061,8 +1061,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		const listed = lead != null ? lead.match(LIST_MARKER) : null;
 		if (listed) {
 			runs.push({ type: 'html', kind: 'gap', html: '&emsp;', fmt: formatOf(state) });
-			// (A number too long to be an item's number is text.)
-			if (opensParagraph && (!listed[1] || listed[1].length <= MAX_LIST_NUMBER_DIGITS)) {
+			// (A number too long to be an item's number is text, and so is one written with a
+			// leading zero, "01.": a list would show it as "1.".)
+			if (opensParagraph && (!listed[1] || (listed[1].length <= MAX_LIST_NUMBER_DIGITS && !/^0\d/.test(listed[1])))) {
 				marker = listed[1]
 					? { kind: 'ol', number: Number(listed[1]), end: runs.length }
 					: { kind: 'ul', number: 0, end: runs.length };
