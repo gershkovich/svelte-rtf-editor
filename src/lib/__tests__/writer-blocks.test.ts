@@ -235,3 +235,46 @@ describe('htmlToMarkdown: lists and headings', () => {
 		expect(md('<h4>a</h4><h5>b</h5><h6>c</h6>')).toBe('#### a\n\n##### b\n\n###### c\n\n');
 	});
 });
+
+describe('text typed straight into the editor before a block ends its own line', () => {
+	// Chromium leaves the first line typed into an empty editor as loose text, and the next line
+	// becomes the block: "Diagnosis:<ul>…". \pard resets the formatting but ends no paragraph, so
+	// without a \par the loose text ran into the block's first line.
+	const texts = (html: string) => Array.from(el(rtfToHtml(htmlToRtf(el(html)))).querySelectorAll('p, li, h1, h2, h3, pre, td'))
+		.map((e) => e.textContent?.replace(/\s+/g, ' ').trim());
+
+	it.each([
+		['a bullet list', 'Diagnosis:<ul><li>x</li></ul>', 'Diagnosis:\\par \\pard\\li720\\fi-360\\bullet\\tab x\\par '],
+		['a numbered list', 'Diagnosis:<ol><li>x</li></ol>', 'Diagnosis:\\par \\pard\\li720\\fi-360 1.\\tab x\\par '],
+		['a heading', 'Note<h2>Gross</h2>', 'Note\\par \\pard\\f0\\fs36\\b Gross\\b0\\fs24\\par '],
+		['an <h5>', 'Note<h5>Gross</h5>', 'Note\\par \\pard'],
+		['a code block', 'Note<pre>x</pre>', 'Note\\par \\pard'],
+		['a rule', 'Note<hr>', 'Note\\par \\pard\\qc'],
+		['a quotation', 'Note<blockquote><p>q</p></blockquote>', 'Note\\par \\i \\pard\\li720 q'],
+		['a table', 'Margins:<table><tr><td>a</td><td>b</td></tr></table>', 'Margins:\\par {\\trowd']
+	])('before %s', (_name, html, start) => {
+		expect(body(html).startsWith(start)).toBe(true);
+	});
+
+	it('and a save and reload keeps the line apart from the block', () => {
+		expect(texts('Diagnosis:<ul><li>x</li></ul>')).toEqual(['Diagnosis:', 'x']);
+		expect(texts('Margins:<table><tr><td>a</td><td>b</td></tr></table>')).toEqual(['Margins:', 'a', 'b']);
+		expect(texts('Note<h2>Gross</h2>Body')).toEqual(['Note', 'Gross', 'Body']);
+	});
+
+	it('inside a <div> and inside a table cell too', () => {
+		expect(texts('<div>Diagnosis:<ul><li>x</li></ul></div>')).toEqual(['Diagnosis:', 'x']);
+		expect(body('<table><tr><td>Result:<ul><li>x</li></ul></td></tr></table>')).toContain('Result:\\par \\pard\\intbl');
+	});
+
+	it('a block with nothing typed before it gets no blank line', () => {
+		expect(body('<ul><li>x</li></ul>')).toBe('\\pard\\li720\\fi-360\\bullet\\tab x\\par ');
+		expect(body('<p>a</p><h2>b</h2>')).not.toContain('\\par \\par ');
+	});
+
+	it('the size estimate still covers what is written', () => {
+		for (const html of ['Diagnosis:<ul><li>x</li></ul>', 'Note<h2>Gross</h2>', 'Margins:<table><tr><td>a</td></tr></table>', 'a<hr>b<pre>c</pre>d<figure></figure>']) {
+			expect(estimateRtfBytes(el(html))).toBeGreaterThanOrEqual(htmlToRtf(el(html)).length);
+		}
+	});
+});

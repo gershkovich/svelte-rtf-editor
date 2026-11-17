@@ -530,7 +530,7 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// one space.
 		if (tag === 'pre') total += ((el.textContent || '').match(/\r\n|\r|\n/g)?.length ?? 0) * 6;
 		// A paragraph that follows loose text first ends that text's line ("\par ").
-		if ((tag === 'p' || tag === 'div') && followsInlineContent(el)) total += 5;
+		if ((tag === 'p' || tag === 'div' || BREAKS_LOOSE_TEXT.has(tag)) && followsInlineContent(el)) total += 5;
 		// A paragraph a block writes inside a table cell also carries \intbl (6). A list
 		// writes one paragraph per item, so the item is counted, not the list.
 		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
@@ -775,9 +775,10 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 
 /**
  * One node as RTF. `restate` is off where the caller has already started the paragraph the node
- * goes in (a list item's lines).
+ * goes in (a list item's lines). `endLooseText` is off where the caller has already ended the
+ * line before a block (flowRtf).
  */
-function walkNode(node: Node, ctx: WalkContext, restate = true): string {
+function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = true): string {
 	let rtf = '';
 
 	if (node.nodeType === Node.TEXT_NODE) {
@@ -803,6 +804,13 @@ function walkNode(node: Node, ctx: WalkContext, restate = true): string {
 
 	const el = node as HTMLElement;
 	const tag = el.tagName.toLowerCase();
+	// Text typed straight into the parent before a block ("Diagnosis:<ul>…", the shape Chrome
+	// makes when the line after it becomes a list) has no paragraph of its own: it is ended here,
+	// or \pard would carry it into the block's first line. A <p> or <div>, and a table inside a
+	// cell, end it themselves.
+	if (endLooseText && BREAKS_LOOSE_TEXT.has(tag) && !(tag === 'table' && ctx.inTableCell) && followsInlineContent(el)) {
+		rtf += '\\par ';
+	}
 	// A picture directly under the root writes its own paragraph.
 	if (restate && !isBlock(el) && !(tag === 'img' && el.parentNode === ctx.root)) rtf += restateAfterBlock(el, ctx);
 
@@ -1160,7 +1168,7 @@ function flowRtf(nodes: Node[], ctx: WalkContext, first: string | null, plain: s
 		// before a list of its own, where the first marker shown is that list's.
 		if (marker && tag !== 'ul' && tag !== 'ol') rtf += `${marker}\\par `;
 		marker = null;
-		rtf += walkNode(el, ctx);
+		rtf += walkNode(el, ctx, true, false);
 	}
 	end();
 	// An empty item still shows its marker.
@@ -1297,6 +1305,9 @@ function isTrailingBreak(br: Node, ctx: WalkContext): boolean {
 		node = parent;
 	}
 }
+
+/** Blocks other than <p> and <div> that end the loose text before them (walkNode). */
+const BREAKS_LOOSE_TEXT = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'blockquote', 'pre', 'hr', 'ul', 'ol', 'li', 'figure']);
 
 /** A <p> or <div> with no content, or only a <br>: a blank line. */
 function isBlankLine(el: HTMLElement): boolean {
