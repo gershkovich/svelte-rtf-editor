@@ -330,3 +330,40 @@ describe('htmlToMarkdown: a table keeps its columns, and nothing becomes a link 
 		expect(md('<pre>```\nx</pre>')).toBe('````\n```\nx\n````\n\n');
 	});
 });
+
+describe('content that has already ended its line adds no blank line before a block', () => {
+	const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+	const blank = (html: string) => rtfToHtml(htmlToRtf(el(html))).includes('<p><br></p>');
+
+	it.each([
+		['a picture straight in the editor', `<p>a</p><img src="${PNG}"><ul><li>y</li></ul>`],
+		['a picture before a heading', `<img src="${PNG}"><h2>Gross</h2>`],
+		['a picture before a table', `<img src="${PNG}"><table><tr><td>a</td></tr></table>`],
+		['a Google Docs paste wrapper', '<b id="docs-internal-guid-1"><p>Diagnosis</p><ul><li>a</li></ul></b><ul><li>b</li></ul>'],
+		['a span around a paragraph', '<span><p>a</p></span><ul><li>b</li></ul>'],
+		['a span around a paragraph, before a paragraph', '<span><p>a</p></span><p>b</p>']
+	])('after %s', (_name, html) => {
+		expect(htmlToRtf(el(html))).not.toContain('\\par \\par ');
+		expect(blank(html)).toBe(false);
+	});
+
+	it('text before a block with a comment between them still ends its line', () => {
+		expect(body('Diagnosis:<!-- c --><ul><li>x</li></ul>').startsWith('Diagnosis:\\par \\pard')).toBe(true);
+	});
+});
+
+describe('htmlToMarkdown: what the second review found', () => {
+	it('a figure with no picture is a block of its own', () => {
+		expect(md('<figure>Just text</figure><p>next</p>')).toBe('Just text\n\nnext\n\n');
+		expect(md('<figure>Some text<figcaption>Cap</figcaption></figure>')).toBe('Some text\n\n*Cap*\n\n');
+	});
+
+	it('a tab the editor typed stays a tab', () => {
+		expect(md('<p>Specimen:<span style="white-space:pre">\t</span>Left breast</p>')).toBe('Specimen:\tLeft breast\n\n');
+	});
+
+	it('JPEG data labeled image/jpg, and data wrapped over lines, are kept as pictures', () => {
+		expect(md('<p><img src="data:image/jpg;base64,/9j/4AAQ" alt="j"></p>')).toBe('![j](data:image/jpg;base64,/9j/4AAQ)\n\n');
+		expect(md('<p><img src="data:image/png;base64,iVBO\nRw0K" alt="p"></p>')).toBe('![p](data:image/png;base64,iVBORw0K)\n\n');
+	});
+});

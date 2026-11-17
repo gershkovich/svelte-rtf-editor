@@ -37,7 +37,7 @@ function markdownUrl(url: string): string {
 function imageTarget(src: string): string | null {
 	const value = src.trim();
 	if (!value) return null;
-	if (/^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(value)) return value;
+	if (/^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(value)) return value.replace(/\s+/g, '');
 	if (/^https?:\/\//i.test(value) || !/^[a-z][a-z0-9+.-]*:/i.test(value)) return markdownUrl(value);
 	return null;
 }
@@ -118,8 +118,12 @@ function childrenToMarkdown(el: HTMLElement, ctx: MarkdownContext): string {
 
 	el.childNodes.forEach((node) => {
 		if (node.nodeType === Node.TEXT_NODE) {
-			// A line break in the HTML source shows as a space, as it does on screen.
-			md += escapeMarkdown((node.textContent || '').replace(/[ \t\r\n]+/g, ' '), ctx);
+			// A line break in the HTML source shows as a space, as it does on screen; where white
+			// space is kept (the editor's tab, <span style="white-space:pre">), it stays.
+			const text = node.textContent || '';
+			const kept = node.parentElement?.closest('[style*="white-space"]') as HTMLElement | null;
+			const keeps = kept !== null && /^pre/.test(kept.style.whiteSpace);
+			md += escapeMarkdown(keeps ? text : text.replace(/[ \t\r\n]+/g, ' '), ctx);
 			return;
 		}
 		if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -183,7 +187,10 @@ function childrenToMarkdown(el: HTMLElement, ctx: MarkdownContext): string {
 				const img = (node as Element).querySelector('img');
 				const caption = ((node as Element).querySelector('figcaption')?.textContent || '').trim();
 				if (img) md += `${imageToMarkdown(img.getAttribute('alt') || caption, img.getAttribute('src') || '', ctx)}\n\n`;
-				else md += childrenToMarkdown(node as HTMLElement, ctx);
+				else {
+					const held = childrenToMarkdown(node as HTMLElement, ctx);
+					if (held.trim()) md += held.endsWith('\n\n') ? held : `${held.replace(/\n*$/, '')}\n\n`;
+				}
 				if (caption) md += `*${escapeMarkdown(caption, ctx)}*\n\n`;
 				break;
 			}

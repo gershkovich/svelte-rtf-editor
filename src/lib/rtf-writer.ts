@@ -530,7 +530,7 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// one space.
 		if (tag === 'pre') total += ((el.textContent || '').match(/\r\n|\r|\n/g)?.length ?? 0) * 6;
 		// A paragraph that follows loose text first ends that text's line ("\par ").
-		if ((tag === 'p' || tag === 'div' || BREAKS_LOOSE_TEXT.has(tag)) && followsInlineContent(el)) total += 5;
+		if ((tag === 'p' || tag === 'div' || BREAKS_LOOSE_TEXT.has(tag)) && followsInlineContent(el, editorEl)) total += 5;
 		// A paragraph a block writes inside a table cell also carries \intbl (6). A list
 		// writes one paragraph per item, so the item is counted, not the list.
 		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
@@ -637,11 +637,11 @@ function cleanFontName(name: string | undefined): string {
 
 /**
  * Whether a font name is a monospace font's: Courier New, Consolas, Menlo, a "… Mono" family
- * (Roboto Mono, DejaVu Sans Mono) and the like. "mono" counts only as a word of its own, so
+ * (Roboto Mono, DejaVu Sans Mono), and their PostScript names (CourierNewPSMT, SFMono-Regular).
  * Monotype Corsiva is not one, and neither is American Typewriter, which is proportional.
  */
 export function isMonospaceFontName(name: string): boolean {
-	return /\bcourier\b|\bmono\b|\bmonospace\b|consolas|menlo|monaco|lucida console|lucida sans typewriter|\bocr[ -]?[ab]\b|source code|fira code|cascadia|jetbrains/.test(
+	return /courier|mono(?!type)|consolas|menlo|monaco|lucida ?console|lucida ?sans ?typewriter|ocr[ -]?[ab]\b|source ?code|fira ?code|cascadia|jetbrains/.test(
 		name.toLowerCase()
 	);
 }
@@ -814,7 +814,7 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 	// makes when the line after it becomes a list) has no paragraph of its own: it is ended here,
 	// or \pard would carry it into the block's first line. A <p> or <div>, and a table inside a
 	// cell, end it themselves.
-	if (endLooseText && BREAKS_LOOSE_TEXT.has(tag) && !(tag === 'table' && ctx.inTableCell) && followsInlineContent(el)) {
+	if (endLooseText && BREAKS_LOOSE_TEXT.has(tag) && !(tag === 'table' && ctx.inTableCell) && followsInlineContent(el, ctx.root)) {
 		rtf += '\\par ';
 	}
 	// A picture directly under the root writes its own paragraph.
@@ -849,7 +849,7 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 			// Text typed straight into the parent before this block ("abc<div>def</div>",
 			// the shape Chrome makes on Enter) has no paragraph of its own: end it here, or
 			// the two lines run together.
-			const afterLooseText = followsInlineContent(el);
+			const afterLooseText = followsInlineContent(el, ctx.root);
 			// A <div> that holds blocks (pasted content wraps paragraphs in one) is not a
 			// paragraph itself: each block inside writes its own \\pard, which would drop the
 			// div's indent, and the div's own \\par would add a blank line. Its left margin is
@@ -1253,7 +1253,7 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
  * rows a paragraph, its cells a tab apart. Every word is kept; the inner grid is not.
  */
 function nestedTableRtf(table: HTMLElement, ctx: WalkContext): string {
-	let rtf = followsInlineContent(table) ? '\\par ' : '';
+	let rtf = followsInlineContent(table, ctx.root) ? '\\par ' : '';
 	for (const row of tableRowsInOrder(table)) {
 		const cells = rowCells(row);
 		if (cells.length === 0) continue;
@@ -1320,18 +1320,34 @@ function isBlankLine(el: HTMLElement): boolean {
 	return el.childNodes.length === 0 || (el.childNodes.length === 1 && el.childNodes[0].nodeName === 'BR');
 }
 
+/** Collapsible whitespace or a comment: nothing that shows. */
+function showsNothing(node: Node): boolean {
+	return node.nodeType === Node.COMMENT_NODE || (node.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(node.textContent || ''));
+}
+
+/** Whether an inline element's content ends with a block, which has ended its own line. */
+function endsWithBlock(el: Node): boolean {
+	let last = el.lastChild;
+	while (last && showsNothing(last)) last = last.previousSibling;
+	if (!last || last.nodeType !== Node.ELEMENT_NODE) return false;
+	return isBlock(last) || endsWithBlock(last);
+}
+
 /**
- * Whether the nearest sibling before this element, skipping collapsible whitespace, is
- * text or an inline element: content with no paragraph of its own.
+ * Whether the nearest sibling before this element, skipping collapsible whitespace and comments,
+ * is text or an inline element: content with no paragraph of its own. Not when that content has
+ * already ended its line: a picture straight under `root` writes its own paragraph, and a wrapper
+ * whose last child is a block (Google Docs wraps a paste in <b id="docs-internal-guid-…">) ends
+ * with that block's.
  */
-function followsInlineContent(el: HTMLElement): boolean {
+function followsInlineContent(el: HTMLElement, root: Node | null = null): boolean {
 	let prev = el.previousSibling;
-	while (prev && prev.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(prev.textContent || '')) {
-		prev = prev.previousSibling;
-	}
+	while (prev && showsNothing(prev)) prev = prev.previousSibling;
 	if (!prev) return false;
 	if (prev.nodeType === Node.TEXT_NODE) return true;
-	return prev.nodeType === Node.ELEMENT_NODE && !isBlock(prev);
+	if (prev.nodeType !== Node.ELEMENT_NODE || isBlock(prev)) return false;
+	if (prev.nodeName === 'IMG' && root !== null && prev.parentNode === root) return false;
+	return !endsWithBlock(prev);
 }
 
 /** Whether the nearest sibling after this element, skipping collapsible whitespace, is text or an inline element. */

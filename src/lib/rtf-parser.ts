@@ -239,9 +239,19 @@ const LIST_STEP = 720;
  */
 export const DEFAULT_MAX_RTF_BYTES = 50 * 1024 * 1024;
 
-/** A byte count as people read it: "52.4 MB". */
-function megabytes(n: number): string {
-	return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+/** A byte count as people read it: "52.4 MB", rounded up when asked. */
+function megabytes(n: number, roundUp = false): string {
+	const tenths = (n / (1024 * 1024)) * 10;
+	return `${((roundUp ? Math.ceil(tenths) : Math.round(tenths)) / 10).toFixed(1)} MB`;
+}
+
+/**
+ * "52.4 MB, and the limit is 50.0 MB". A size just over the limit is rounded up, so it does not
+ * read as "50.0 MB, and the limit is 50.0 MB".
+ */
+function overLimit(size: number, limit: number): string {
+	const shown = megabytes(size) === megabytes(limit) ? megabytes(size, true) : megabytes(size);
+	return `${shown}, and the limit is ${megabytes(limit)}`;
 }
 
 /** Hex picture data → base64, without depending on btoa/Buffer. */
@@ -775,7 +785,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_RTF_BYTES;
 	if (maxBytes > 0 && rtfString.length > maxBytes) {
 		throw new RangeError(
-			`This document is too large to show: ${megabytes(rtfString.length)}, and the limit is ${megabytes(maxBytes)}`
+			`This document is too large to show: ${overLimit(rtfString.length, maxBytes)}`
 		);
 	}
 
@@ -1402,11 +1412,34 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'brdrnil':
 					pendingSide = null;
 					break;
+				// Every border style RTF names: any of them makes the side a border.
 				case 'brdrs':
 				case 'brdrdb':
 				case 'brdrth':
+				case 'brdrsh':
 				case 'brdrdot':
 				case 'brdrdash':
+				case 'brdrhair':
+				case 'brdrdashsm':
+				case 'brdrdashd':
+				case 'brdrdashdd':
+				case 'brdrdashdotstr':
+				case 'brdrtriple':
+				case 'brdrtnthsg':
+				case 'brdrthtnsg':
+				case 'brdrtnthtnsg':
+				case 'brdrtnthmg':
+				case 'brdrthtnmg':
+				case 'brdrtnthtnmg':
+				case 'brdrtnthlg':
+				case 'brdrthtnlg':
+				case 'brdrtnthtnlg':
+				case 'brdrwavy':
+				case 'brdrwavydb':
+				case 'brdremboss':
+				case 'brdrengrave':
+				case 'brdroutset':
+				case 'brdrinset':
 					if (pendingSide) cellBorders[pendingSide] = true;
 					pendingSide = null;
 					break;
@@ -1821,7 +1854,7 @@ export function readRtfFile(file: File, options: RtfReadOptions = {}): Promise<s
 		const maxBytes = options.maxBytes ?? DEFAULT_MAX_RTF_BYTES;
 		// Refused before it is read: reading is what takes the memory.
 		if (maxBytes > 0 && file.size > maxBytes) {
-			reject(new Error(`This file is too large to import: ${megabytes(file.size)}, and the limit is ${megabytes(maxBytes)}`));
+			reject(new Error(`This file is too large to import: ${overLimit(file.size, maxBytes)}`));
 			return;
 		}
 		const reader = new FileReader();

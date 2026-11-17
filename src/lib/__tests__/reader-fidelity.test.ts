@@ -543,3 +543,25 @@ describe('a numbered line written with a leading zero', () => {
 		expect(rtfToHtml(R`{\rtf1\ansi \pard\li720\fi-360 1.\tab First\par \pard\li720\fi-360 2.\tab Second\par}`)).toContain('<ol>');
 	});
 });
+
+describe('what the second review found in the reader', () => {
+	it('PostScript and joined names of monospace fonts are still code', () => {
+		for (const name of ['CourierNewPSMT', 'SFMono-Regular', 'AndaleMono', 'PTMono-Regular', 'RobotoMono-Regular', 'DejaVuSansMono', 'LiberationMono']) {
+			const html = rtfToHtml(`{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0\\fswiss Arial;}{\\f1\\fnil\\fcharset0 ${name};}} Run \\f1 npm test\\f0  now\\par}`);
+			expect(html, name).toBe('<p>Run <code>npm test</code> now</p>');
+		}
+	});
+
+	it('a hairline or triple border on another side makes a cell an ordinary one', () => {
+		for (const style of ['brdrhair', 'brdrtriple', 'brdrsh']) {
+			const html = rtfToHtml(`{\\rtf1\\ansi \\trowd\\clbrdrt\\${style}\\clbrdrb\\brdrs\\cellx8640\\intbl a\\cell\\row}`);
+			expect(html, style).toContain('<td');
+			expect(html, style).not.toContain('<th');
+		}
+	});
+
+	it('a size just over the limit does not read as equal to it', () => {
+		const rtf = `{\\rtf1 ${'x'.repeat(1024 * 1024)}}`;
+		expect(() => rtfToHtml(rtf, { maxBytes: 1024 * 1024 })).toThrow('This document is too large to show: 1.1 MB, and the limit is 1.0 MB');
+	});
+});
