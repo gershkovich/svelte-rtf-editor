@@ -565,3 +565,17 @@ describe('what the second review found in the reader', () => {
 		expect(() => rtfToHtml(rtf, { maxBytes: 1024 * 1024 })).toThrow('This document is too large to show: 1.1 MB, and the limit is 1.0 MB');
 	});
 });
+
+describe('display fonts named with "mono"', () => {
+	it('Monoton and Monofett are not code fonts', () => {
+		for (const name of ['Monoton', 'Monofett']) {
+			const html = rtfToHtml(`{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0\\fswiss Arial;}{\\f1\\fnil ${name};}} a \\f1 b\\f0  c\\par}`);
+			expect(html, name).toBe('<p>a b c</p>');
+		}
+	});
+
+	it('a custom limit just under the size gives the two in bytes rather than two equal numbers', () => {
+		const rtf = `{\\rtf1 ${'x'.repeat(52_500_000)}}`;
+		expect(() => rtfToHtml(rtf, { maxBytes: 52_490_000 })).toThrow(/bytes, and the limit is 52490000 bytes/);
+	});
+});

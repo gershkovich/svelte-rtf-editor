@@ -367,3 +367,33 @@ describe('htmlToMarkdown: what the second review found', () => {
 		expect(md('<p><img src="data:image/png;base64,iVBO\nRw0K" alt="p"></p>')).toBe('![p](data:image/png;base64,iVBORw0K)\n\n');
 	});
 });
+
+describe('a figure with no picture, and a stray caption', () => {
+	const paragraphs = (html: string) =>
+		Array.from(el(rtfToHtml(htmlToRtf(el(html)))).children).map((c) => c.textContent?.trim());
+
+	it('a figure with no picture is a paragraph of its own, wrapped or not', () => {
+		expect(paragraphs('<figure>txt</figure><p>b</p>')).toEqual(['txt', 'b']);
+		expect(paragraphs('<b><figure>txt</figure></b><p>b</p>')).toEqual(['txt', 'b']);
+	});
+
+	it('its caption is written once, below what it holds', () => {
+		const rtf = htmlToRtf(el('<figure>Some text<figcaption>Cap</figcaption></figure>'));
+		expect(rtf.split('Cap').length - 1).toBe(1);
+		expect(paragraphs('<figure>Some text<figcaption>Cap</figcaption></figure>')).toEqual(['Some text', 'Cap']);
+	});
+
+	it('a caption outside a figure is text where it stands, and the paragraph after it is its own', () => {
+		expect(paragraphs('<b>a<figcaption>c</figcaption></b><p>b</p>')).toEqual(['ac', 'b']);
+	});
+
+	it('in a list item, a wrapper that ends with a paragraph adds no blank line before a nested list', () => {
+		const html = '<ul><li><b><p>a</p></b><ul><li>b</li></ul></li></ul>';
+		expect(htmlToRtf(el(html))).not.toContain('\\par \\par ');
+		expect(estimateRtfBytes(el(html))).toBeGreaterThanOrEqual(htmlToRtf(el(html)).length);
+	});
+
+	it('Markdown: a figure with no picture between text starts and ends its own block', () => {
+		expect(md('x<figure>t</figure>y')).toBe('x\n\nt\n\ny');
+	});
+});

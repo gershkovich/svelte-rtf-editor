@@ -531,6 +531,10 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		if (tag === 'pre') total += ((el.textContent || '').match(/\r\n|\r|\n/g)?.length ?? 0) * 6;
 		// A paragraph that follows loose text first ends that text's line ("\par ").
 		if ((tag === 'p' || tag === 'div' || BREAKS_LOOSE_TEXT.has(tag)) && followsInlineContent(el, editorEl)) total += 5;
+		// A heading, code block or quotation inside a list item, quotation or paragraph restates the
+		// paragraph around it (\pard, the indent, \par) in ways the counts above do not follow
+		// exactly: up to 10 more each, so the estimate stays above the real size.
+		if (/^(h[1-6]|pre|blockquote)$/.test(tag) && el.parentElement !== editorEl && el.parentElement?.closest('li, blockquote, p')) total += 10;
 		// A paragraph a block writes inside a table cell also carries \intbl (6). A list
 		// writes one paragraph per item, so the item is counted, not the list.
 		if (CELL_PARAGRAPH_TAGS.has(tag) && el.closest('td, th')) total += 6;
@@ -576,8 +580,9 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 			const last = (parseInt(el.getAttribute('start') ?? '', 10) || 1) + el.children.length;
 			total += el.children.length * Math.max(0, String(last).length - 1);
 		}
-		// A figure with a caption and no picture writes its caption twice.
-		if (tag === 'figure' && !el.querySelector('img')) total += escapeRtf(el.textContent || '').length;
+		// A figure with no picture is a paragraph of what it holds: "\pard\intbl\qc\liN " and
+		// "\par " (at most 30).
+		if (tag === 'figure' && !el.querySelector('img')) total += 30;
 		// A color costs "\cfN " on and off and, the first time, its color-table entry (at most
 		// 22 bytes, "\red255\green255\blue255;"); a size costs "\fsNN " on and off.
 		if (el.style?.color || (tag === 'font' && el.hasAttribute('color'))) total += 10 + 22;
@@ -641,7 +646,7 @@ function cleanFontName(name: string | undefined): string {
  * Monotype Corsiva is not one, and neither is American Typewriter, which is proportional.
  */
 export function isMonospaceFontName(name: string): boolean {
-	return /courier|mono(?!type)|consolas|menlo|monaco|lucida ?console|lucida ?sans ?typewriter|ocr[ -]?[ab]\b|source ?code|fira ?code|cascadia|jetbrains/.test(
+	return /courier|mono(?!type|ton|fett)|consolas|menlo|monaco|lucida ?console|lucida ?sans ?typewriter|ocr[ -]?[ab]\b|source ?code|fira ?code|cascadia|jetbrains/.test(
 		name.toLowerCase()
 	);
 }
@@ -1017,8 +1022,14 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 			const caption = (el.querySelector('figcaption')?.textContent || '').trim();
 			const align = `${ownAlign(el) ?? (cellAlign(ctx) || '\\ql')}${liControl(ctx.indent + leftMarginTwips(el))}`;
 
-			if (img) rtf += `\\pard${inCell(ctx)}${align} ${imageBody(img as HTMLElement)}\\par `;
-			else rtf += walkChildren(el, ctx);
+			if (img) {
+				rtf += `\\pard${inCell(ctx)}${align} ${imageBody(img as HTMLElement)}\\par `;
+			} else {
+				// A figure with no picture is a block of what it holds: its lines end with \par, as a
+				// <div>'s do, or its text ran into the next paragraph. Its caption is written below.
+				const held = Array.from(el.childNodes).filter((n) => n.nodeName !== 'FIGCAPTION');
+				rtf += flowRtf(held, ctx, null, `\\pard${inCell(ctx)}${align} `);
+			}
 
 			if (caption) {
 				rtf += `{\\*\\inkcap}\\pard${inCell(ctx)}${align}\\i ${escapeRtf(caption)}${ctx.italic ? '' : '\\i0'}\\par `;
@@ -1158,6 +1169,8 @@ function flowRtf(nodes: Node[], ctx: WalkContext, first: string | null, plain: s
 		if (!isBlock(el)) {
 			start();
 			rtf += walkNode(el, ctx, false);
+			// A wrapper that ends with a block (<b><p>a</p></b>) has ended the line itself.
+			if (endsWithBlock(el)) open = false;
 			continue;
 		}
 		end();
@@ -1325,12 +1338,20 @@ function showsNothing(node: Node): boolean {
 	return node.nodeType === Node.COMMENT_NODE || (node.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(node.textContent || ''));
 }
 
+/**
+ * Whether a block ends its own line in the RTF. Every block does, except a <figcaption> outside a
+ * figure, whose text is written where it stands.
+ */
+function endsItsLine(node: Node): boolean {
+	return isBlock(node) && node.nodeName !== 'FIGCAPTION';
+}
+
 /** Whether an inline element's content ends with a block, which has ended its own line. */
 function endsWithBlock(el: Node): boolean {
 	let last = el.lastChild;
 	while (last && showsNothing(last)) last = last.previousSibling;
 	if (!last || last.nodeType !== Node.ELEMENT_NODE) return false;
-	return isBlock(last) || endsWithBlock(last);
+	return endsItsLine(last) || endsWithBlock(last);
 }
 
 /**
@@ -1345,7 +1366,7 @@ function followsInlineContent(el: HTMLElement, root: Node | null = null): boolea
 	while (prev && showsNothing(prev)) prev = prev.previousSibling;
 	if (!prev) return false;
 	if (prev.nodeType === Node.TEXT_NODE) return true;
-	if (prev.nodeType !== Node.ELEMENT_NODE || isBlock(prev)) return false;
+	if (prev.nodeType !== Node.ELEMENT_NODE || endsItsLine(prev)) return false;
 	if (prev.nodeName === 'IMG' && root !== null && prev.parentNode === root) return false;
 	return !endsWithBlock(prev);
 }

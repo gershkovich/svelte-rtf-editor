@@ -189,7 +189,7 @@ function childrenToMarkdown(el: HTMLElement, ctx: MarkdownContext): string {
 				if (img) md += `${imageToMarkdown(img.getAttribute('alt') || caption, img.getAttribute('src') || '', ctx)}\n\n`;
 				else {
 					const held = childrenToMarkdown(node as HTMLElement, ctx);
-					if (held.trim()) md += held.endsWith('\n\n') ? held : `${held.replace(/\n*$/, '')}\n\n`;
+					if (held.trim()) md += `${blockStart(md)}${held.endsWith('\n\n') ? held : `${held.replace(/\n*$/, '')}\n\n`}`;
 				}
 				if (caption) md += `*${escapeMarkdown(caption, ctx)}*\n\n`;
 				break;

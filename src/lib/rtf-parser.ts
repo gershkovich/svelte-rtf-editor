@@ -250,7 +250,10 @@ function megabytes(n: number, roundUp = false): string {
  * read as "50.0 MB, and the limit is 50.0 MB".
  */
 function overLimit(size: number, limit: number): string {
-	const shown = megabytes(size) === megabytes(limit) ? megabytes(size, true) : megabytes(size);
+	let shown = megabytes(size);
+	if (shown === megabytes(limit)) shown = megabytes(size, true);
+	// Still the same at a tenth of a megabyte (a limit of its own, just under the size): bytes.
+	if (shown === megabytes(limit)) return `${size} bytes, and the limit is ${limit} bytes`;
 	return `${shown}, and the limit is ${megabytes(limit)}`;
 }
 
