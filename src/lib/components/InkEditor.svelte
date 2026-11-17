@@ -23,6 +23,8 @@
 	 *                   which is what bounds the RTF payload — it costs two hex
 	 *                   characters per byte. 0 disables. Default: 524288 (512 KB,
 	 *                   about 1 MB of document per image).
+	 *   maxRtfBytes   — The largest RTF file Import reads. Default: 52428800 (50 MB);
+	 *                   0 reads any size.
 	 *   fontFamily    — Font for the document, both on screen and in the RTF.
 	 *                   Default: 'Arial'.
 	 *   fontSize      — Body text size in points, both on screen and in the RTF.
@@ -52,7 +54,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
-	import { readRtfFile } from '../rtf-parser.js';
+	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
 		estimateRtfBytes,
@@ -97,6 +99,8 @@
 		maxImageEdge?: number;
 		maxImageBytes?: number;
 		maxImageDisplayWidth?: number;
+		/** The largest RTF file Import reads (readRtfFile's maxBytes); 0 for no limit. */
+		maxRtfBytes?: number;
 		fontFamily?: string;
 		fontSize?: number;
 		onchange?: (payload: ChangePayload) => void;
@@ -117,6 +121,7 @@
 		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
 		maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
 		maxImageDisplayWidth = DEFAULT_MAX_IMAGE_DISPLAY_WIDTH,
+		maxRtfBytes = DEFAULT_MAX_RTF_BYTES,
 		fontFamily = DEFAULT_FONT_FAMILY,
 		fontSize = DEFAULT_FONT_SIZE,
 		onchange,
@@ -1316,7 +1321,7 @@
 		importing = true;
 
 		try {
-			const html = await readRtfFile(file, { fontSize });
+			const html = await readRtfFile(file, { fontSize, maxBytes: maxRtfBytes });
 			if (editorEl) {
 				selectedImage = null;
 				documentReplaced();

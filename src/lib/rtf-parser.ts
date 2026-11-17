@@ -239,6 +239,11 @@ const LIST_STEP = 720;
  */
 export const DEFAULT_MAX_RTF_BYTES = 50 * 1024 * 1024;
 
+/** A byte count as people read it: "52.4 MB". */
+function megabytes(n: number): string {
+	return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** Hex picture data → base64, without depending on btoa/Buffer. */
 function hexToBase64(hex: string): string {
 	const byteCount = hex.length >> 1;
@@ -770,7 +775,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_RTF_BYTES;
 	if (maxBytes > 0 && rtfString.length > maxBytes) {
 		throw new RangeError(
-			`RTF document is too large to read: ${rtfString.length} bytes, and the limit is ${maxBytes}`
+			`This document is too large to show: ${megabytes(rtfString.length)}, and the limit is ${megabytes(maxBytes)}`
 		);
 	}
 
@@ -1806,8 +1811,7 @@ export function readRtfFile(file: File, options: RtfReadOptions = {}): Promise<s
 		const maxBytes = options.maxBytes ?? DEFAULT_MAX_RTF_BYTES;
 		// Refused before it is read: reading is what takes the memory.
 		if (maxBytes > 0 && file.size > maxBytes) {
-			const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
-			reject(new Error(`This file is too large to import: ${mb(file.size)}, and the limit is ${mb(maxBytes)}`));
+			reject(new Error(`This file is too large to import: ${megabytes(file.size)}, and the limit is ${megabytes(maxBytes)}`));
 			return;
 		}
 		const reader = new FileReader();

@@ -444,11 +444,11 @@ describe('RtfViewer', () => {
 		host = null;
 	});
 
-	function view(content: string): HTMLElement {
+	function view(content: string | null, extra: Record<string, unknown> = {}): HTMLElement {
 		host = document.createElement('div');
 		document.body.appendChild(host);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		component = mount(RtfViewer as any, { target: host, props: { content } }) as Record<string, unknown>;
+		component = mount(RtfViewer as any, { target: host, props: { content, ...extra } }) as Record<string, unknown>;
 		flushSync();
 		return host.querySelector('.rtf-viewer') as HTMLElement;
 	}
@@ -468,6 +468,21 @@ describe('RtfViewer', () => {
 		const viewer = view(`{\\rtf1 ${'x'.repeat(DEFAULT_MAX_RTF_BYTES)}}`);
 		const message = viewer.querySelector('.rtf-viewer-error');
 		expect(message?.textContent).toMatch(/too large/);
+		expect(message?.textContent).toMatch(/50\.0 MB/);
 		expect(viewer.textContent).not.toContain('xxxx');
+	});
+
+	it('maxRtfBytes raises the limit for reports that carry large pictures, and 0 removes it', () => {
+		const rtf = `{\\rtf1 ${'x'.repeat(2000)}}`;
+		expect(view(rtf, { maxRtfBytes: 1000 }).querySelector('.rtf-viewer-error')?.textContent).toMatch(/too large/);
+		unmount(component!);
+		host!.remove();
+		expect(view(rtf, { maxRtfBytes: 0 }).textContent).toContain('xxxx');
+	});
+
+	it('a report that has not loaded yet shows as empty, not as an error', () => {
+		const viewer = view(null);
+		expect(viewer.querySelector('.rtf-viewer-error')).toBeNull();
+		expect(viewer.textContent).not.toMatch(/Cannot read|null/);
 	});
 });

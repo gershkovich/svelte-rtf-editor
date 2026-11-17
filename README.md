@@ -110,6 +110,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `content`    | `string` | —         | Raw RTF string to parse and display      |
 | `fontFamily` | `string` | `'Arial'` | Font the document is shown in            |
 | `fontSize`   | `number` | `12`      | Body text size in points                 |
+| `maxRtfBytes` | `number` | `52428800` | The largest document it reads (50 MB); `0` reads any size. See [Size limit on import](#size-limit-on-import) |
 
 ---
 
@@ -129,6 +130,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `readonly`      | `boolean`  | `false`                      | Disable editing                                           |
 | `maxImageEdge`  | `number`   | `1600`                       | Longest edge (px) an inserted image is scaled down to; `0` keeps full size |
 | `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; oversized pictures are re-encoded until they fit. `0` disables |
+| `maxRtfBytes`   | `number`   | `52428800`                   | The largest RTF file Import reads (50 MB); `0` reads any size |
 | `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
 | `fontFamily`    | `string`   | `'Arial'`                    | Document font, on screen and in the RTF. See [Fonts](#fonts) |
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
@@ -283,7 +285,7 @@ RTF has no table element: each row says where its cells end (`\cellx`), so colum
 
 ### Size limit on import
 
-`rtfToHtml` parses a document in one go on the main thread, and a picture costs two characters per byte, so the only bound on how long a page stops responding is the size of what it is handed. A string longer than `maxBytes` (`DEFAULT_MAX_RTF_BYTES`, 50 MB) is refused with a `RangeError` before any of it is parsed; `readRtfFile` rejects a larger file without reading it, and the editor's import shows that message; `RtfViewer` shows it in place of the document. Pass `maxBytes: 0` to read a document of any size, or a smaller number to refuse sooner.
+`rtfToHtml` parses a document in one go on the main thread, and a picture costs two characters per byte, so the only bound on how long a page stops responding is the size of what it is handed. A string longer than `maxBytes` (`DEFAULT_MAX_RTF_BYTES`, 50 MB) is refused with a `RangeError` before any of it is parsed; `readRtfFile` rejects a larger file without reading it, and the editor's import shows that message; `RtfViewer` shows it in place of the document. Pass `maxBytes: 0` to read a document of any size, or a smaller number to refuse sooner; the components take the same number as `maxRtfBytes`. Where reports can carry large pictures, raise it: a 30 MB picture is a document of over 60 MB.
 
 ### Markdown export
 
@@ -358,8 +360,9 @@ It stays on until **Done** in the bar, `Esc`, or the button again. Each click is
 
 A browser copies a paragraph with its looks written out as inline styles, and repeats its `id`. After a paste, each element that came in loses its `id` and any margin or first-line indent that changes nothing on screen, so a copy pasted inside the editor is the same markup as its source. A line the browser makes as a `<div>` is spaced like a `<p>`; both are written to RTF as a paragraph.
 
-A picture copied with its text comes in by address (`<img src="https://…">`). The editor fetches it and holds its data in the document, as it does for an address typed in the image dialog, so it reaches the RTF as a picture. When it cannot be fetched (the site forbids it, or there is no network) the picture still shows and the editor says that it will export as a placeholder.
- Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
+A picture copied with its text comes in by address (`<img src="https://…">`). The editor fetches it and holds its data in the document, as it does for an address typed in the image dialog, so it reaches the RTF as a picture. When it cannot be fetched (the site forbids it, there is no network, it takes longer than 15 seconds or is larger than 25 MB) the picture still shows and the editor says that it will export as a placeholder. The pictures in one paste are fetched at the same time, so one slow site does not hold up the others. A picture pasted as data in a format RTF cannot carry (GIF, WebP, SVG), or larger than `maxImageBytes`, is converted and scaled the same way.
+
+Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
 
 Tab stays in the editor so a line can be indented. To leave the editor from the keyboard, press
 `Esc` first. A readonly editor leaves Tab to the browser.

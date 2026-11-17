@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { rtfToHtml } from "./rtf-parser.js";
+    import { rtfToHtml, DEFAULT_MAX_RTF_BYTES } from "./rtf-parser.js";
     import {
         cssFontFamily,
         normalizeFontSize,
@@ -9,12 +9,15 @@
 
     // fontFamily and fontSize (points) set how the document is shown, and
     // default to the font the editor writes, so a document reads the same in
-    // the viewer as in the editor.
+    // the viewer as in the editor. maxRtfBytes is the largest document it will
+    // read (rtfToHtml's maxBytes): a picture costs two characters per byte, so
+    // raise it where reports can carry large pictures, or pass 0 for no limit.
     let {
         content,
         fontFamily = DEFAULT_FONT_FAMILY,
-        fontSize = DEFAULT_FONT_SIZE
-    }: { content: string; fontFamily?: string; fontSize?: number } = $props();
+        fontSize = DEFAULT_FONT_SIZE,
+        maxRtfBytes = DEFAULT_MAX_RTF_BYTES
+    }: { content: string | null | undefined; fontFamily?: string; fontSize?: number; maxRtfBytes?: number } = $props();
 
     const screenFontFamily = $derived(cssFontFamily(fontFamily));
     const screenFontSize = $derived(normalizeFontSize(fontSize));
@@ -23,16 +26,20 @@
     // place of the document, rather than taking the page down with it.
     const parsed = $derived.by(() => {
         try {
-            return { html: rtfToHtml(content, { fontSize }), error: '' };
+            // A report that has not loaded yet shows as an empty document.
+            return { html: rtfToHtml(content ?? '', { fontSize, maxBytes: maxRtfBytes }), error: '' };
         } catch (err) {
-            return { html: '', error: (err as Error).message || 'This document could not be read' };
+            // Only the size limit's message is meant for the reader; anything else is a fault in
+            // the reader, not something the person looking at the report can act on.
+            const message = err instanceof RangeError && /too large/.test(err.message) ? err.message : '';
+            return { html: '', error: message || 'This document could not be read' };
         }
     });
 
     let copied = $state(false);
 
     async function copyRtf() {
-        await navigator.clipboard.writeText(content);
+        await navigator.clipboard.writeText(content ?? "");
         copied = true;
         setTimeout(() => (copied = false), 2000);
     }
