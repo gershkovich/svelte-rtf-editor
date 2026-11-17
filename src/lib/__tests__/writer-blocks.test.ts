@@ -278,3 +278,55 @@ describe('text typed straight into the editor before a block ends its own line',
 		}
 	});
 });
+
+describe('htmlToMarkdown: a table keeps its columns, and nothing becomes a link it was not', () => {
+	/** The cells of each row of a GFM table, split the way a GFM reader splits them. */
+	const cells = (markdown: string) =>
+		markdown
+			.trim()
+			.split('\n')
+			.filter((l) => l.startsWith('|'))
+			.map((l) => l.slice(1, -1).split(/(?<!\\)\|/).map((c) => c.trim()));
+
+	it('a pipe in code, a code block or a link address does not end the cell', () => {
+		const rows = cells(md('<table><tr><td><code>ER|PR</code></td><td><a href="https://example.test/a|b">x</a></td><td><pre>a|b</pre></td></tr></table>'));
+		expect(rows[2]).toHaveLength(3);
+		expect(rows[2][0]).toBe('`ER\\|PR`');
+		expect(rows[2][1]).toBe('[x](https://example.test/a%7Cb)');
+		expect(rows[2][2]).toBe('`a\\|b`');
+	});
+
+	it('a table inside a cell is its text, so the cell after it stays in its column', () => {
+		const rows = cells(md('<table><tr><td><table><tr><td>A</td><td>B</td></tr></table></td><td>Negative</td></tr></table>'));
+		expect(rows[2]).toEqual(['A / B', 'Negative']);
+	});
+
+	it('a newline in a cell\'s text is a space, as on screen', () => {
+		expect(cells(md('<table><tr><td>Tumor\nsize</td></tr></table>'))[2]).toEqual(['Tumor size']);
+	});
+
+	it('a caption or a description cannot carry a link, and a picture address must be one to load', () => {
+		const caption = md('<figure><img src="https://example.test/x.png" alt="x"><figcaption>[open](javascript:alert(1))</figcaption></figure>');
+		expect(caption).toContain('*\\[open\\](javascript:alert(1))*');
+		// The "]" is escaped, so the description cannot close early: the address is the picture's.
+		expect(md('<p><img src="https://example.test/x.png" alt="](javascript:alert(1))"></p>')).toBe('![\\](javascript:alert(1))](https://example.test/x.png)\n\n');
+		expect(md('<p><img src="javascript:alert(1)" alt="dot"></p>')).toBe('dot\n\n');
+	});
+
+	it('a figure with no picture keeps what it holds', () => {
+		expect(md('<figure><blockquote>Quoted text</blockquote><figcaption>cap</figcaption></figure>')).toBe('> Quoted text\n\n*cap*\n\n');
+	});
+
+	it('a table in a list item starts on its own line, inside the item', () => {
+		const out = md('<ul><li>See<table><tr><th>A</th></tr><tr><td>1</td></tr></table></li></ul>');
+		expect(out).toBe('- See\n\n  | A |\n  | --- |\n  | 1 |\n\n');
+	});
+
+	it('a list inside a list item is indented under it', () => {
+		expect(md('<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul>')).toBe('- a\n\n  - b\n- c\n\n');
+	});
+
+	it('a code block holding a fence is fenced with more backticks', () => {
+		expect(md('<pre>```\nx</pre>')).toBe('````\n```\nx\n````\n\n');
+	});
+});

@@ -16,6 +16,47 @@ function escapeMarkdown(text: string, ctx: MarkdownContext): string {
 	return ctx.inCell ? escaped.replace(/\|/g, '\\|') : escaped;
 }
 
+/** Code as a Markdown code span: fenced with more backticks than it holds, and in a table cell its pipes escaped. */
+function codeSpan(code: string, ctx: MarkdownContext): string {
+	const longest = Math.max(0, ...Array.from(code.matchAll(/`+/g), (m) => m[0].length));
+	const fence = '`'.repeat(longest + 1);
+	const pad = /^`|`$/.test(code) ? ' ' : '';
+	const body = ctx.inCell ? code.replace(/\|/g, '\\|') : code;
+	return `${fence}${pad}${body}${pad}${fence}`;
+}
+
+/** An address as a Markdown link or image target: what would end it, or a table cell, is encoded. */
+function markdownUrl(url: string): string {
+	return url.replace(/[()|\s<>]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
+}
+
+/**
+ * A picture's address, if it is one a Markdown viewer may load: a web address, a relative path,
+ * or PNG/JPEG/GIF/WebP data. Any other scheme (javascript:, file:) is not.
+ */
+function imageTarget(src: string): string | null {
+	const value = src.trim();
+	if (!value) return null;
+	if (/^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(value)) return value;
+	if (/^https?:\/\//i.test(value) || !/^[a-z][a-z0-9+.-]*:/i.test(value)) return markdownUrl(value);
+	return null;
+}
+
+/** A picture as Markdown, or its description alone where its address is not one to load. */
+function imageToMarkdown(alt: string, src: string, ctx: MarkdownContext): string {
+	const target = imageTarget(src);
+	const text = escapeMarkdown(alt, ctx);
+	return target ? `![${text}](${target})` : text;
+}
+
+/**
+ * A list item's Markdown under its marker: later lines are indented to the item's text, so a
+ * table, a code block or a list inside the item stays in it.
+ */
+function listItem(marker: string, body: string): string {
+	return `${marker}${body.trim().replace(/\n(?=[^\n])/g, `\n${' '.repeat(marker.length)}`)}\n`;
+}
+
 /**
  * A block's text with the marks escaped that mean something only where a line starts: "-", "+"
  * and "1." open a list, ">" a quotation. A report line typed as "- Benign." stays that line.
@@ -49,6 +90,25 @@ function tableToMarkdown(table: HTMLElement): string {
 	return `${lines.join('\n')}\n\n`;
 }
 
+/** A blank line before a block that follows text on the same line, as in "See<table>…". */
+function blockStart(md: string): string {
+	return md && !md.endsWith('\n') ? '\n\n' : '';
+}
+
+/** A table inside a table cell, as text: each row a line, its cells a slash apart. */
+function nestedTableToText(table: HTMLElement, ctx: MarkdownContext): string {
+	const model = tableModel(table);
+	return model.rows
+		.map((row) =>
+			row
+				.filter((cell, c) => cell && cell.col === c && model.rows[cell.row] === row)
+				.map((cell) => childrenToMarkdown(cell!.el, ctx).trim().replace(/\s*\n\s*/g, ' '))
+				.join(' / ')
+		)
+		.filter(Boolean)
+		.join('\n');
+}
+
 export function htmlToMarkdown(el: HTMLElement): string {
 	return childrenToMarkdown(el, { inCell: false });
 }
@@ -58,7 +118,8 @@ function childrenToMarkdown(el: HTMLElement, ctx: MarkdownContext): string {
 
 	el.childNodes.forEach((node) => {
 		if (node.nodeType === Node.TEXT_NODE) {
-			md += escapeMarkdown(node.textContent || '', ctx);
+			// A line break in the HTML source shows as a space, as it does on screen.
+			md += escapeMarkdown((node.textContent || '').replace(/[ \t\r\n]+/g, ' '), ctx);
 			return;
 		}
 		if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -110,19 +171,20 @@ function childrenToMarkdown(el: HTMLElement, ctx: MarkdownContext): string {
 				// As in the RTF: only a web, mail or phone address is a link; a javascript:
 				// address, which a Markdown viewer would run, is written as its text alone.
 				const target = linkTarget((node as Element).getAttribute('href') || '');
-				md += target ? `[${inner}](${target.replace(/\(/g, '%28').replace(/\)/g, '%29')})` : inner;
+				md += target ? `[${inner}](${markdownUrl(target)})` : inner;
 				break;
 			}
 			case 'img':
-				md += `![${(node as HTMLImageElement).alt || ''}](${(node as HTMLImageElement).src || ''})`;
+				md += imageToMarkdown((node as HTMLImageElement).getAttribute('alt') || '', (node as HTMLImageElement).getAttribute('src') || '', ctx);
 				break;
 			case 'figure': {
+				// The caption and the description are text like any other, so a "[x](javascript:…)"
+				// in either stays text. A figure with no picture keeps what it holds.
 				const img = (node as Element).querySelector('img');
 				const caption = ((node as Element).querySelector('figcaption')?.textContent || '').trim();
-				if (img) {
-					md += `![${img.getAttribute('alt') || caption}](${img.getAttribute('src') || ''})\n\n`;
-					if (caption) md += `*${caption}*\n\n`;
-				}
+				if (img) md += `${imageToMarkdown(img.getAttribute('alt') || caption, img.getAttribute('src') || '', ctx)}\n\n`;
+				else md += childrenToMarkdown(node as HTMLElement, ctx);
+				if (caption) md += `*${escapeMarkdown(caption, ctx)}*\n\n`;
 				break;
 			}
 			case 'figcaption':
@@ -131,23 +193,34 @@ function childrenToMarkdown(el: HTMLElement, ctx: MarkdownContext): string {
 			case 'blockquote':
 				md += `> ${inner.trim()}\n\n`;
 				break;
-			case 'pre':
-				md += `\`\`\`\n${node.textContent}\n\`\`\`\n\n`;
+			case 'pre': {
+				const code = node.textContent || '';
+				if (ctx.inCell) {
+					// A table cell holds one line: each line of the block is a code span of its own.
+					md += code.split(/\r\n|\r|\n/).map((line) => (line ? codeSpan(line, ctx) : '')).join('<br>');
+					break;
+				}
+				const longest = Math.max(2, ...Array.from(code.matchAll(/`+/g), (m) => m[0].length));
+				const fence = '`'.repeat(longest + 1);
+				md += `${blockStart(md)}${fence}\n${code}\n${fence}\n\n`;
 				break;
+			}
 			case 'code':
-				md += `\`${node.textContent}\``;
+				md += codeSpan(node.textContent || '', ctx);
 				break;
 			case 'ul':
+				md += blockStart(md);
 				(node as Element).querySelectorAll(':scope > li').forEach((li) => {
-					md += `- ${childrenToMarkdown(li as HTMLElement, ctx).trim()}\n`;
+					md += listItem('- ', childrenToMarkdown(li as HTMLElement, ctx));
 				});
 				md += '\n';
 				break;
 			case 'ol': {
+				md += blockStart(md);
 				const start = parseInt((node as Element).getAttribute('start') ?? '', 10);
 				let i = Number.isFinite(start) ? start : 1;
 				(node as Element).querySelectorAll(':scope > li').forEach((li) => {
-					md += `${i++}. ${childrenToMarkdown(li as HTMLElement, ctx).trim()}\n`;
+					md += listItem(`${i++}. `, childrenToMarkdown(li as HTMLElement, ctx));
 				});
 				md += '\n';
 				break;
@@ -162,7 +235,9 @@ function childrenToMarkdown(el: HTMLElement, ctx: MarkdownContext): string {
 				md += '\n---\n\n';
 				break;
 			case 'table':
-				md += tableToMarkdown(node as HTMLElement);
+				// Markdown cannot put a table in a table cell: the inner one is its rows as lines,
+				// its cells a slash apart, as the RTF writes them a tab apart.
+				md += ctx.inCell ? nestedTableToText(node as HTMLElement, ctx) : `${blockStart(md)}${tableToMarkdown(node as HTMLElement)}`;
 				break;
 			case 'div':
 				md += `${escapeLineStarts(inner)}\n`;
