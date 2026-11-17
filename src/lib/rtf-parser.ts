@@ -140,7 +140,10 @@ type Block =
 /** One \cellx of a row definition, with the cell properties written before it. */
 interface CellDef {
 	right: number;
-	/** A bottom border: a header cell, as the writer marks one. */
+	/**
+	 * A header cell, as the writer marks one: a bottom border and no other. Word and TextEdit put
+	 * all four borders on every cell of a gridded table, and those cells are not headers.
+	 */
 	header: boolean;
 	/** \clvmgf: the first cell of a vertical merge. \clvmrg: a cell merged into the one above. */
 	vmgf: boolean;
@@ -796,7 +799,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	/** The definition of the row before, which a row with no \trowd of its own repeats. */
 	let lastRowDefs: CellDef[] = [];
 	let pendingDef = newCellDef();
-	let pendingBottomBorder = false; // set by \clbrdrb, confirmed by a real border type
+	/** The side a \clbrdrX just named, until a border type (\brdrs...) confirms or \brdrnone clears it. */
+	let pendingSide: 'b' | 'other' | null = null;
+	/** The sides of the cell being defined that have a real border. */
+	let cellBorders = { b: false, other: false };
 	let inTableCell = false;
 	/** \par seen in a table cell since its last text: line breaks owed if more text follows. */
 	let cellBreaks = 0;
@@ -1360,31 +1366,34 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// cells and again before \row, so the cells read so far are kept.
 					currentRowDefs = [];
 					pendingDef = newCellDef();
-					pendingBottomBorder = false;
+					pendingSide = null;
+					cellBorders = { b: false, other: false };
 					break;
 				case 'trgaph':
 				case 'trkeep':
 				case 'trleft':
 				case 'trhdr':
+					pendingSide = null;
+					break; // table formatting, ignored
 				case 'clbrdrr':
 				case 'clbrdrl':
 				case 'clbrdrt':
-					pendingBottomBorder = false;
-					break; // table formatting, ignored
+					pendingSide = 'other';
+					break;
 				case 'clbrdrb':
-					pendingBottomBorder = true;
+					pendingSide = 'b';
 					break;
 				case 'brdrnone':
 				case 'brdrnil':
-					pendingBottomBorder = false;
+					pendingSide = null;
 					break;
 				case 'brdrs':
 				case 'brdrdb':
 				case 'brdrth':
 				case 'brdrdot':
 				case 'brdrdash':
-					if (pendingBottomBorder) pendingDef.header = true;
-					pendingBottomBorder = false;
+					if (pendingSide) cellBorders[pendingSide] = true;
+					pendingSide = null;
 					break;
 				case 'clvmgf':
 					pendingDef.vmgf = true;
@@ -1401,10 +1410,12 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'cellx':
 					if (p != null) {
 						pendingDef.right = p;
+						pendingDef.header = cellBorders.b && !cellBorders.other;
 						currentRowDefs.push(pendingDef);
 					}
 					pendingDef = newCellDef();
-					pendingBottomBorder = false;
+					pendingSide = null;
+					cellBorders = { b: false, other: false };
 					break;
 				case 'intbl':
 					inTableCell = true;

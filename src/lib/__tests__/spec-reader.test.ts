@@ -404,3 +404,29 @@ describe('the HTML is safe to hand to {@html} (RtfViewer)', () => {
 		expect(rtfToHtml(R`{\rtf1\ansi <b>x</b> &amp; "q"\par}`)).toBe('<p>&lt;b&gt;x&lt;/b&gt; &amp;amp; "q"</p>');
 	});
 });
+
+describe('which table cells are headers', () => {
+	const grid = R`\clbrdrt\brdrs\brdrw10 \clbrdrl\brdrs\brdrw10 \clbrdrb\brdrs\brdrw10 \clbrdrr\brdrs\brdrw10 `;
+	const tags = (html: string) => Array.from(dom(html).querySelectorAll('td, th')).map((c) => `${c.tagName}:${c.textContent}`);
+
+	it('a Word table in the Table Grid style (four borders on every cell) has no header cells', () => {
+		const html = read(R`\trowd` + grid + R`\cellx4567` + grid + R`\cellx9242\pard\plain\intbl ER\cell Positive (95%)\cell\row`);
+		expect(tags(html)).toEqual(['TD:ER', 'TD:Positive (95%)']);
+	});
+
+	it('a cell with a bottom border and no other is a header, as the writer marks one', () => {
+		const html = rtfToHtml(htmlToRtf(el('<table><tr><th>Marker</th><th>Result</th></tr><tr><td>ER</td><td>Positive</td></tr></table>')));
+		expect(tags(html)).toEqual(['TH:Marker', 'TH:Result', 'TD:ER', 'TD:Positive']);
+	});
+
+	it('a header row above a gridded body keeps the two apart', () => {
+		const head = R`\trowd\clbrdrb\brdrs\cellx4320\clbrdrb\brdrs\cellx8640\intbl Marker\cell Result\cell\row`;
+		const row = R`\trowd` + grid + R`\cellx4320` + grid + R`\cellx8640\intbl ER\cell Positive\cell\row`;
+		expect(tags(read(head + row))).toEqual(['TH:Marker', 'TH:Result', 'TD:ER', 'TD:Positive']);
+	});
+
+	it('a side named with no border (\\brdrnone) does not count', () => {
+		const html = read(R`\trowd\clbrdrt\brdrnone\clbrdrb\brdrs\cellx8640\intbl H\cell\row`);
+		expect(tags(html)).toEqual(['TH:H']);
+	});
+});
