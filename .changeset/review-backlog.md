@@ -11,17 +11,17 @@ color table.
 **Tables (#2)**
 
 - `htmlToRtf` works out a table's columns once and writes every row against the same `\cellx`
-  edges. Through 1.8.0 each row was divided by its own number of cells, so a table with `rowspan`
+  edges. Through 1.8.3 each row was divided by its own number of cells, so a table with `rowspan`
   or `colspan` came out with columns that did not line up, and the merged cell covered one row.
 - `rowspan` is written as `\clvmgf` and `\clvmrg`, `colspan` as one cell that ends at the right
   edge of the last column it covers. `rtfToHtml` reads both back, and `\clmgf` / `\clmrg` too.
 - Only a `<th>` gets the header border, not every cell of its row. `<thead>` is written first and
-  `<tfoot>` last, wherever the source has them. A cell's own `text-align` is written; through 1.8.0
+  `<tfoot>` last, wherever the source has them. A cell's own `text-align` is written; through 1.8.3
   a right-aligned cell read from RTF was written back left-aligned.
 - A table inside a table cell is written as lines of text in that cell, its cells a tab apart. It
   used to open a row inside the cell, which is not valid RTF.
 - A row whose definition is repeated before `\row`, which is how Word writes every row, keeps its
-  cells. Through 1.8.0 such a table was read with every row empty.
+  cells. Through 1.8.3 such a table was read with every row empty.
 - Two paragraphs in one cell are read as two lines. They were run together into one word.
 - `\intbl` with no `\row` no longer makes one paragraph of the rest of the document.
 - A table row the file ends in the middle of keeps its cells, and text after a row's last `\cell`
@@ -79,3 +79,26 @@ color table.
   block, text after a quotation or a list, or a paragraph after text with no paragraph of its own.
 - CI runs the type check, the tests and the package build on every push and pull request, and the
   publish workflow runs them before it publishes.
+
+**From the review of this release**
+
+- Text typed straight into the editor before a list, a heading, a table, a code block, a rule or a
+  quotation ends its own line. Chromium leaves the first line typed into the editor as loose text
+  (`Diagnosis:<ul>…`), and through 1.8.3 it ran into the block's first line: "Diagnosis:• x", or
+  "Margins:" inside the table's first cell.
+- A table cell is read as a header only with a bottom border and no other. Word and TextEdit put
+  all four borders on every cell of a gridded table, and those cells were read as headers.
+- Pasted pictures are fetched at the same time, each given up after 15 seconds or at 25 MB, so one
+  slow site no longer holds up the rest. A picture pasted as data in a format RTF cannot carry
+  (GIF, WebP, SVG), or larger than `maxImageBytes`, is converted and scaled as the image dialog
+  does, or the editor says it will export as a placeholder.
+- `RtfViewer` and `InkEditor` take `maxRtfBytes`, so a host whose reports carry large pictures can
+  raise the size limit, and the message gives sizes in MB. A viewer given no content yet shows an
+  empty document, not an error.
+- A table with tens of thousands of columns reads in a fraction of a second. A font is taken for a
+  monospace one only by a whole word (Roboto Mono, not Monotype Corsiva), and a list marker is never
+  code. "01." and "02." stay as typed rather than becoming a list.
+- `htmlToMarkdown`: a pipe in code, a code block or a link address no longer ends a table cell, a
+  table inside a cell is written as its text, a caption or picture description is escaped so it
+  cannot carry a link, a picture address must be a web address, a relative path or picture data, a
+  figure with no picture keeps its content, and a table or list inside a list item stays in it.
