@@ -209,6 +209,7 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 | HTML on the paragraph | RTF |
 |---|---|
 | `margin-left: 1.75in` | `\li2520` |
+| `margin-right: 0.5in` | `\ri720` |
 | `text-indent: -1.75in` | `\fi-2520` |
 | `margin-top: 5pt` / `margin-bottom: 5pt` | `\sb100` / `\sa100` |
 | `break-after: avoid` or `page-break-after: avoid` | `\keepn` |
@@ -217,8 +218,10 @@ A `<p>` or `<div>` keeps its own indents, spacing and tab stops in the RTF, so a
 - Lengths in `in`, `pt`, `cm`, `mm` or `px` (15 twips per px), rounded to whole twips. Only `text-indent` may be negative. A value the writer cannot read, or zero, writes nothing.
 - CSS has no absolute tab stop, hence the `data-` attribute. On screen, `white-space: pre-wrap; tab-size: 1.75in` with that hanging indent puts the browser's first stop at the same place, and `pre-wrap` makes the writer send the tab as `\tab`.
 - `margin-left` adds to the indent of the blocks around the paragraph (an indent pasted from a browser, or a `<div>` with a margin that holds paragraphs), and is written as one `\li`.
-- Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not spacing, tab stops or keep-with-next.
-- `rtfToHtml` does not yet read them back, so `RtfViewer` shows such a document without its indents.
+- Inside a table cell the cell declares its own paragraph: only alignment and the left indent are written there, not the right or first-line indent, spacing, tab stops or keep-with-next.
+- `rtfToHtml` reads the three indents back, in points: `\li720\ri720\fi-720` becomes `margin-left:36pt;margin-right:36pt;text-indent:-36pt`, and `RtfViewer` shows them. As in RTF, they hold from one paragraph to the next until `\pard`. Indents inside a table cell are not read.
+- A heading outside a table cell also writes its right and first-line indents, so a heading read from RTF with a hanging number goes back as it came. A picture is read with a left margin only, where its line starts.
+- `rtfToHtml` does not yet read spacing, keep-with-next or tab stops back.
 
 ## Theming
 
@@ -256,7 +259,39 @@ The components use CSS custom properties with sensible fallbacks, so they work o
 | `Shift+Tab` | Remove one tab from the start of the line. With several lines selected, decrease their indent |
 | `Esc`, then `Tab` / `Shift+Tab` | Move focus out of the editor |
 
-The toolbar's Increase indent and Decrease indent buttons do the same as `Ctrl+]` and `Ctrl+[`. Undo reverses an indent step until the next edit. Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
+The toolbar's Increase indent and Decrease indent buttons do the same as `Ctrl+]` and `Ctrl+[`. Undo reverses an indent step until the next edit.
+
+Four more toolbar buttons set the other two RTF indents, 0.5 in per press, on a paragraph outside a table cell (not on a list, a heading, a quotation or a code block):
+
+| Button | What moves | RTF per step |
+|---|---|---|
+| Increase / Decrease hanging indent | Every line but the first; the first line stays where it is | `\li720\fi-720` |
+| Increase / Decrease right indent | The right edge of the paragraph | `\ri720` |
+
+Decrease indent stops where the first line of a hanging paragraph reaches the left edge.
+
+**Hang at caret** sets the hanging indent to any distance: put the caret where the later lines should begin, for example after `A. Pancreas: `, and press the button. The first line stays where it starts and the lines after it begin under the caret. With the caret at the start of the line, the hang is taken away. When a tab comes before the caret, the paragraph also gets a tab stop at the new indent (`tab-size` on screen, `data-rtf-tab-stops` for the RTF's `\tx`), so the text after the tab lines up with the lines below it. Tab stops the paragraph already has are kept. It works on a paragraph outside a table cell that is aligned left or justified.
+
+### Copy format
+
+The **Copy format** button gives several paragraphs the same alignment and indents:
+
+1. Press the button. The pointer becomes a crosshair and a bar under the toolbar says what to click.
+2. Click the paragraph to copy from. A dashed frame marks it and the pointer becomes a brush.
+3. Click each paragraph that should get the format. The one under the pointer is highlighted.
+
+It stays on until **Done** in the bar, `Esc`, or the button again. Each click is one Undo step.
+
+- What is copied is the paragraph's alignment, indent, right indent and hanging indent, with the tab stop Hang at caret sets. Bold, italic, color and size are not.
+- A click in the margin beside a paragraph, or in the empty space below the text, does nothing.
+- Copying from a plain paragraph clears those from the paragraphs clicked.
+- Each block takes what the RTF carries for it: a heading everything but the tab stop, and a heading or paragraph in a table cell the alignment and the indent only. Lists, code blocks and pictures are left alone.
+- The frame, the highlight and the bar are not part of the text and never reach `getHTML()` or the RTF.
+
+### Pasted text
+
+A browser copies a paragraph with its looks written out as inline styles, and repeats its `id`. After a paste, each element that came in loses its `id` and any margin or first-line indent that changes nothing on screen, so a copy pasted inside the editor is the same markup as its source. A line the browser makes as a `<div>` is spaced like a `<p>`; both are written to RTF as a paragraph.
+ Paragraph alignment (left, center, right, justify) is written to RTF as `\qc`, `\qr` or `\qj`.
 
 Tab stays in the editor so a line can be indented. To leave the editor from the keyboard, press
 `Esc` first. A readonly editor leaves Tab to the browser.

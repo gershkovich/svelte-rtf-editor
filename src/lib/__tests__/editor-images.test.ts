@@ -60,10 +60,23 @@ function dropFiles(files: File[]): boolean {
 }
 
 /** Wait for the FileReader/data-URL work kicked off by an insert to settle. */
+/**
+ * Wait for file reads and the inserts that follow them. A fixed 20 ms was enough on an idle
+ * machine and not on a busy one with the test files running side by side, so this waits until the
+ * page has stopped changing: the dialog no longer says it is inserting, and nothing moved across
+ * three looks in a row.
+ */
 async function settle(): Promise<void> {
 	for (let i = 0; i < 20; i++) await Promise.resolve();
-	await new Promise((resolve) => setTimeout(resolve, 20));
-	flushSync();
+	let last = '';
+	let still = 0;
+	for (let i = 0; i < 100 && still < 3; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		flushSync();
+		const now = document.body.innerHTML;
+		still = now === last && !now.includes('Inserting') ? still + 1 : 0;
+		last = now;
+	}
 }
 
 /** happy-dom does not implement the (deprecated) execCommand API browsers still expose. */

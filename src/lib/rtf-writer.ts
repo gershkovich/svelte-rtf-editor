@@ -465,8 +465,11 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 	total += ((editorEl.textContent || '').match(/\t/g)?.length ?? 0) * 4;
 	// A block's alignment (\qc, 3) and left indent (\liN, up to 7) are written per paragraph,
 	// for every block inside an indented one too: count 12 for each block that could carry them.
+	// A paragraph's own right indent (\\riN) and first-line indent (\\fi-N) are up to 8 more each.
 	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>('p, div, li, h1, h2, h3, h4, h5, h6, pre, blockquote'))) {
 		if (block.closest('[style*="margin"], [style*="text-align"], [align]')) total += 12;
+		if (block.style?.marginRight) total += 8;
+		if (block.style?.textIndent) total += 8;
 	}
 	// Each paragraph's formatting, worked out once: a blank line looks at the one before it.
 	const formatCache = new Map<Element, string>();
@@ -713,19 +716,19 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
 			// Heading sizes keep their ratio to the body (HEADING_SCALE).
 			case 'h1': {
 				const size = scaled(ctx, HEADING_SCALE.h1);
-				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h2': {
 				const size = scaled(ctx, HEADING_SCALE.h2);
-				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
 			case 'h3': {
 				const size = scaled(ctx, HEADING_SCALE.h3);
-				rtf += `\\pard${inCell(ctx)}${paragraphLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+				rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 				break;
 			}
 
@@ -1065,7 +1068,7 @@ function restateAfterBlock(node: Node, ctx: WalkContext): string {
 	const formatted =
 		FORMATTED_BLOCK_TAGS.has(tag) ||
 		(['p', 'div'].includes(tag) && (ctx.inTableCell ? paragraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '') ||
-		(['h1', 'h2', 'h3'].includes(tag) && paragraphLayout(block, ctx) !== '') ||
+		(['h1', 'h2', 'h3'].includes(tag) && headingLayout(block, ctx) !== '') ||
 		(tag === 'pre' && ctx.indent + leftMarginTwips(block) > 0);
 	return formatted ? `\\pard${inCell(ctx)}${liControl(ctx.indent)} ` : '';
 }
@@ -1134,6 +1137,21 @@ function paragraphLayout(el: HTMLElement, ctx: WalkContext): string {
 }
 
 /**
+ * A heading's layout: its alignment and left indent, and outside a table cell its right and
+ * first-line indents too, so a heading read from RTF with a hanging number goes back as it came.
+ */
+function headingLayout(el: HTMLElement, ctx: WalkContext): string {
+	return `${paragraphLayout(el, ctx)}${ctx.inTableCell ? '' : edgeIndents(el)}`;
+}
+
+/** \\riN for margin-right and \\fiN for text-indent, or nothing where the element sets none. */
+function edgeIndents(el: HTMLElement): string {
+	const ri = lengthTwips(el.style?.marginRight);
+	const fi = lengthTwips(el.style?.textIndent, true);
+	return `${ri ? `\\ri${ri}` : ''}${fi ? `\\fi${fi}` : ''}`;
+}
+
+/**
  * A <p> or <div>'s formatting outside a table cell: its alignment, then paragraphControls with the
  * indent of the blocks around it plus its own margin.
  */
@@ -1148,6 +1166,7 @@ function paragraphFormat(el: HTMLElement, ctx: WalkContext): string {
  * |--------------------------------------------------|-------------------|
  * | data-rtf-tab-stops="1.75in" (comma-separated)    | \tx2520           |
  * | margin-left: 1.75in (the left indent, given)     | \li2520           |
+ * | margin-right: 0.5in                              | \ri720            |
  * | text-indent: -1.75in                             | \fi-2520          |
  * | margin-top: 5pt / margin-bottom: 5pt             | \sb100 / \sa100   |
  * | break-after: avoid, or page-break-after: avoid   | \keepn            |
@@ -1166,8 +1185,7 @@ function paragraphControls(el: HTMLElement, leftTwips: number): string {
 	out += liControl(leftTwips);
 	const style = el.style;
 	if (!style) return out;
-	const fi = lengthTwips(style.textIndent, true);
-	if (fi) out += `\\fi${fi}`;
+	out += edgeIndents(el);
 	const sb = lengthTwips(style.marginTop);
 	if (sb) out += `\\sb${sb}`;
 	const sa = lengthTwips(style.marginBottom);
