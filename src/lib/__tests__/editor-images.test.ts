@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
 import InkEditor from '../components/InkEditor.svelte';
+import { urlToImageSrc, IMAGE_FETCH_TIMEOUT_MS, MAX_FETCHED_IMAGE_BYTES } from '../images.js';
 
 /**
  * Drives the editor component itself (not just the converters) to check the
@@ -354,6 +355,71 @@ describe('InkEditor: a picture pasted with its text', () => {
 		await settle();
 
 		expect(fetched).toEqual(['https://x.test/figure.png']);
+	});
+
+	it('one slow site does not hold up the other pictures in the paste', async () => {
+		const fetched: string[] = [];
+		vi.stubGlobal('fetch', (url: string) => {
+			fetched.push(url);
+			// The first site accepts the request and never answers.
+			if (url.includes('hang')) return new Promise(() => {});
+			return Promise.resolve({ ok: true, blob: async () => pngFile('b.png') });
+		});
+		pasteHtml('<p><img src="https://x.test/hang.png" alt="a"><img src="https://x.test/b.png" alt="b"></p>');
+		await settle();
+
+		expect(fetched).toEqual(['https://x.test/hang.png', 'https://x.test/b.png']);
+		expect(contentEl().querySelector('img[alt="b"]')!.getAttribute('src')).toBe(PNG_SRC);
+	});
+
+	it('a picture pasted as GIF data, which the RTF cannot carry, is converted or reported', async () => {
+		// happy-dom cannot draw a picture, so here the conversion a browser makes is unavailable and
+		// the editor has to say so rather than let it leave as "[Image: …]".
+		const GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+		const fetched = serveImages();
+		pasteHtml(`<p><img src="${GIF}" alt="gif"></p>`);
+		await settle();
+
+		expect(fetched).toEqual([]);
+		expect(host.querySelector('.ink-toast-error')?.textContent).toContain('A pasted image could not be embedded');
+	});
+});
+
+describe('urlToImageSrc: a picture fetched by address', () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.useRealTimers();
+	});
+
+	it('gives up after IMAGE_FETCH_TIMEOUT_MS, and the picture keeps its address', async () => {
+		vi.useFakeTimers();
+		let aborted = false;
+		vi.stubGlobal('fetch', (_url: string, init: RequestInit) =>
+			new Promise((_resolve, reject) => {
+				init.signal?.addEventListener('abort', () => {
+					aborted = true;
+					reject(new DOMException('aborted', 'AbortError'));
+				});
+			})
+		);
+		const pending = urlToImageSrc('https://x.test/slow.png');
+		await vi.advanceTimersByTimeAsync(IMAGE_FETCH_TIMEOUT_MS + 1);
+		expect(await pending).toEqual({ src: 'https://x.test/slow.png', embedded: false });
+		expect(aborted).toBe(true);
+	});
+
+	it('refuses a picture that says it is larger than MAX_FETCHED_IMAGE_BYTES, without reading it', async () => {
+		let read = false;
+		vi.stubGlobal('fetch', async () => ({
+			ok: true,
+			headers: { get: (name: string) => (name === 'content-length' ? String(MAX_FETCHED_IMAGE_BYTES + 1) : null) },
+			blob: async () => {
+				read = true;
+				return pngFile('huge.png');
+			}
+		}));
+		expect(await urlToImageSrc('https://x.test/huge.png')).toEqual({ src: 'https://x.test/huge.png', embedded: false });
+		expect(read).toBe(false);
 	});
 });
 

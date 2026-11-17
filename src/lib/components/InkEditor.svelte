@@ -1564,13 +1564,12 @@
 			}
 			if (!el.getAttribute('style')) el.removeAttribute('style');
 		}
-		// A picture copied with its text comes in by address (<img src="https://…">). Only picture
-		// data held in the document reaches the RTF, so it is fetched and embedded, as the image
-		// dialog does for an address typed there.
-		const linked = Array.from(editorEl.querySelectorAll('img')).filter(
-			(img) => !before.has(img) && !/^data:image\//i.test(img.getAttribute('src') || '')
-		);
-		if (linked.length > 0) void embedPastedImages(linked);
+		// A picture copied with its text comes in by address (<img src="https://…">), or as data in
+		// a format the RTF cannot carry (GIF, WebP, SVG) or larger than maxImageBytes. Only PNG or
+		// JPEG data held in the document reaches the RTF, so each one goes through the same step as
+		// the image dialog: fetched, converted and scaled as needed.
+		const pasted = Array.from(editorEl.querySelectorAll('img')).filter((img) => !before.has(img));
+		if (pasted.length > 0) void embedPastedImages(pasted);
 	}
 
 	/**
@@ -1581,22 +1580,25 @@
 	async function embedPastedImages(images: HTMLImageElement[]): Promise<void> {
 		let failed = 0;
 		let changed = false;
-		for (const img of images) {
-			const url = img.getAttribute('src') || '';
-			if (!isSafeImageUrl(url)) {
-				failed++;
-				continue;
-			}
-			const { src, embedded } = await urlToImageSrc(url, imageLimits());
-			// It may have been deleted or replaced while it was fetched.
-			if (!img.isConnected || img.getAttribute('src') !== url) continue;
-			if (embedded) {
-				img.setAttribute('src', src);
-				changed = true;
-			} else {
-				failed++;
-			}
-		}
+		// All at once, each with its own timeout, so one slow site does not hold up the rest.
+		await Promise.all(
+			images.map(async (img) => {
+				const url = img.getAttribute('src') || '';
+				if (!isSafeImageUrl(url)) {
+					failed++;
+					return;
+				}
+				const { src, embedded } = await urlToImageSrc(url, imageLimits());
+				// It may have been deleted or replaced while it was fetched.
+				if (!img.isConnected || img.getAttribute('src') !== url) return;
+				if (!embedded) {
+					failed++;
+				} else if (src !== url) {
+					img.setAttribute('src', src);
+					changed = true;
+				}
+			})
+		);
 		if (failed > 0) {
 			showError(
 				failed === 1
