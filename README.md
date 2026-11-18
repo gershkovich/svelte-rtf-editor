@@ -108,7 +108,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | Prop         | Type     | Default   | Description                              |
 |--------------|----------|-----------|------------------------------------------|
 | `content`    | `string` | —         | Raw RTF string to parse and display      |
-| `fontFamily` | `string` | `'Arial'` | Font the document is shown in            |
+| `fontFamily` | `string` | `'Segoe UI'` | Font the document is shown in. See [Fonts](#fonts) |
 | `fontSize`   | `number` | `12`      | Body text size in points                 |
 | `maxRtfBytes` | `number` | `52428800` | The largest document it reads (50 MB); `0` reads any size. See [Size limit on import](#size-limit-on-import) |
 
@@ -132,7 +132,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `maxImageBytes` | `number`   | `524288`                     | Encoded byte ceiling per image; oversized pictures are re-encoded until they fit. `0` disables |
 | `maxRtfBytes`   | `number`   | `52428800`                   | The largest RTF file Import reads (50 MB); `0` reads any size |
 | `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
-| `fontFamily`    | `string`   | `'Arial'`                    | Document font, on screen and in the RTF. See [Fonts](#fonts) |
+| `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. See [Fonts](#fonts) |
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
 
 #### Callback props
@@ -172,7 +172,7 @@ import {
 | Function                              | Description                                        |
 |---------------------------------------|----------------------------------------------------|
 | `rtfToHtml(rtf: string, options?: { fontSize?, maxBytes? }): string` | Parse an RTF string and return an HTML string. `fontSize` is the size of the screen it will be shown on (default 12). Throws a `RangeError` for a string longer than `maxBytes` (default 50 MB; see [Size limit on import](#size-limit-on-import)) |
-| `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Arial 12 pt unless told otherwise |
+| `htmlToRtf(el: HTMLElement, options?: { fontFamily?, fontSize? }): string` | Convert a DOM element's content to RTF, in Segoe UI 12 pt unless told otherwise |
 | `estimateRtfBytes(el: HTMLElement, options?: { fontFamily?, fontSize? }): number` | Approximate RTF size of a DOM element without converting it. Give it the options `htmlToRtf` is called with; it is never below the real size |
 | `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` and `htmlToMarkdown` write any other link as its text alone, and `rtfToHtml` reads any other as text |
 | `readRtfFile(file: File, options?: { fontSize?, maxBytes? }): Promise<string>` | Read a `.rtf` File object and return HTML. Rejects, without reading it, for a file larger than `maxBytes` |
@@ -183,22 +183,34 @@ import {
 
 ## Fonts
 
-The editor and the viewer show a document in the same font and size the RTF carries, so what you see on screen is what the receiving system gets. Both default to **Arial 12 pt**.
+The editor and the viewer show a document in the same font and size the RTF carries, so what you see on screen is what the receiving system gets. Both default to **Segoe UI 12 pt** (`DEFAULT_FONT_FAMILY` and `DEFAULT_FONT_SIZE`, which the package exports).
+
+To use another font, pass it to each of the three places a document goes through. Nothing else has to change:
 
 ```svelte
 <InkEditor fontFamily="Calibri" fontSize={11} bind:this={editor} />
+```
+
+```svelte
+<RtfViewer content={rtf} fontFamily="Calibri" fontSize={11} />
 ```
 
 ```ts
 htmlToRtf(el, { fontFamily: 'Calibri', fontSize: 11 });
 ```
 
+An application that shows documents in more than one place does well to keep the two values in one module of its own and pass them from there, so that a change of font is one line.
+
+The default was Arial through 1.9.0. A document is written in the font of the editor that saves it, not in the font it was written in before: a report saved in Arial and opened and saved again by an editor left at the default comes out in Segoe UI. To keep Arial, pass `fontFamily="Arial"`.
+
+Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phone) the screen shows the system's sans-serif font in its place, and the RTF still names Segoe UI, which is what the receiving system reads.
+
 - `fontFamily` is used for the whole document: body text, headings, lists and tables. Code keeps Courier New.
 - `fontSize` is the body size in points. Headings scale from it: at 12 pt, `h1` is 24 pt, `h2` 18 pt and `h3` 14 pt.
 - If you call `htmlToRtf` yourself on the editor's content, pass the same options you gave the editor, or the two produce different RTF.
 - `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
-- If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. At another size than 12 pt, a heading must also be bold, as every heading the writer emits is.
+- If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. A heading must also be bold, at every body size, as every heading the writer emits is.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
 

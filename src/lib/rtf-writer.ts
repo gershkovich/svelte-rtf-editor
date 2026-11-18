@@ -2,8 +2,8 @@
  * HTML to RTF converter
  *
  * Walks a contenteditable DOM tree and produces a valid RTF 1.x string.
- * Supports: a document font and body size (Arial 12 pt by default, set with
- * RtfWriteOptions), bold, italic, underline, strikethrough, font sizes, headings
+ * Supports: a document font and body size (DEFAULT_FONT_FAMILY at DEFAULT_FONT_SIZE
+ * points by default, set with RtfWriteOptions), bold, italic, underline, strikethrough, font sizes, headings
  * (h1–h6), foreground colors (\cf), paragraphs with their alignment and indents,
  * bullet/numbered lists and lists inside them, blockquotes, code blocks,
  * hyperlinks, tables with merged cells, images (embedded as \pict picture groups
@@ -28,7 +28,7 @@ interface RGB {
 export interface RtfWriteOptions {
 	/**
 	 * Font for the whole document: body text, headings, lists and tables.
-	 * Code keeps a monospace font. Default: Arial.
+	 * Code keeps a monospace font. Default: DEFAULT_FONT_FAMILY.
 	 */
 	fontFamily?: string;
 	/**
@@ -37,8 +37,13 @@ export interface RtfWriteOptions {
 	fontSize?: number;
 }
 
-/** Font used when no fontFamily is given. */
-export const DEFAULT_FONT_FAMILY = 'Arial';
+/**
+ * Font used when no fontFamily is given: what the editor and the viewer show, and what the RTF
+ * names. This is the one place the default is named; the size estimate, the components and the
+ * tests follow it. An application that wants another font does not change this: it passes
+ * `fontFamily` to the editor, to the viewer and to htmlToRtf.
+ */
+export const DEFAULT_FONT_FAMILY = 'Segoe UI';
 
 /** Body text size, in points, used when no fontSize is given. */
 export const DEFAULT_FONT_SIZE = 12;
@@ -497,10 +502,10 @@ function base64ByteLength(base64: string): number {
 }
 
 /**
- * Bytes of RTF header, font table and colour table that precede the body, with
- * the default font. Another font name changes it by the difference in length.
+ * Bytes of RTF header, font table and colour table that precede the body, without
+ * the name of the document font, which is counted by its own length.
  */
-const RTF_PREAMBLE_BYTES = 165;
+const RTF_PREAMBLE_BYTES = 160;
 
 /** Control words wrapping one \pict group. */
 const PICTURE_OVERHEAD_BYTES = 80;
@@ -597,7 +602,7 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 	// \fsN is counted with two digits everywhere; the largest size written is a first-level
 	// heading's, twice the body.
 	const sizeDigits = Math.max(0, String(bodyHalfPoints(options.fontSize) * 2).length - 2);
-	let total = RTF_PREAMBLE_BYTES + Math.max(0, fontName.length - DEFAULT_FONT_FAMILY.length) + fontClass + sizeDigits;
+	let total = RTF_PREAMBLE_BYTES + fontName.length + fontClass + sizeDigits;
 
 	for (const img of Array.from(editorEl.querySelectorAll('img'))) {
 		const src = img.getAttribute('src') || '';

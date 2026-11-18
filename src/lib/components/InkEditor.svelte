@@ -26,7 +26,7 @@
 	 *   maxRtfBytes   — The largest RTF file Import reads. Default: 52428800 (50 MB);
 	 *                   0 reads any size.
 	 *   fontFamily    — Font for the document, both on screen and in the RTF.
-	 *                   Default: 'Arial'.
+	 *                   Default: DEFAULT_FONT_FAMILY (rtf-writer.ts).
 	 *   fontSize      — Body text size in points, both on screen and in the RTF.
 	 *                   Headings scale from it. Default: 12.
 	 *
@@ -1851,7 +1851,7 @@
 		border-radius: var(--radius, 8px);
 		box-shadow: var(--shadow-md, 0 4px 12px rgba(44, 37, 32, 0.08));
 		outline: none;
-		font-family: var(--ink-font-family, Arial, sans-serif);
+		font-family: var(--ink-font-family, sans-serif);
 		font-size: var(--ink-font-size, 12pt);
 		line-height: 1.75;
 		color: var(--text, #2c2520);
