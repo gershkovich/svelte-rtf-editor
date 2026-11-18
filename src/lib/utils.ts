@@ -32,6 +32,8 @@ interface MarkdownFormat {
 /** Text with one formatting around all of it; the text can hold formatted parts of its own. */
 interface MarkdownSpan extends MarkdownFormat {
 	parts: MarkdownPart[];
+	/** For a code span: its code, which is written as it is, and to which code right after it is added. */
+	code?: string;
 }
 
 /** A part of a line: plain Markdown, or a span of formatted text. */
@@ -63,10 +65,12 @@ const BLOCK_SELECTOR = Array.from(BLOCK_TAGS).join(',');
  * not emphasis, "#1" not a heading, "[x]" not a link, "<b>" not HTML and "&copy;" not a ©.
  * An "&" is escaped only where a name and a ";" follow it, so "H&E" stays as it is typed.
  * ("&#35;" needs nothing more: its "#" is escaped already.)
+ * A "|" is escaped everywhere, not only in a table cell: two lines typed as "Stain | Result" and
+ * "--- | ---" are a table to a viewer that knows tables, which then drops what does not fit its
+ * columns and cuts a code span in the lines below at its "|", letting the code out.
  */
-function escapeMarkdown(text: string, ctx: MarkdownContext): string {
-	const escaped = text.replace(/[\\`*_[\]#<~]/g, '\\$&').replace(/&(?=[a-z][a-z0-9]*;)/gi, '\\&');
-	return ctx.inCell ? escaped.replace(/\|/g, '\\|') : escaped;
+function escapeMarkdown(text: string): string {
+	return text.replace(/[\\`*_[\]#<~|]/g, '\\$&').replace(/&(?=[a-z][a-z0-9]*;)/gi, '\\&');
 }
 
 /**
@@ -112,7 +116,7 @@ function imageTarget(src: string): string | null {
 /** A picture as Markdown, or its description alone where its address is not one to load. */
 function imageToMarkdown(alt: string, src: string, ctx: MarkdownContext): string {
 	const target = imageTarget(src);
-	const text = escapeMarkdown(alt, ctx);
+	const text = escapeMarkdown(alt);
 	return target ? `![${text}](${target})` : text;
 }
 
@@ -121,7 +125,8 @@ function imageToMarkdown(alt: string, src: string, ctx: MarkdownContext): string
  * table, a code block or a list inside the item stays in it.
  */
 function listItem(marker: string, body: string): string {
-	return `${marker}${body.trim().replace(/\n(?=[^\n])/g, `\n${' '.repeat(marker.length)}`)}`;
+	// (Spaces and line breaks only are taken off its ends: other white space is the document's.)
+	return `${marker}${body.replace(/^[ \n]+|[ \n]+$/g, '').replace(/\n(?=[^\n])/g, `\n${' '.repeat(marker.length)}`)}`;
 }
 
 /**
@@ -131,9 +136,11 @@ function listItem(marker: string, body: string): string {
  * of text it would turn that line into a heading, and on its own "---" would be a rule.
  */
 function escapeLineStarts(markdown: string): string {
+	// A line starts at the start of the text and after "\n", and nowhere else: with the "m" flag
+	// a pattern also takes U+2028 for a line break, and put backslashes into a code span.
 	return markdown.replace(
-		/^([ \t]*)(?:(>|[-+](?=\s|$)|-(?=[- \t]*$)|=(?=[= \t]*$))|(\d+)([.)])(?=\s|$))/gm,
-		(_m, lead, mark, digits, dot) => (mark ? `${lead}\\${mark}` : `${lead}${digits}\\${dot}`)
+		/(^|\n)([ \t]*)(?:(>|[-+](?=\s|$)|-(?=[- \t]*(?:\n|$))|=(?=[= \t]*(?:\n|$)))|(\d+)([.)])(?=\s|$))/g,
+		(_m, start, lead, mark, digits, dot) => (mark ? `${start}${lead}\\${mark}` : `${start}${lead}${digits}\\${dot}`)
 	);
 }
 
@@ -159,8 +166,19 @@ function joinLine(line: string, piece: string): string {
  * space at either end is written outside the marks; with nothing left between them, no marks.
  */
 function emphasis(inner: string, mark: string): string {
-	const [, lead, core, trail] = inner.match(/^(\s*)([\s\S]*?)(\s*)$/)!;
-	return core ? `${lead}${mark}${core}${mark}${trail}` : inner;
+	return around(inner, mark, mark);
+}
+
+/**
+ * Text with something written around it: around the text itself, with the white space and line
+ * breaks at either end left outside. (Found with trim, not with one pattern for all three parts:
+ * on a long run of spaces inside the text such a pattern took a second.)
+ */
+function around(text: string, open: string, close: string): string {
+	const core = text.trim();
+	if (!core) return text;
+	const start = text.length - text.trimStart().length;
+	return `${text.slice(0, start)}${open}${core}${close}${text.slice(start + core.length)}`;
 }
 
 /**
@@ -174,15 +192,24 @@ function addPart(parts: MarkdownPart[], part: MarkdownPart): void {
 		if (!part) return;
 		if (typeof last === 'string') parts[parts.length - 1] = joinLine(last, part);
 		else parts.push(part);
+	} else if (part.code !== undefined) {
+		// Code right after code is one code span. Two spans back to back run their backticks
+		// together ("`a``b`"), which Markdown reads as other fences than the ones written: the
+		// two show as one, and with a backtick at the end of the first the code is out of its span.
+		if (last !== undefined && typeof last !== 'string' && last.code !== undefined) last.code += part.code;
+		else parts.push({ ...part });
 	} else if (part.parts.length) {
-		if (last !== undefined && typeof last !== 'string' && last.key === part.key) part.parts.forEach((inner) => addPart(last.parts, inner));
+		if (last !== undefined && typeof last !== 'string' && last.code === undefined && last.key === part.key) part.parts.forEach((inner) => addPart(last.parts, inner));
 		else parts.push({ ...part, parts: [...part.parts] });
 	}
 }
 
 /** The parts of a line as Markdown, each span inside its formatting. */
 function lineOf(parts: readonly MarkdownPart[]): string {
-	return parts.reduce<string>((line, part) => joinLine(line, typeof part === 'string' ? part : part.wrap(lineOf(part.parts))), '');
+	return parts.reduce<string>(
+		(line, part) => joinLine(line, typeof part === 'string' ? part : part.wrap(part.code ?? lineOf(part.parts))),
+		''
+	);
 }
 
 /** Parts of a line, inside the formatting of the elements around their block (see MarkdownContext.open). */
@@ -208,7 +235,22 @@ function emphasisFormat(mark: string, ctx: MarkdownContext): { inner: MarkdownCo
 function finishLine(line: string, ctx: MarkdownContext): string {
 	const text = line.replace(/ *\n */g, '\n').replace(/^[ \n]+|[ \n]+$/g, '');
 	if (ctx.oneLine) return text.replace(/\n/g, '<br>');
-	return text.replace(/\n+/g, (breaks) => `${'<br>'.repeat(breaks.length - 1)}  \n`);
+	// Split into what each line holds and the breaks after it, by turns.
+	return text
+		.split(/(\n+)/)
+		.map((piece, i) => (i % 2 ? `${'<br>'.repeat(piece.length - 1)}  \n` : startOfLine(piece)))
+		.join('');
+}
+
+/**
+ * What a line of a paragraph holds, made safe at its start. White space there is not text to
+ * Markdown: a tab makes the line a code block, and a line of white space alone (a tab, a no-break
+ * space) is no line at all, so the <br> after it would stand first, as a tag alone on a line does.
+ * Such a line is written as "&nbsp;", and a tab at the start as "&#9;", which are text.
+ */
+function startOfLine(held: string): string {
+	if (held && !/\S/.test(held)) return '&nbsp;';
+	return held.replace(/^[ \t]+/, (lead) => lead.replace(/\t/g, '&#9;'));
 }
 
 /** End the line of text being written: loose text before a block is a paragraph of its own. */
@@ -295,13 +337,10 @@ function formatOf(el: HTMLElement, tag: string, ctx: MarkdownContext): { inner: 
 	// What is written around the text goes around the text itself, and white space and line
 	// breaks at either end stay outside it. For an HTML tag this is what keeps the text text: a
 	// tag alone on a line opens a block of HTML, in which "\<" is no escape.
-	const around = (open: string, close: string) => ({
+	const within = (open: string, close: string) => ({
 		key: open + close,
 		inner: ctx,
-		wrap: (text: string) => {
-			const [, lead, core, trail] = text.match(/^(\s*)([\s\S]*?)(\s*)$/)!;
-			return core ? `${lead}${open}${core}${close}${trail}` : text;
-		}
+		wrap: (text: string) => around(text, open, close)
 	});
 	switch (tag) {
 		case 'strong':
@@ -320,12 +359,12 @@ function formatOf(el: HTMLElement, tag: string, ctx: MarkdownContext): { inner: 
 		case 'sup':
 		case 'sub':
 			// Markdown has no mark for these; it allows the HTML itself.
-			return around(`<${tag}>`, `</${tag}>`);
+			return within(`<${tag}>`, `</${tag}>`);
 		case 'a': {
 			// As in the RTF: only a web, mail or phone address is a link; a javascript:
 			// address, which a Markdown viewer would run, is written as its text alone.
 			const target = linkTarget(el.getAttribute('href') || '');
-			return target ? around('[', `](${markdownUrl(target)})`) : plain;
+			return target ? within('[', `](${markdownUrl(target)})`) : plain;
 		}
 		default:
 			return plain;
@@ -341,7 +380,7 @@ function inlineParts(node: Node, ctx: MarkdownContext): MarkdownPart[] {
 		const text = node.textContent || '';
 		const kept = node.parentElement?.closest('[style*="white-space"]') as HTMLElement | null;
 		const keeps = kept !== null && /^pre/.test(kept.style.whiteSpace);
-		return [escapeMarkdown(keeps ? text.replace(/\r\n?/g, '\n') : text.replace(/[ \t\r\n]+/g, ' '), ctx)];
+		return [escapeMarkdown(keeps ? text.replace(/\r\n?/g, '\n') : text.replace(/[ \t\r\n]+/g, ' '))];
 	}
 	if (node.nodeType !== Node.ELEMENT_NODE) return [];
 
@@ -358,7 +397,7 @@ function inlineParts(node: Node, ctx: MarkdownContext): MarkdownPart[] {
 			// Code is written as it is. With no code in it there is nothing to show: an empty
 			// code span is not Markdown, it would be read as two backticks.
 			const code = codeText(el, inside);
-			return code ? [codeSpan(code, inside)] : [];
+			return code ? [{ key: 'code', code, parts: [], wrap: (text: string) => codeSpan(text, inside) }] : [];
 		}
 	}
 	const format = formatOf(el, tag, inside);
@@ -492,7 +531,11 @@ function nestedTableToText(table: HTMLElement, ctx: MarkdownContext): string {
  */
 function listToMarkdown(list: HTMLElement, ordered: boolean, ctx: MarkdownContext, out: MarkdownOutput): void {
 	const start = parseInt(list.getAttribute('start') ?? '', 10);
-	let number = Number.isFinite(start) ? start : 1;
+	// Markdown writes a list number in up to nine digits and none below zero. A number it cannot
+	// write ("-3.", or ten digits) is text, not a marker, and a code block in that item no code
+	// block: the list starts as near to its own number as Markdown can count from.
+	const itemCount = Array.from(list.children).filter((child) => child.tagName === 'LI').length;
+	let number = Number.isFinite(start) ? Math.max(0, Math.min(start, 1_000_000_000 - Math.max(itemCount, 1))) : 1;
 	let items: { marker: string; blocks: string[] }[] = [];
 	let loose: Node[] = [];
 

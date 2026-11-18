@@ -82,3 +82,15 @@ should not be. Three things change for documents that already work, and are list
   Underline around a quotation, a list or a table is written on the text inside, not dropped. An
   empty line in a paragraph is a `<br>` at the end of the line before it, so no tag stands alone
   on a line; `<ins>`, `<sup>` and `<sub>` go around the text itself as `<u>` does.
+- Found by rendering the export with an outside Markdown reader. In each of these a line of the
+  document could come out as HTML in a viewer that allows it; the first three were so in 1.9.0.
+  - Code right after code is one code span. Two spans back to back ran their backticks together
+    (`` `a``b` ``); RTF makes that of code text that changes color.
+  - A `|` is escaped in all text, not only in a table cell. Two typed lines such as
+    `Stain | Result` and `--- | ---` were a table to a viewer that knows tables, which dropped
+    text that did not fit its columns and cut a code span at its `|`.
+  - A numbered list starts no lower than 0 and ends no higher than 999999999. `start="-3"` was
+    written as `-3.`, which is no list marker.
+  - A line that holds white space alone (a no-break space, a tab) is written as `&nbsp;`, so the
+    `<br>` after it is not first on its line. A tab at the start of a line is written as `&#9;`:
+    as a tab it made the line a code block.

@@ -27,12 +27,18 @@ const HOSTILE = '<img src=x onerror=alert(1)>';
  * enough for what the exporter writes. A line is taken as spaces, a list marker, ">" marks, spaces,
  * a list marker and text; a list item holds the lines indented as far as its own text; a fence
  * holds the lines under at least its own ">" marks and indented at least as far as its list item;
- * a line holding one tag and nothing else opens a block of HTML that runs to the next empty line.
+ * a line holding one tag and nothing else opens a block of HTML that runs to the next empty line;
+ * a line of dashes and "|" under a line with a "|" opens a table, whose rows are cut into cells at
+ * every "|" that is not escaped, code span or not.
  */
 function readAsHtml(markdown: string): string[] {
 	const found: string[] = [];
 	let fence: { ticks: number; depth: number; outer: number; inner: number } | null = null;
 	let htmlBlock = false;
+	let table = false;
+	let before = { text: '', full: '' };
+	const outsideCode = (text: string) => text.replace(/(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)/g, '');
+	const inCells = (text: string) => text.split(/(?<!\\)\|/).some((cell) => /(?<!\\)<img/.test(outsideCode(cell)));
 	// Where the text of the list item we are in starts: before the ">" marks, and after them.
 	let outerItem = 0;
 	let innerItem = 0;
@@ -44,10 +50,10 @@ function readAsHtml(markdown: string): string[] {
 			return taken;
 		};
 		const s0 = take(/^ */).length;
-		const item0 = take(/^(?:(?:[-+*]|\d+[.)]) +)?/).length;
+		const item0 = take(/^(?:(?:[-+*]|\d{1,9}[.)]) +)?/).length;
 		const depth = take(/^(?: {0,3}> ?)*/).split('>').length - 1;
 		const s1 = take(/^ */).length;
-		const item1 = take(/^(?:(?:[-+*]|\d+[.)]) +)?/).length;
+		const item1 = take(/^(?:(?:[-+*]|\d{1,9}[.)]) +)?/).length;
 		const text = rest;
 		const blank = !text && !item0 && !item1;
 
@@ -67,6 +73,19 @@ function readAsHtml(markdown: string): string[] {
 		}
 		htmlBlock = false;
 
+		const delimiterRow = text.includes('|') && /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(text);
+		if (!table && delimiterRow && /(?<!\\)\|/.test(before.text)) {
+			table = true;
+			// The line above is the table's first row, and is cut into cells like the others.
+			if (inCells(before.text) && !found.includes(before.full)) found.push(before.full);
+		}
+		if (blank) table = false;
+		before = { text, full };
+		if (table) {
+			if (inCells(text)) found.push(full);
+			continue;
+		}
+
 		if (!blank) {
 			if (item0) [outerItem, innerItem] = [s0 + item0, 0];
 			else if (s0 < outerItem) [outerItem, innerItem] = [0, 0];
@@ -81,9 +100,8 @@ function readAsHtml(markdown: string): string[] {
 		} else if (/^<\/?[a-z][^<>]*>\s*$/i.test(text)) {
 			htmlBlock = true;
 			if (text.includes('<img')) found.push(full);
-		} else {
-			const outsideCode = text.replace(/(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)/g, '');
-			if (/(?<!\\)<img/.test(outsideCode)) found.push(full);
+		} else if (/(?<!\\)<img/.test(outsideCode(text))) {
+			found.push(full);
 		}
 	}
 	return found;
@@ -98,7 +116,13 @@ describe('the test reads Markdown as a viewer does', () => {
 			`# \`\`\`\n${HOSTILE}\n\`\`\`\n\n`,
 			`**\`\`\`\n${HOSTILE}\n\`\`\`\n\n**`,
 			`See\`\`\`\n${HOSTILE}\n\`\`\`\n\n`,
-			`\\> \`\`\`\n${HOSTILE}\n\`\`\`\n\n`
+			`\\> \`\`\`\n${HOSTILE}\n\`\`\`\n\n`,
+			// Found later, by an outside reader (see the last tests in this file).
+			`\`\` ${HOSTILE}\` \`\`\`x\`\n\n`,
+			`- <br>  \n  \\${HOSTILE}\n\n`,
+			`a | b  \n--- | ---  \n\`x|${HOSTILE}\`\n\n`,
+			`-3. \`\`\`\n    ${HOSTILE}\n    \`\`\`\n\n`,
+			`1000000000. \`\`\`\n             ${HOSTILE}\n             \`\`\`\n\n`
 		];
 		for (const markdown of was) expect(readAsHtml(markdown), markdown).toHaveLength(1);
 	});
@@ -114,7 +138,11 @@ describe('the test reads Markdown as a viewer does', () => {
 			`- - \`\`\`\n    ${HOSTILE}\n    \`\`\`\n\n`,
 			`10. See \n\n    \`\`\`\n    ${HOSTILE}\n    \`\`\`\n\n    tail\n\n`,
 			`\\${HOSTILE}\n\n`,
-			`<u>\\${HOSTILE}</u>\n\n`
+			`<u>\\${HOSTILE}</u>\n\n`,
+			`| h |\n| --- |\n| \`a\\|${HOSTILE}\` x \\| y |\n\n`,
+			`a \\| b  \n--- \\| ---  \n\`x|${HOSTILE}\`\n\n`,
+			`- &nbsp;<br>  \n  \\${HOSTILE}\n\n`,
+			`999999999. \`\`\`\n           ${HOSTILE}\n           \`\`\`\n\n`
 		];
 		for (const markdown of safe) expect(readAsHtml(markdown), markdown).toEqual([]);
 	});
@@ -317,5 +345,177 @@ describe('htmlToMarkdown: no shape of elements lets code or text out as HTML', (
 		expect(cases).toBe(wrappers.length * (wrappers.length + 1) * contents.length * leads.length);
 		// Some thirteen thousand documents: four seconds on a desk, ten on a build machine,
 		// where the usual five seconds for a test are not enough.
+	}, 120_000);
+});
+
+describe('htmlToMarkdown: what an outside reader found (pandoc, as CommonMark and as GitHub Markdown)', () => {
+	// A second review rendered what the export writes with a Markdown reader that is not ours.
+	// Each test here is a shape in which a line of the document came out as HTML there.
+	const TAB = '<span style="white-space:pre">\t</span>';
+
+	describe('code right after code is one code span', () => {
+		it('two spans back to back ran their backticks together', () => {
+			// They were written "`a``b`", which shows as one span holding a``b.
+			expect(md('<p><code>a</code><code>b</code></p>')).toBe('`ab`\n\n');
+			expect(md('<p><code>a</code><code>b</code><code>c</code> d</p>')).toBe('`abc` d\n\n');
+		});
+
+		it('with a backtick at the end of the first, the code was out of its span', () => {
+			const markdown = md(`<p><code>${HOSTILE_HTML}\`</code><code>x</code></p>`);
+			expect(markdown).toBe(`\`\`${HOSTILE}\`x\`\`\n\n`);
+			expect(readAsHtml(markdown)).toEqual([]);
+		});
+
+		it('RTF makes this of code text that changes color', () => {
+			const rtf = String.raw`{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}{\f1\fmodern Courier New;}}{\colortbl;\red255\green0\blue0;}\f1 abc\cf1 def\cf0 ghi\par}`;
+			expect(md(rtfToHtml(rtf))).toBe('`abcdefghi`\n\n');
+		});
+
+		it('code after code in the same formatting is one span inside it; apart, they stay two', () => {
+			expect(md('<p><i><code>a</code></i><i><code>b</code></i></p>')).toBe('*`ab`*\n\n');
+			expect(md('<p><code>a</code> <code>b</code></p>')).toBe('`a` `b`\n\n');
+			expect(md('<p><b><code>a</code></b><code>b</code></p>')).toBe('**`a`**`b`\n\n');
+			expect(md('<p><code>a</code>x<code>b</code></p>')).toBe('`a`x`b`\n\n');
+		});
+
+		it('in a table cell the pipes of both are still escaped', () => {
+			expect(md('<table><tr><th>h</th></tr><tr><td><code>a|</code><code>|b</code></td></tr></table>')).toBe('| h |\n| --- |\n| `a\\|\\|b` |\n\n');
+		});
+	});
+
+	describe('a line that holds white space alone', () => {
+		it('is written as &nbsp;, so the <br> after it does not stand first on its line', () => {
+			// A list item trimmed the no-break space away, and the line began with <br>.
+			for (const blank of ['&nbsp;', TAB, '&emsp;']) {
+				const markdown = md(`<ul><li>${blank}<br><br>${HOSTILE_HTML}</li></ul>`);
+				expect(markdown, blank).toBe(`- &nbsp;<br>  \n  \\${HOSTILE}\n\n`);
+				expect(readAsHtml(markdown), blank).toEqual([]);
+			}
+			expect(md(`<blockquote>${TAB}<br><br>${HOSTILE_HTML}</blockquote>`)).toBe(`> &nbsp;<br>  \n> \\${HOSTILE}\n\n`);
+			expect(md(`<p>a<br>${TAB}<br><br>b</p>`)).toBe('a  \n&nbsp;<br>  \nb\n\n');
+		});
+
+		it('a paragraph of one no-break space, which is how an empty line is often pasted, is still a paragraph', () => {
+			expect(md('<p>&nbsp;</p><p>x</p>')).toBe('&nbsp;\n\nx\n\n');
+		});
+
+		it('a tab at the start of a line is written as &#9;: as a tab it made the line a code block', () => {
+			// The line then showed with its backslashes.
+			expect(md(`<p>${TAB}&lt;b&gt; 2*3 [x]</p>`)).toBe('&#9;\\<b> 2\\*3 \\[x\\]\n\n');
+			expect(md(`<p>a<br>${TAB}b</p>`)).toBe('a  \n&#9;b\n\n');
+			expect(md(`<p>a${TAB}b</p>`)).toBe('a\tb\n\n');
+		});
+
+		it('a list item keeps the no-break space it starts with', () => {
+			expect(md('<ul><li>&nbsp;a</li></ul>')).toBe(`- ${String.fromCharCode(0xa0)}a\n\n`);
+		});
+	});
+
+	describe('a "|" in text', () => {
+		it('is escaped everywhere: two typed lines were read as a table', () => {
+			// A viewer that knows tables showed two columns and dropped "strong, diffuse".
+			expect(md('<p>Stain | Result<br>--- | ---<br>CK7 | positive | strong, diffuse</p>')).toBe(
+				'Stain \\| Result  \n--- \\| ---  \nCK7 \\| positive \\| strong, diffuse\n\n'
+			);
+		});
+
+		it('so a code span under such lines is not cut at its own "|"', () => {
+			const markdown = md(`<p>a | b<br>--- | ---<br><code>x|${HOSTILE_HTML}</code></p>`);
+			expect(markdown).toBe(`a \\| b  \n--- \\| ---  \n\`x|${HOSTILE}\`\n\n`);
+			expect(readAsHtml(markdown)).toEqual([]);
+		});
+
+		it('in a description of a picture and in the text of a link too', () => {
+			expect(md('<p><img alt="a | b" src="https://x.test/i.png"> <a href="https://x.test/">c | d</a></p>')).toBe(
+				'![a \\| b](https://x.test/i.png) [c \\| d](https://x.test/)\n\n'
+			);
+		});
+	});
+
+	describe('a list number Markdown cannot write', () => {
+		const item = `<li><pre>${HOSTILE_HTML}</pre></li><li>b</li>`;
+
+		it('below zero: the list counts from 0', () => {
+			// "-3." is no marker; the item was a paragraph and its code block was not one.
+			const markdown = md(`<ol start="-3">${item}</ol>`);
+			expect(markdown).toBe(`0. \`\`\`\n   ${HOSTILE}\n   \`\`\`\n1. b\n\n`);
+			expect(readAsHtml(markdown)).toEqual([]);
+		});
+
+		it('of more than nine digits, or reaching them on the way: the list ends at 999999999', () => {
+			for (const start of ['1000000000', '999999999', '123456789012345678901234567890']) {
+				const markdown = md(`<ol start="${start}">${item}</ol>`);
+				expect(markdown, start).toBe(`999999998. \`\`\`\n           ${HOSTILE}\n           \`\`\`\n999999999. b\n\n`);
+				expect(readAsHtml(markdown), start).toEqual([]);
+			}
+		});
+
+		it('a number it can write is kept', () => {
+			expect(md('<ol start="0"><li>a</li></ol>')).toBe('0. a\n\n');
+			expect(md('<ol start="999999998"><li>a</li><li>b</li></ol>')).toBe('999999998. a\n999999999. b\n\n');
+		});
+	});
+
+	it('U+2028 in code is not taken for the start of a line', () => {
+		// The marks after it were escaped inside the span, where a backslash shows.
+		const separator = String.fromCharCode(0x2028);
+		expect(md(`<p><code>a${separator}- b${separator}1. c</code></p>`)).toBe(`\`a${separator}- b${separator}1. c\`\n\n`);
+		expect(md('<p>a<br>- b</p>')).toBe('a  \n\\- b\n\n');
+	});
+
+	it('a long run of spaces inside underlined, linked or bold text does not take a second', () => {
+		// Timed against a quarter of the run, not against the clock. It was sixteen times as long.
+		const spaces = (count: number) => el(`<p><u>a${'&nbsp;'.repeat(count)}b</u> <a href="https://x.test/">a${'&nbsp;'.repeat(count)}b</a></p>`);
+		const timeOf = (root: HTMLElement) => {
+			const once = () => {
+				const start = performance.now();
+				htmlToMarkdown(root);
+				return performance.now() - start;
+			};
+			return Math.min(once(), once(), once());
+		};
+		const [small, large] = [spaces(10_000), spaces(40_000)];
+		expect(timeOf(large)).toBeLessThan(Math.max(timeOf(small), 5) * 8);
+	}, 60_000);
+
+	it('none of these shapes, around and inside the others, lets code or text out as HTML', () => {
+		const wrappers: [string, string][] = [
+			['<p>', '</p>'],
+			['<div>', '</div>'],
+			['<b>', '</b>'],
+			['<u>', '</u>'],
+			['<sup>', '</sup>'],
+			['<a href="https://example.org/">', '</a>'],
+			['<blockquote>', '</blockquote>'],
+			['<ul><li>', '</li></ul>'],
+			['<ol start="-3"><li>', '</li><li>x</li></ol>'],
+			['<ol start="1000000000"><li>first</li><li>', '</li></ol>'],
+			['<h2>', '</h2>'],
+			['<figure>', '<figcaption>cap</figcaption></figure>'],
+			['<table><tr><td>', '</td><td>x</td></tr></table>']
+		];
+		const contents = [
+			`<code>${HOSTILE_HTML}\`</code><code>x</code>`,
+			`<code>\`</code><code>${HOSTILE_HTML}</code><code>\`\`</code>`,
+			`<code>x|${HOSTILE_HTML}</code>`,
+			`<pre>${HOSTILE_HTML}\n\nx</pre>`,
+			`<br><br>${HOSTILE_HTML}<br><br>`
+		];
+		const leads = ['', '&nbsp;<br>', `${TAB}<br>`, TAB, '&nbsp;', 'a | b<br>--- | ---<br>', '| a |<br>|---|<br>'];
+		let cases = 0;
+		for (const [openA, closeA] of wrappers) {
+			for (const [openB, closeB] of [['', ''], ...wrappers]) {
+				for (const content of contents) {
+					for (const lead of leads) {
+						const html = `${openA}${lead}${openB}${lead}${content}${closeB}tail${closeA}<p>after</p>`;
+						const markdown = md(html);
+						expect(readAsHtml(markdown), `${html}\n→ ${JSON.stringify(markdown)}`).toEqual([]);
+						expect(markdown, html).toContain('img src=x onerror=alert(1)>');
+						cases++;
+					}
+				}
+			}
+		}
+		expect(cases).toBe(wrappers.length * (wrappers.length + 1) * contents.length * leads.length);
 	}, 120_000);
 });
