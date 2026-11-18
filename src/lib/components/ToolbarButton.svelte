@@ -15,6 +15,8 @@
 	class="tb"
 	class:active
 	{title}
+	aria-label={title || undefined}
+	aria-pressed={active}
 	onclick={onclick}
 	onmousedown={(e) => e.preventDefault()}
 	type="button"

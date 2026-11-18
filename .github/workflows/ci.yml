@@ -1,25 +1,44 @@
 name: CI
 
-# Every push and every pull request: the type check, the tests, and the package build with its
-# lint (publint). publish.yml runs the same three before it publishes.
+# Every push and every pull request: the type check, the tests with their coverage floor, the
+# package build with its lint (publint), and the browser tests. publish.yml runs the same
+# before it publishes.
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to a commit: a tag can be moved to other code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
       - run: npm run check
-      - run: npm test
+      - run: npm run test:coverage
       - run: npm run prepack
+
+  # What a test DOM cannot show: where the caret goes, what a key does after a dialog closes,
+  # what a real paste brings in.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

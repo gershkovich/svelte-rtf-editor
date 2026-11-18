@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { rtfToHtml } from '$lib/rtf-parser.js';
-	import { htmlToRtf } from '$lib/rtf-writer.js';
-	import { InkEditor } from '$lib/index.js';
+	import { rtfToHtml } from '../lib/rtf-parser.js';
+	import { htmlToRtf } from '../lib/rtf-writer.js';
+	import { InkEditor } from '../lib/index.js';
 	import patientOrganWeights3 from '../../test-files/patient_organ_weights3.rtf?raw';
 
 	// ── Editor section ────────────────────────────────────────────────────────

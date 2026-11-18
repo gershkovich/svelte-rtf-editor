@@ -462,7 +462,11 @@ export async function urlToImageSrc(
 			controller?.abort();
 			return { src: value, embedded: false };
 		}
-		const blob = await response.blob();
+		const blob = await readCapped(response, MAX_FETCHED_IMAGE_BYTES);
+		if (!blob) {
+			controller?.abort();
+			return { src: value, embedded: false };
+		}
 		if (blob.size > MAX_FETCHED_IMAGE_BYTES || !blob.type.startsWith('image/')) {
 			return { src: value, embedded: false };
 		}
@@ -474,6 +478,30 @@ export async function urlToImageSrc(
 	} finally {
 		if (timer) clearTimeout(timer);
 	}
+}
+
+/**
+ * A response's body, or null once it has run past `limit` bytes. A server need not say how much
+ * it will send (no Content-Length), and read in one piece the whole of it was held in memory
+ * before its size was looked at. Read as it arrives, it is given up at the limit.
+ */
+async function readCapped(response: Response, limit: number): Promise<Blob | null> {
+	const reader = response.body?.getReader?.();
+	if (!reader) return response.blob();
+	const chunks: BlobPart[] = [];
+	let size = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		size += value.byteLength;
+		if (size > limit) {
+			void reader.cancel().catch(() => {});
+			return null;
+		}
+		chunks.push(value);
+	}
+	const type = (response.headers?.get('content-type') ?? '').split(';')[0].trim();
+	return new Blob(chunks, { type });
 }
 
 /** "sunset-over-lake.png" → "sunset-over-lake" — a usable default alt text. */

@@ -128,6 +128,20 @@ interface PixelSize {
 /** 1 px at 96 dpi = 15 twips (1 twip = 1/1440 in). */
 const TWIPS_PER_PX = 15;
 
+/**
+ * The longest length written, in twips: 22 inches, the largest page Word has. An indent, a tab
+ * stop or a picture's size beyond it means nothing on any page, and a number of ten digits or
+ * more is past what RTF's 32-bit parameters hold.
+ */
+const MAX_TWIPS = 31680;
+
+/**
+ * The deepest nesting of elements written element by element. A browser's HTML parser stops at
+ * 512, so only a DOM built by script goes deeper; a few thousand deep, walking it one call per
+ * element ran out of stack. Past this depth an element is written as its text.
+ */
+const MAX_ELEMENT_DEPTH = 600;
+
 // ── Color helpers ──
 
 function parseColor(colorStr: string): RGB | null {
@@ -135,16 +149,19 @@ function parseColor(colorStr: string): RGB | null {
 	const s = colorStr.trim().toLowerCase();
 
 	// rgb(r, g, b) or rgba(r, g, b, a)
+	// (A component is 0 to 255: a color table that says \red999 is not one every reader accepts.)
 	const rgbMatch = s.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
 	if (rgbMatch) {
-		return { r: +rgbMatch[1], g: +rgbMatch[2], b: +rgbMatch[3] };
+		const part = (digits: string) => Math.min(255, +digits);
+		return { r: part(rgbMatch[1]), g: part(rgbMatch[2]), b: part(rgbMatch[3]) };
 	}
 
-	// Hex
-	const hexMatch = s.match(/^#([0-9a-f]{3,8})$/);
+	// Hex: #rgb, #rgba, #rrggbb or #rrggbbaa, and no other length. "#abcd" read as six digits
+	// had no blue, and was written to the color table as \blueNaN.
+	const hexMatch = s.match(/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/);
 	if (hexMatch) {
 		let hex = hexMatch[1];
-		if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+		if (hex.length <= 4) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
 		return {
 			r: parseInt(hex.substring(0, 2), 16),
 			g: parseInt(hex.substring(2, 4), 16),
@@ -424,6 +441,11 @@ function displaySize(el: HTMLElement, natural: PixelSize): PixelSize {
 	let h = parsePx(el.style?.height) || (Number.isFinite(attrH) ? attrH : 0);
 	if (!h) h = nw && nh ? Math.round((w * nh) / nw) : nh;
 
+	// No wider or taller than the largest page (MAX_TWIPS), keeping its shape: a width of
+	// 99999999999 in pasted markup was written as a \picwgoal no reader can use.
+	const most = MAX_TWIPS / TWIPS_PER_PX;
+	const over = Math.max(w, h) / most;
+	if (over > 1) return { w: Math.max(1, Math.round(w / over)), h: Math.max(1, Math.round(h / over)) };
 	return { w, h };
 }
 
@@ -610,7 +632,11 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 		// A picture straight in the editor is a paragraph of its own ("\pard " and "\par ").
 		if (img.parentNode === editorEl) total += 11;
 		// A picture that cannot be embedded costs its placeholder text.
-		const placeholder = `\\i [Image: ]\\i0 `.length + escapeRtf(img.getAttribute('alt') || src || 'image').length;
+		// (As imageBody writes it: its description, or its address unless that is picture data.
+		// Escaping the whole data URL of every picture without a description, on each keystroke,
+		// was half of what a keystroke cost in a document with pictures.)
+		const isData = /^\s*data:/i.test(src);
+		const placeholder = `\\i [Image: ]\\i0 `.length + escapeRtf(img.getAttribute('alt') || (isData ? '' : src) || 'image').length;
 		if (!src.startsWith('data:image/') || comma < 0) {
 			total += placeholder;
 			continue;
@@ -942,11 +968,32 @@ function addColor(colorStr: string | null | undefined, colorMap: Map<string, RGB
 	if (c) colorMap.set(colorKey(c), c);
 }
 
-function collectColors(el: HTMLElement, colorMap: Map<string, RGB>): void {
-	addColor(el.style?.color, colorMap);
-	// <font color="..."> is produced by execCommand('foreColor')
-	if (el.tagName?.toLowerCase() === 'font') addColor(el.getAttribute('color'), colorMap);
-	for (const child of el.children) collectColors(child as HTMLElement, colorMap);
+function collectColors(root: HTMLElement, colorMap: Map<string, RGB>): void {
+	// (In document order, as the color table has always been written, and without a call per
+	// level of nesting.)
+	for (const el of [root, ...Array.from(root.querySelectorAll<HTMLElement>('*'))]) {
+		addColor(el.style?.color, colorMap);
+		// <font color="..."> is produced by execCommand('foreColor')
+		if (el.tagName?.toLowerCase() === 'font') addColor(el.getAttribute('color'), colorMap);
+	}
+}
+
+/** How many elements deep the walker is (see MAX_ELEMENT_DEPTH). */
+let walkDepth = 0;
+
+/** The text an element shows, read without a call per level of nesting. */
+function flatText(root: Element): string {
+	let text = '';
+	const pending: Node[] = [root];
+	while (pending.length > 0) {
+		const node = pending.pop()!;
+		if (node.nodeType === Node.TEXT_NODE) {
+			text += node.textContent || '';
+		} else if (node.nodeType === Node.ELEMENT_NODE && !isHidden(node as Element)) {
+			for (let i = node.childNodes.length - 1; i >= 0; i--) pending.push(node.childNodes[i]);
+		}
+	}
+	return text;
 }
 
 function walkChildren(parent: Node, ctx: WalkContext): string {
@@ -962,6 +1009,18 @@ function walkChildren(parent: Node, ctx: WalkContext): string {
  * line before a block (flowRtf).
  */
 function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = true): string {
+	if (node.nodeType === Node.ELEMENT_NODE && walkDepth >= MAX_ELEMENT_DEPTH) {
+		return isHidden(node as Element) ? '' : escapeRtf(flatText(node as Element));
+	}
+	walkDepth++;
+	try {
+		return walkNodeAt(node, ctx, restate, endLooseText);
+	} finally {
+		walkDepth--;
+	}
+}
+
+function walkNodeAt(node: Node, ctx: WalkContext, restate: boolean, endLooseText: boolean): string {
 	let rtf = '';
 
 	if (node.nodeType === Node.TEXT_NODE) {
@@ -1774,7 +1833,7 @@ function lengthTwips(value: string | null | undefined, allowNegative = false): n
 	if (!m) return null;
 	const twips = Math.round(parseFloat(m[1]) * TWIPS_PER_UNIT[m[2]]);
 	if (twips < 0 && !allowNegative) return null;
-	return twips;
+	return Math.max(-MAX_TWIPS, Math.min(MAX_TWIPS, twips));
 }
 
 /**
@@ -1796,7 +1855,8 @@ function isIndentBlockquote(el: HTMLElement): boolean {
 
 /** \liN for a left indent in twips, or nothing when there is none. */
 function liControl(twips: number): string {
-	return twips > 0 ? `\\li${twips}` : '';
+	// (Indents add up through nested blocks: the sum is kept on the page too.)
+	return twips > 0 ? `\\li${Math.min(twips, MAX_TWIPS)}` : '';
 }
 
 /**
@@ -1955,9 +2015,12 @@ function sizeOf(el: HTMLElement): number | null {
 		const step = el.tagName === 'FONT' ? /^\s*([1-7])\s*$/.exec(el.getAttribute('size') ?? '') : null;
 		return step ? FONT_SIZE_ATTRIBUTE[Number(step[1]) - 1] : null;
 	}
+	// From half a point to Word's largest size; a size that is no number, or zero, is no size.
+	const halfPoints = (points: number): number | null =>
+		Number.isFinite(points) && points > 0 ? Math.min(MAX_FONT_SIZE * 2, Math.max(1, Math.round(points * 2))) : null;
 	const ptMatch = fs.match(/([\d.]+)\s*pt/);
-	if (ptMatch) return Math.round(parseFloat(ptMatch[1]) * 2);
+	if (ptMatch) return halfPoints(parseFloat(ptMatch[1]));
 	const pxMatch = fs.match(/([\d.]+)\s*px/);
-	if (pxMatch) return Math.round(parseFloat(pxMatch[1]) * 0.75 * 2);
+	if (pxMatch) return halfPoints(parseFloat(pxMatch[1]) * 0.75);
 	return null;
 }

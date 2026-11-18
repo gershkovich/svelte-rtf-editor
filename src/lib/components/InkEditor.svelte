@@ -3,14 +3,18 @@
 	 * InkEditor — A reusable Svelte 5 Rich Text Editor component.
 	 *
 	 * Props:
-	 *   content       — Initial HTML content (string). Default: empty paragraph.
+	 *   content       — Initial HTML content (string). Default: an empty paragraph. It is made
+ *                   safe before it is shown (see sanitize.ts): scripts, event handlers and
+ *                   the like are taken out.
 	 *   placeholder   — Placeholder text shown when editor is empty.
-	 *   autosave      — Enable localStorage auto-save. Default: true.
+	 *   autosave      — Keep a draft in localStorage and restore it on mount, in place of
+ *                   `content`. Default: false. Give each document its own storageKey.
 	 *   storageKey    — localStorage key for auto-save. Default: 'ink-editor-content'.
 	 *   showToolbar   — Show the formatting toolbar. Default: true.
 	 *   showStatusBar — Show the word/char count status bar. Default: true.
 	 *   minHeight     — CSS min-height of the editing area. Default: '40vh'.
 	 *   readonly      — If true, editor is not editable. Default: false.
+ *   ariaLabel     — The name of the editing area for a screen reader. Default: 'Document'.
 	 *   maxImageEdge  — Longest edge (px) an inserted image is scaled down to.
 	 *                   0 keeps the original dimensions. Default: 1600.
 	 *   maxImageDisplayWidth
@@ -58,6 +62,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
+	import { sanitizeHtml, sanitizeTree } from '../sanitize.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -80,15 +85,16 @@
 	} from '../images.js';
 
 	interface ChangePayload {
-		html: string;
-		text: string;
+		/** Read when asked for, and once: on a long document each of these is work. */
+		readonly html: string;
+		readonly text: string;
 		wordCount: number;
 		charCount: number;
 		/**
 		 * Approximate size of this document as RTF. Pictures dominate it and are
 		 * counted exactly; see getRtfSize() for the precise figure.
 		 */
-		estimatedRtfBytes: number;
+		readonly estimatedRtfBytes: number;
 	}
 
 	interface Props {
@@ -100,6 +106,7 @@
 		showStatusBar?: boolean;
 		minHeight?: string;
 		readonly?: boolean;
+		ariaLabel?: string;
 		maxImageEdge?: number;
 		maxImageBytes?: number;
 		maxImageDisplayWidth?: number;
@@ -113,19 +120,27 @@
 		onimport?: (payload: { html: string }) => void;
 	}
 
+	/**
+	 * An empty document: one paragraph with the line break that gives it height. Without the
+	 * break the paragraph has no line to put the caret in, the first words typed land outside it,
+	 * and the RTF then carries the empty paragraph as a blank line the screen never showed.
+	 */
+	const EMPTY_DOCUMENT = '<p><br></p>';
+
 	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
 	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 
 	// ── Props ──
 	let {
-		content = '<p></p>',
+		content = EMPTY_DOCUMENT,
 		placeholder = 'Start writing something beautiful...',
-		autosave = true,
+		autosave = false,
 		storageKey = 'ink-editor-content',
 		showToolbar = true,
 		showStatusBar = true,
 		minHeight = '40vh',
 		readonly = false,
+		ariaLabel = 'Document',
 		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
 		maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
 		maxImageDisplayWidth = DEFAULT_MAX_IMAGE_DISPLAY_WIDTH,
@@ -197,9 +212,21 @@
 		if (editorEl) {
 			selectedImage = null;
 			documentReplaced();
-			editorEl.innerHTML = html;
+			showDocument(html);
 			updateCounts();
 			if (autosave) scheduleAutoSave();
+		}
+	}
+
+	/**
+	 * Put HTML from outside in the editor: made safe first (sanitizeHtml), and with a line in
+	 * every empty paragraph, so it shows as the blank line the RTF writes for it.
+	 */
+	function showDocument(html: string): void {
+		if (!editorEl) return;
+		editorEl.innerHTML = sanitizeHtml(html);
+		for (const p of Array.from(editorEl.querySelectorAll('p'))) {
+			if (p.childNodes.length === 0) p.appendChild(document.createElement('br'));
 		}
 	}
 
@@ -229,7 +256,8 @@
 		if (editorEl) {
 			selectedImage = null;
 			documentReplaced();
-			editorEl.innerHTML = '<p></p>';
+			editorEl.innerHTML = EMPTY_DOCUMENT;
+			clearTimeout(saveTimer);
 			try { localStorage.removeItem(storageKey); } catch (e) {}
 			updateCounts();
 			lastSaved = '';
@@ -1116,12 +1144,25 @@
 	}
 
 	function fireChange(): void {
-		onchange?.({
-			html: editorEl?.innerHTML || '',
-			text: editorEl?.innerText || '',
+		if (!onchange) return;
+		// The HTML, the text and the size estimate each read the whole document, and this runs on
+		// every keystroke: with a few pictures in the document it took a tenth of a second. Each is
+		// worked out when the handler asks for it, once, and not at all if it never does.
+		const el = editorEl;
+		const options = { fontFamily, fontSize };
+		const once = <T,>(read: () => T): (() => T) => {
+			let value: { v: T } | null = null;
+			return () => (value ??= { v: read() }).v;
+		};
+		const html = once(() => el?.innerHTML || '');
+		const text = once(() => el?.innerText || '');
+		const estimate = once(() => (el ? estimateRtfBytes(el, options) : 0));
+		onchange({
+			get html() { return html(); },
+			get text() { return text(); },
 			wordCount,
 			charCount,
-			estimatedRtfBytes: editorEl ? estimateRtfBytes(editorEl, { fontFamily, fontSize }) : 0
+			get estimatedRtfBytes() { return estimate(); }
 		});
 	}
 
@@ -1204,7 +1245,7 @@
 				const range = sel.getRangeAt(0);
 				range.deleteContents();
 				const a = document.createElement('a');
-				a.href = linkUrl;
+				a.href = linkUrl.trim();
 				a.textContent = linkText;
 				range.insertNode(a);
 				range.setStartAfter(a);
@@ -1212,9 +1253,24 @@
 				sel.addRange(range);
 			}
 		} else {
-			document.execCommand('createLink', false, linkUrl);
+			document.execCommand('createLink', false, linkUrl.trim());
 		}
 		linkModalOpen = false;
+		updateCounts();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/**
+	 * Enter in a dialog's field does what the dialog's button does. The key press ends here: the
+	 * dialog hands the keyboard back to the document, where the same Enter would go on to replace
+	 * the selected text with a new line.
+	 */
+	function onEnter(e: KeyboardEvent, act: () => void): void {
+		if (e.key !== 'Enter' || e.isComposing) return;
+		e.preventDefault();
+		e.stopPropagation();
+		act();
 	}
 
 	// ── Images ──
@@ -1553,7 +1609,9 @@
 			if (editorEl) {
 				selectedImage = null;
 				documentReplaced();
-				editorEl.innerHTML = html;
+				// (What the reader writes is safe as it stands; it goes the same way as any other
+				// HTML so there is one way in.)
+				showDocument(html);
 				updateCounts();
 				fireChange();
 				if (autosave) scheduleAutoSave();
@@ -1783,6 +1841,10 @@
 
 	function tidyPasted(before: Set<Element>): void {
 		if (!editorEl) return;
+		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the
+		// scripts out of a paste itself, but leaves a form, an <iframe>, or a block with
+		// position: fixed that covers the page.
+		sanitizeTree(editorEl, (el) => !before.has(el));
 		for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 			if (before.has(el)) continue;
 			el.removeAttribute('id');
@@ -2080,7 +2142,9 @@
 			try {
 				const saved = localStorage.getItem(storageKey);
 				if (saved) {
-					editorEl.innerHTML = saved;
+					// A draft is HTML from outside like any other: anything that can write to this
+					// origin's storage can write it.
+					showDocument(saved);
 					updateCounts();
 					return;
 				}
@@ -2089,7 +2153,7 @@
 		// Always write the initial content prop so the div isn't empty.
 		// {#html content} must NOT be used inside the contenteditable div —
 		// Svelte would re-inject it on every reactive update, duplicating text.
-		editorEl.innerHTML = content || '<p></p>';
+		showDocument(content || EMPTY_DOCUMENT);
 		updateCounts();
 	});
 
@@ -2167,6 +2231,11 @@
 			class:copy-format-pick={copyFormat === 'pick'}
 			class:copy-format-apply={copyFormat === 'apply'}
 			contenteditable={!readonly}
+			role="textbox"
+			tabindex="0"
+			aria-multiline="true"
+			aria-label={ariaLabel}
+			aria-readonly={readonly ? 'true' : undefined}
 			spellcheck="true"
 			bind:this={editorEl}
 			oninput={handleInput}
@@ -2217,12 +2286,20 @@
 
 <!-- Link Modal -->
 <Modal title="Insert Link" open={linkModalOpen} onclose={() => (linkModalOpen = false)}>
-	<input type="text" placeholder="Link text (leave empty to use selection)" bind:value={linkText} />
+	<input
+		type="text"
+		placeholder="Link text (leave empty to use selection)"
+		aria-label="Link text"
+		bind:value={linkText}
+		onkeydown={(e) => onEnter(e, applyLink)}
+	/>
 	<input
 		type="url"
 		placeholder="https://example.com"
+		aria-label="Link address"
+		data-autofocus
 		bind:value={linkUrl}
-		onkeydown={(e) => e.key === 'Enter' && applyLink()}
+		onkeydown={(e) => onEnter(e, applyLink)}
 		aria-invalid={linkError ? 'true' : undefined}
 		aria-describedby={linkError ? 'ink-link-error' : undefined}
 	/>
@@ -2253,17 +2330,18 @@
 		<input
 			type="url"
 			placeholder="https://example.com/image.jpg"
+			aria-label="Image address"
 			bind:value={imageUrl}
-			onkeydown={(e) => e.key === 'Enter' && applyImage()}
+			onkeydown={(e) => onEnter(e, () => void applyImage())}
 		/>
 	{/if}
 
 	{#if pendingImageFiles.length > 1}
 		<p class="ink-modal-hint">Add a description under each image after inserting.</p>
 	{:else}
-		<input type="text" placeholder="Description shown below the image (optional)" bind:value={imageCaption} />
+		<input type="text" placeholder="Description shown below the image (optional)" aria-label="Description shown below the image" bind:value={imageCaption} />
 	{/if}
-	<input type="text" placeholder="Alt text for screen readers (optional)" bind:value={imageAlt} />
+	<input type="text" placeholder="Alt text for screen readers (optional)" aria-label="Alt text for screen readers" bind:value={imageAlt} />
 
 	{#snippet actions()}
 		<button class="ink-btn-ghost" onclick={() => (imageModalOpen = false)}>Cancel</button>
@@ -2279,7 +2357,7 @@
 
 <!-- Import Error Toast -->
 {#if importError}
-	<div class="ink-toast-error">
+	<div class="ink-toast-error" role="alert">
 		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
 		{importError}
 	</div>

@@ -11,12 +11,62 @@
 
 	let { open = false, title = '', onclose, children, actions }: Props = $props();
 
+	let dialogEl: HTMLDivElement | null = $state(null);
+	const titleId = `ink-modal-title-${Math.random().toString(36).slice(2, 10)}`;
+
+	const FOCUSABLE = 'input:not([disabled]):not([type="hidden"]), button:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
+	function focusable(): HTMLElement[] {
+		return dialogEl ? Array.from(dialogEl.querySelectorAll<HTMLElement>(FOCUSABLE)) : [];
+	}
+
+	// An open dialog takes the keyboard. Left where it was, in the document behind the dialog,
+	// what was typed for the dialog (a link's address) replaced the selected text instead.
+	// Closed with Escape or Cancel, the keyboard goes back to where it was.
+	$effect(() => {
+		if (!open || !dialogEl) return;
+		const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		const first = dialogEl.querySelector<HTMLElement>('[data-autofocus]') ?? focusable()[0] ?? dialogEl;
+		first.focus();
+		const dialog = dialogEl;
+		return () => {
+			// Only if the keyboard is still the dialog's to hand back: whoever closed the dialog
+			// may have put it somewhere already (Insert puts it in the document).
+			const active = document.activeElement;
+			if (previous?.isConnected && (!active || active === document.body || dialog.contains(active))) previous.focus();
+		};
+	});
+
 	function handleOverlayClick(e: MouseEvent) {
 		if (e.target === e.currentTarget) onclose?.();
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') onclose?.();
+		if (e.key === 'Escape') {
+			e.preventDefault();
+			onclose?.();
+			return;
+		}
+		// Tab goes round the dialog, not on into the page behind it.
+		if (e.key !== 'Tab' || !dialogEl) return;
+		const items = focusable();
+		if (items.length === 0) {
+			e.preventDefault();
+			return;
+		}
+		const active = document.activeElement;
+		const first = items[0];
+		const last = items[items.length - 1];
+		if (!dialogEl.contains(active)) {
+			e.preventDefault();
+			first.focus();
+		} else if (e.shiftKey && active === first) {
+			e.preventDefault();
+			last.focus();
+		} else if (!e.shiftKey && active === last) {
+			e.preventDefault();
+			first.focus();
+		}
 	}
 </script>
 
@@ -26,8 +76,8 @@
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div class="modal-overlay" onclick={handleOverlayClick}>
-		<div class="modal">
-			<h3>{title}</h3>
+		<div class="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} tabindex="-1" bind:this={dialogEl}>
+			<h3 id={titleId}>{title}</h3>
 			{@render children()}
 			{#if actions}
 				<div class="modal-actions">
@@ -69,6 +119,10 @@
 	@keyframes slideUp {
 		from { opacity: 0; transform: translateY(12px); }
 		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.modal:focus {
+		outline: none;
 	}
 
 	.modal h3 {

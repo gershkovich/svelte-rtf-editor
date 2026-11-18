@@ -258,7 +258,7 @@ describe('Copy format', () => {
 		expect(bar()).toBeNull();
 		expect(host!.querySelector('.ink-copy-format-source')).toBeNull();
 		click(editor.querySelector('p')!);
-		expect(editor.innerHTML).toBe('<p></p>');
+		expect(editor.innerHTML).toBe('<p><br></p>');
 	});
 
 	it('a new document puts the brush down', () => {
