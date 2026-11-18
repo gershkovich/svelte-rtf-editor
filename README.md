@@ -142,7 +142,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 
 | Prop       | Payload                                      | Description                                 |
 |------------|----------------------------------------------|---------------------------------------------|
-| `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change. `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, so a handler that only wants the counts costs nothing on a long document |
+| `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change. `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, so a handler that only wants the counts costs nothing on a long document. They are the document as it is when first read: read them in the handler. A payload kept and read after a later edit gives the document as it is by then |
 | `onsave`   | `{ html }`                                   | Fired on auto-save or `Ctrl+S`              |
 | `onimport` | `{ html }`                                   | Fired after a successful RTF file import    |
 
@@ -175,11 +175,16 @@ Whatever HTML reaches the editor is made safe before it is shown: the `content` 
 
 | Taken out | Why |
 |---|---|
-| `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<svg>`, `<math>`, `<video>`, `<audio>`, form controls, with what is in them | They run code, load a page of their own, or take input |
+| `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<svg>`, `<video>`, `<audio>`, with what is in them | They run code or load a page of their own |
+| `<button>`, `<textarea>`, `<select>`, `<input>` and `<math>`: the element goes, the words it showed stay as text | They take input, or are not something RTF can carry. A formula of numbers and signs in a row stays as those characters (`30%`); one with a fraction, a power or a root is written `[formula]`, since its parts read in a row would say something else |
 | Every attribute but the ones a document uses (`style`, `href`, `src`, `alt`, `colspan`, `start`, …) | That is how `onclick`, `onerror` and the rest go |
 | A link that is not `http(s):`, `mailto:` or `tel:`; a picture address that is not a web address or picture data | `javascript:`, `data:text/html`, `file:` |
 | Style properties that do not format text, a paragraph, a picture or a table (`position`, `z-index`, …), and any value with `url()` | A pasted block with `position: fixed` covered the page the editor sat in |
-| `class`, and an `id` that names something on `document` or `window` | They would take on the page's own styles, or answer to a name the page's scripts look up |
+| A size that would put an element outside the page: a margin below zero, a margin, padding or width over 2200 px (a little more than the widest page), a width or height on anything but a picture, a table, its cells or a rule, a size in `vw`/`vh` or worked out with `calc()`, a `display` other than the ones a document uses | A block with a negative margin was drawn over the toolbar, and a link with a padding of thousands of pixels was the size of the page |
+| Style text the browser did not read as a property (`width: expression(…)`, a property named twice) | It does nothing here, but it would still be in the HTML for whatever shows it next. Where there is any, the attribute is written again from the properties that were read and kept |
+| `class`; an `id` that names something on `document` or `window`; in the editor, an `id` the page already uses for an element outside an editor | They would take on the page's own styles, or answer to a name or an `id` the page's scripts look up. A document's own ids are kept |
+
+The editing area also clips what it holds: nothing in a document is drawn outside it, whatever its styles, and a table wider than the area scrolls inside it. Text that Word marked hidden (`mso-hide: all`) is hidden on screen as it is left out of the RTF.
 
 `getHTML()` returns what is in the editor, which has been through this. HTML from `rtfToHtml` is safe by construction (see [What `rtfToHtml` may return](#what-rtftohtml-may-return)).
 

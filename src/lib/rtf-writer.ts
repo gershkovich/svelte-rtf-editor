@@ -1384,12 +1384,16 @@ function holdsSomething(el: Element): boolean {
 
 /** Whether an element holds text that shows, outside `skip`: any text other than collapsible whitespace. */
 function hasTextOutside(el: Node, skip: Node | null): boolean {
-	for (const child of Array.from(el.childNodes)) {
-		if (child === skip) continue;
-		if (child.nodeType === Node.TEXT_NODE) {
-			if (!COLLAPSIBLE_WHITESPACE.test(child.textContent || '') && !isUnseen(child)) return true;
-		} else if (child.nodeType === Node.ELEMENT_NODE && !isHidden(child as Element) && hasTextOutside(child, skip)) {
-			return true;
+	// (With a list of what is still to look at, not a call for each level of nesting.)
+	const pending: Node[] = [el];
+	while (pending.length > 0) {
+		for (const child of Array.from(pending.pop()!.childNodes)) {
+			if (child === skip) continue;
+			if (child.nodeType === Node.TEXT_NODE) {
+				if (!COLLAPSIBLE_WHITESPACE.test(child.textContent || '') && !isUnseen(child)) return true;
+			} else if (child.nodeType === Node.ELEMENT_NODE && !isHidden(child as Element)) {
+				pending.push(child);
+			}
 		}
 	}
 	return false;
@@ -1409,6 +1413,18 @@ const LIST_HANG = 360;
  * indented one level further. Numbers start at the list's `start`.
  */
 function listRtf(list: HTMLElement, ctx: WalkContext): string {
+	// A list straight inside a list is written from here, not through walkNode, so the depth is
+	// counted here too: six thousand of them, one in the next, ran out of stack.
+	if (walkDepth >= MAX_ELEMENT_DEPTH) return isHidden(list) ? '' : escapeRtf(flatText(list));
+	walkDepth++;
+	try {
+		return listRtfAt(list, ctx);
+	} finally {
+		walkDepth--;
+	}
+}
+
+function listRtfAt(list: HTMLElement, ctx: WalkContext): string {
 	const ordered = tagOf(list) === 'ol';
 	// A list read back from RTF carries the indent beyond its level's own as a margin, which
 	// is negative for a list nested by less than half an inch.
@@ -1719,10 +1735,14 @@ function endsItsLine(node: Node): boolean {
 
 /** Whether an inline element's content ends with a block, which has ended its own line. */
 function endsWithBlock(el: Node): boolean {
-	let last = el.lastChild;
-	while (last && showsNothing(last)) last = last.previousSibling;
-	if (!last || last.nodeType !== Node.ELEMENT_NODE) return false;
-	return endsItsLine(last) || endsWithBlock(last);
+	// (Down the last thing in the last thing, in a loop: no call for each level of nesting.)
+	for (let at: Node = el; ; ) {
+		let last = at.lastChild;
+		while (last && showsNothing(last)) last = last.previousSibling;
+		if (!last || last.nodeType !== Node.ELEMENT_NODE) return false;
+		if (endsItsLine(last)) return true;
+		at = last;
+	}
 }
 
 /**

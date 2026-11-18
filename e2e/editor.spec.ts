@@ -165,6 +165,86 @@ test.describe('HTML from outside', () => {
 	});
 });
 
+test.describe('what a review of these changes found', () => {
+	test('a block cannot be drawn over the toolbar with styles a document may have', async ({ page }) => {
+		// A margin below zero pulled it up over the toolbar; a width of thousands ran it out
+		// over the page beside the editor.
+		await open(page, { content: '<p>Report body</p>' });
+		await page.evaluate(() =>
+			window.ed.setHTML(
+				'<p>Report body</p><div style="margin-top:-600px;margin-left:-300px;width:3000px;height:3000px;background-color:red">COVER</div>' +
+					'<a href="https://example.com/" style="display:block;margin:-2000px;padding:4000px">all of the page</a>'
+			)
+		);
+		const over = await page.evaluate(() => {
+			const bar = document.querySelector('.toolbar')!.getBoundingClientRect();
+			const hit = document.elementFromPoint(bar.left + 20, bar.top + 10);
+			return hit ? !!hit.closest('.ink-content') : false;
+		});
+		expect(over).toBe(false);
+		expect(await html(page)).not.toMatch(/margin|padding|width|height/);
+		// Whatever its styles, nothing in the document is drawn outside the editing area.
+		const outside = await page.evaluate(() => {
+			window.ed.setHTML('<table style="width:2000px"><tbody><tr><td style="background-color:red">wide</td></tr></tbody></table>');
+			const area = document.querySelector('.ink-content')!.getBoundingClientRect();
+			const hit = document.elementFromPoint(Math.min(area.right + 30, window.innerWidth - 5), area.top + 60);
+			return hit ? !!hit.closest('.ink-content') : false;
+		});
+		expect(outside).toBe(false);
+	});
+
+	test('style text the browser did not read is not passed on', async ({ page }) => {
+		await open(page);
+		const out = await page.evaluate(() =>
+			window.lib.sanitizeHtml('<div style="background:url(javascript:alert(1))">a</div><div style="width:expression(alert(1))">b</div><p style="color:red;margin-left:max(10px,5000px)">c</p>')
+		);
+		expect(out).not.toMatch(/expression|javascript|url\(|max\(/);
+		expect(out).toContain('color: red');
+	});
+
+	test('what Word hid is hidden on screen as it is in the RTF', async ({ page }) => {
+		await open(page, { content: '<p>a<span style="mso-hide:all">SECRET</span>b</p>' });
+		expect(await page.locator(content).innerText()).not.toContain('SECRET');
+		expect(await page.evaluate(() => window.ed.getRTF())).not.toContain('SECRET');
+	});
+
+	test('an empty document counts no characters', async ({ page }) => {
+		await open(page);
+		await expect(page.getByText('0 words · 0 characters')).toBeVisible();
+		await page.click(content);
+		await page.keyboard.type('ab');
+		await expect(page.getByText('1 word · 2 characters')).toBeVisible();
+	});
+
+	test('lists nested 6000 deep, one straight in the next, are written', async ({ page }) => {
+		await open(page);
+		const out = await page.evaluate(() => {
+			const root = document.createElement('div');
+			let at: HTMLElement = root;
+			for (let i = 0; i < 6000; i++) {
+				const next = document.createElement(i % 2 ? 'ol' : 'ul');
+				at.appendChild(next);
+				at = next;
+			}
+			at.innerHTML = '<li>deep</li>';
+			return [window.lib.htmlToRtf(root), window.lib.htmlToMarkdown(root)] as const;
+		});
+		expect(out[0]).toContain('deep');
+		expect(out[1]).toContain('deep');
+	});
+
+	test('a button that does something once is not announced as a toggle', async ({ page }) => {
+		await open(page);
+		await expect(page.getByRole('button', { name: 'Undo (Ctrl+Z)' })).not.toHaveAttribute('aria-pressed', /.*/);
+		await expect(page.getByRole('button', { name: 'Bold (Ctrl+B)' })).toHaveAttribute('aria-pressed', 'false');
+	});
+
+	test('the words in a formula and a text box stay when the element goes', async ({ page }) => {
+		await open(page, { content: '<p>Ki-67 <math><mn>30</mn><mo>%</mo></math>, note <textarea>margins clear</textarea></p>' });
+		expect(await html(page)).toBe('<p>Ki-67 30%, note margins clear</p>');
+	});
+});
+
 test.describe('the writers', () => {
 	test('numbers stay in range in a real browser', async ({ page }) => {
 		await open(page);

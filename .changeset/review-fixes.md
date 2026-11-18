@@ -12,11 +12,22 @@ Fixes from a review of the editor in a real browser, and two defaults that chang
   each document its own `storageKey`.
 - HTML from outside is made safe before it is shown: the `content` prop, `setHTML()`, a draft
   restored from `localStorage` and what a paste brings. Scripts, event handlers, `<iframe>`,
-  `<svg>`, form controls, `javascript:` links, `class`, and styles such as `position: fixed` are
-  taken out. `sanitizeHtml` is exported. If you relied on any of those surviving `setHTML`, they
-  no longer do.
+  `<svg>`, `javascript:` links, `class`, and styles such as `position: fixed` are taken out.
+  `sanitizeHtml` is exported. If you relied on any of those surviving `setHTML`, they no longer
+  do.
+  - Sizes that would put an element outside the page go too: a margin below zero, a margin,
+    padding or width over 2200 px, a width or height on anything but a picture, a table, its cells
+    or a rule. The editing area clips what it holds, and a table wider than it scrolls inside it.
+  - `<button>`, `<textarea>`, `<select>`, `<input>` and `<math>` are taken out and the words they
+    showed are kept as text. A formula with a fraction, a power or a root is written `[formula]`.
+  - A document's own `id`s are kept, unless the page already uses that `id` outside an editor or
+    it names something on `document` or `window`.
+  - Text Word marked hidden (`mso-hide: all`) is hidden on screen as it is left out of the RTF.
+- `onchange`'s `html`, `text` and `estimatedRtfBytes` are the document as it is when the handler
+  first reads them, not a copy made when the change happened. Read them in the handler; a
+  payload kept and read after a later edit gives the later document.
 - The empty document is `<p><br></p>`, where it was `<p></p>`, and an empty `<p>` in what is
-  given gets its line break.
+  given gets its line break. It still counts no words and no characters.
 
 **Fixed**
 
@@ -29,7 +40,8 @@ Fixes from a review of the editor in a real browser, and two defaults that chang
 - The writer wrote numbers no reader accepts: `\blueNaN` for `<font color="#abcd">`, `\red999`,
   `\fs199998`, and indents and picture sizes of ten digits and more. Colors are 0 to 255, a size
   is at most 1638 pt, and a length at most 22 inches.
-- `htmlToRtf` and `htmlToMarkdown` ran out of stack on elements nested a few thousand deep.
+- `htmlToRtf` and `htmlToMarkdown` ran out of stack on elements nested a few thousand deep,
+  lists straight inside lists among them.
 - `rtfToHtml` reads a picture's type from its bytes where they say it, and shows no picture wider
   than 22 inches.
 - A picture fetched from an address is given up at 25 MB as it arrives, where the whole of it
@@ -45,7 +57,8 @@ Fixes from a review of the editor in a real browser, and two defaults that chang
 **Accessibility**
 
 - The editing area is a labelled multi-line text box (`ariaLabel`, default "Document"), the
-  toolbar a toolbar, its buttons say whether they are pressed, and the error message is an alert.
+  toolbar a toolbar, the buttons that are on or off (Bold, Italic, Underline, Strikethrough, Copy
+  format) say which, and the error message is an alert.
 
 **Tooling** (nothing in the published package changes)
 

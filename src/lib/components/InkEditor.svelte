@@ -62,7 +62,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
-	import { sanitizeHtml, sanitizeTree } from '../sanitize.js';
+	import { sanitizedNodes, sanitizeTree } from '../sanitize.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -85,7 +85,12 @@
 	} from '../images.js';
 
 	interface ChangePayload {
-		/** Read when asked for, and once: on a long document each of these is work. */
+		/**
+		 * `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, and
+		 * once: on a long document each is work, and most handlers read one of them or none.
+		 * They are the document as it is when first read, so read them in the handler. A payload
+		 * kept and read after a later edit gives the document as it is by then.
+		 */
 		readonly html: string;
 		readonly text: string;
 		wordCount: number;
@@ -219,12 +224,19 @@
 	}
 
 	/**
-	 * Put HTML from outside in the editor: made safe first (sanitizeHtml), and with a line in
-	 * every empty paragraph, so it shows as the blank line the RTF writes for it.
+	 * Put HTML from outside in the editor: made safe first, and with a line in every empty
+	 * paragraph, so it shows as the blank line the RTF writes for it. The nodes that were checked
+	 * are the nodes shown (see sanitizedNodes): the HTML is read once.
 	 */
 	function showDocument(html: string): void {
 		if (!editorEl) return;
-		editorEl.innerHTML = sanitizeHtml(html);
+		// An id the page already uses outside an editor is not the document's to take: see
+		// sanitize.ts. (Another editor on the page may hold a document with the same ids.)
+		const idTaken = (id: string) => {
+			const owner = document.getElementById(id);
+			return owner !== null && owner.closest('.ink-content') === null;
+		};
+		editorEl.replaceChildren(...sanitizedNodes(html, document, idTaken));
 		for (const p of Array.from(editorEl.querySelectorAll('p'))) {
 			if (p.childNodes.length === 0) p.appendChild(document.createElement('br'));
 		}
@@ -1135,9 +1147,18 @@
 		updateToolbarState();
 	}
 
+	/** The editing area was scrolled sideways (a wide table): what is drawn over it moves with it. */
+	function contentScrolled(): void {
+		overlayRef?.reposition();
+		placeCopySourceBox();
+	}
+
 	function updateCounts(): void {
 		if (!editorEl) return;
-		const text = editorEl.innerText || '';
+		const shown = editorEl.innerText || '';
+		// A document with nothing in it is a paragraph with a line break, which innerText gives
+		// as one character: an empty report then counted one, and so did one of blank lines only.
+		const text = shown.trim() === '' && !editorEl.querySelector('img, table, hr') ? '' : shown;
 		const words = text.trim().split(/\s+/).filter((w) => w.length > 0);
 		wordCount = words.length;
 		charCount = text.length;
@@ -2241,6 +2262,7 @@
 			oninput={handleInput}
 			onmouseup={caretMoved}
 			onkeyup={caretMoved}
+			onscroll={contentScrolled}
 			onkeydown={handleKeydown}
 			onmousedown={() => (tabLeavesEditor = false)}
 			onblur={() => (tabLeavesEditor = false)}
@@ -2380,6 +2402,9 @@
 
 	/* ── Content Area ── */
 	.ink-content {
+		/* Nothing in the document is drawn outside the editing area, whatever its styles: a table
+		   wider than the area scrolls inside it, and does not run out over the page beside it. */
+		overflow: auto;
 		min-height: var(--ink-min-height, 40vh);
 		padding: 48px 56px;
 		background: white;
