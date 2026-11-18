@@ -320,9 +320,17 @@ function codeText(el: HTMLElement, ctx: MarkdownContext): string {
 		}
 		const block = BLOCK_TAGS.has(tag);
 		if (block) lineDue = true;
-		node.childNodes.forEach((child) => visit(child, inside));
+		if (codeDepth >= MAX_ELEMENT_DEPTH) {
+			newLineIfDue();
+			code += (node.textContent || '');
+		} else {
+			codeDepth++;
+			node.childNodes.forEach((child) => visit(child, inside));
+			codeDepth--;
+		}
 		if (block) lineDue = true;
 	};
+	let codeDepth = depth;
 	el.childNodes.forEach((child) => visit(child, ctx));
 	return code;
 }
@@ -371,8 +379,45 @@ function formatOf(el: HTMLElement, tag: string, ctx: MarkdownContext): { inner: 
 	}
 }
 
+/**
+ * The deepest nesting of elements written element by element. A browser's HTML parser stops at
+ * 512, so only a DOM built by script goes deeper; a few thousand deep, one call per element ran
+ * out of stack. Past this depth an element is written as its text.
+ */
+const MAX_ELEMENT_DEPTH = 600;
+/** How many elements deep the converter is. */
+let depth = 0;
+
+/** The text an element shows, escaped, read without a call per level of nesting. */
+function flatText(root: HTMLElement, ctx: MarkdownContext): string {
+	let text = '';
+	const pending: { node: Node; at: MarkdownContext }[] = [{ node: root, at: ctx }];
+	while (pending.length > 0) {
+		const { node, at } = pending.pop()!;
+		if (node.nodeType === Node.TEXT_NODE) {
+			if (!at.unseen) text += node.textContent || '';
+		} else if (node.nodeType === Node.ELEMENT_NODE) {
+			const inside = shown(node as HTMLElement, at);
+			if (!inside) continue;
+			for (let i = node.childNodes.length - 1; i >= 0; i--) pending.push({ node: node.childNodes[i], at: inside });
+		}
+	}
+	return escapeMarkdown(text.replace(/[ \t\r\n]+/g, ' '));
+}
+
 /** A piece of a line, as its parts: text, or an element that holds no block. */
 function inlineParts(node: Node, ctx: MarkdownContext): MarkdownPart[] {
+	if (node.nodeType !== Node.ELEMENT_NODE) return inlinePartsAt(node, ctx);
+	if (depth >= MAX_ELEMENT_DEPTH) return [flatText(node as HTMLElement, ctx)];
+	depth++;
+	try {
+		return inlinePartsAt(node, ctx);
+	} finally {
+		depth--;
+	}
+}
+
+function inlinePartsAt(node: Node, ctx: MarkdownContext): MarkdownPart[] {
 	if (node.nodeType === Node.TEXT_NODE) {
 		if (ctx.unseen) return [];
 		// A line break in the HTML source shows as a space, as it does on screen; where white
@@ -429,6 +474,10 @@ function nodesToMarkdown(nodes: Iterable<Node>, ctx: MarkdownContext, out: Markd
 		if (ctx.captions.has(el)) continue;
 		const inside = shown(el, ctx);
 		if (!inside) continue;
+		if (depth >= MAX_ELEMENT_DEPTH) {
+			addPart(run, flatText(el, ctx));
+			continue;
+		}
 
 		const tag = el.tagName.toLowerCase();
 		// In a figure a picture is a block of its own, so text typed beside it is not run into it.
@@ -438,13 +487,18 @@ function nodesToMarkdown(nodes: Iterable<Node>, ctx: MarkdownContext, out: Markd
 			continue;
 		}
 		endRun();
-		if (!isBlock) {
-			const format = formatOf(el, tag, inside);
-			nodesToMarkdown(el.childNodes, { ...format.inner, open: format.key ? [...inside.open, format] : inside.open }, out);
-			continue;
+		depth++;
+		try {
+			if (!isBlock) {
+				const format = formatOf(el, tag, inside);
+				nodesToMarkdown(el.childNodes, { ...format.inner, open: format.key ? [...inside.open, format] : inside.open }, out);
+				continue;
+			}
+			endLine(out, ctx);
+			blockToMarkdown(el, tag, inside, out);
+		} finally {
+			depth--;
 		}
-		endLine(out, ctx);
-		blockToMarkdown(el, tag, inside, out);
 	}
 	endRun();
 }

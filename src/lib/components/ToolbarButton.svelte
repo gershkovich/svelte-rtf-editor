@@ -2,19 +2,25 @@
 	import type { Snippet } from 'svelte';
 
 	interface Props {
+		/**
+		 * Whether the button is on, for one that is on or off (Bold). Left out for one that does
+		 * something once (Undo, Insert image): that one is not announced as pressed or not.
+		 */
 		active?: boolean;
 		title?: string;
 		onclick?: () => void;
 		children: Snippet;
 	}
 
-	let { active = false, title = '', onclick, children }: Props = $props();
+	let { active, title = '', onclick, children }: Props = $props();
 </script>
 
 <button
 	class="tb"
-	class:active
+	class:active={active === true}
 	{title}
+	aria-label={title || undefined}
+	aria-pressed={active}
 	onclick={onclick}
 	onmousedown={(e) => e.preventDefault()}
 	type="button"

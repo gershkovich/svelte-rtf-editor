@@ -820,13 +820,20 @@ describe('InkEditor: a pasted picture that is left out takes what was only there
 		expect(contentEl().innerHTML).toBe('<p>Report body</p><ul><li>Second</li></ul>');
 	});
 
-	it('a paragraph that still shows something without words (a rule, a drawing) stays', async () => {
-		pasteHtml(`<div>${IMG}<hr></div><p>${IMG}<svg width="10" height="10"></svg></p>`);
+	it('a block that still shows something without words (a rule) stays', async () => {
+		pasteHtml(`<div>${IMG}<hr></div>`);
 		await settle();
 
 		expect(contentEl().querySelector('img')).toBeNull();
 		expect(contentEl().querySelector('div > hr')).not.toBeNull();
-		expect(contentEl().querySelector('p > svg')).not.toBeNull();
+	});
+
+	it('a pasted drawing is taken out as the paste comes in: an <svg> can carry script, and the RTF has no place for one', async () => {
+		pasteHtml(`<p>Words <svg width="10" height="10" onload="window.x = 1"><circle r="4"></circle></svg>after</p>`);
+		await settle();
+
+		expect(contentEl().querySelector('svg')).toBeNull();
+		expect(contentEl().textContent).toContain('Words after');
 	});
 
 	it('a table cell stays, since the table needs it', async () => {

@@ -3,14 +3,18 @@
 	 * InkEditor — A reusable Svelte 5 Rich Text Editor component.
 	 *
 	 * Props:
-	 *   content       — Initial HTML content (string). Default: empty paragraph.
+	 *   content       — Initial HTML content (string). Default: an empty paragraph. It is made
+ *                   safe before it is shown (see sanitize.ts): scripts, event handlers and
+ *                   the like are taken out.
 	 *   placeholder   — Placeholder text shown when editor is empty.
-	 *   autosave      — Enable localStorage auto-save. Default: true.
+	 *   autosave      — Keep a draft in localStorage and restore it on mount, in place of
+ *                   `content`. Default: false. Give each document its own storageKey.
 	 *   storageKey    — localStorage key for auto-save. Default: 'ink-editor-content'.
 	 *   showToolbar   — Show the formatting toolbar. Default: true.
 	 *   showStatusBar — Show the word/char count status bar. Default: true.
 	 *   minHeight     — CSS min-height of the editing area. Default: '40vh'.
 	 *   readonly      — If true, editor is not editable. Default: false.
+ *   ariaLabel     — The name of the editing area for a screen reader. Default: 'Document'.
 	 *   maxImageEdge  — Longest edge (px) an inserted image is scaled down to.
 	 *                   0 keeps the original dimensions. Default: 1600.
 	 *   maxImageDisplayWidth
@@ -58,6 +62,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
+	import { pasteNotes, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -80,15 +85,21 @@
 	} from '../images.js';
 
 	interface ChangePayload {
-		html: string;
-		text: string;
+		/**
+		 * `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, and
+		 * once: on a long document each is work, and most handlers read one of them or none.
+		 * They are the document as it is when first read, so read them in the handler. A payload
+		 * kept and read after a later edit gives the document as it is by then.
+		 */
+		readonly html: string;
+		readonly text: string;
 		wordCount: number;
 		charCount: number;
 		/**
 		 * Approximate size of this document as RTF. Pictures dominate it and are
 		 * counted exactly; see getRtfSize() for the precise figure.
 		 */
-		estimatedRtfBytes: number;
+		readonly estimatedRtfBytes: number;
 	}
 
 	interface Props {
@@ -100,6 +111,7 @@
 		showStatusBar?: boolean;
 		minHeight?: string;
 		readonly?: boolean;
+		ariaLabel?: string;
 		maxImageEdge?: number;
 		maxImageBytes?: number;
 		maxImageDisplayWidth?: number;
@@ -113,19 +125,27 @@
 		onimport?: (payload: { html: string }) => void;
 	}
 
+	/**
+	 * An empty document: one paragraph with the line break that gives it height. Without the
+	 * break the paragraph has no line to put the caret in, the first words typed land outside it,
+	 * and the RTF then carries the empty paragraph as a blank line the screen never showed.
+	 */
+	const EMPTY_DOCUMENT = '<p><br></p>';
+
 	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
 	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 
 	// ── Props ──
 	let {
-		content = '<p></p>',
+		content = EMPTY_DOCUMENT,
 		placeholder = 'Start writing something beautiful...',
-		autosave = true,
+		autosave = false,
 		storageKey = 'ink-editor-content',
 		showToolbar = true,
 		showStatusBar = true,
 		minHeight = '40vh',
 		readonly = false,
+		ariaLabel = 'Document',
 		maxImageEdge = DEFAULT_MAX_IMAGE_EDGE,
 		maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
 		maxImageDisplayWidth = DEFAULT_MAX_IMAGE_DISPLAY_WIDTH,
@@ -197,9 +217,28 @@
 		if (editorEl) {
 			selectedImage = null;
 			documentReplaced();
-			editorEl.innerHTML = html;
+			showDocument(html);
 			updateCounts();
 			if (autosave) scheduleAutoSave();
+		}
+	}
+
+	/**
+	 * Put HTML from outside in the editor: made safe first, and with a line in every empty
+	 * paragraph, so it shows as the blank line the RTF writes for it. The nodes that were checked
+	 * are the nodes shown (see sanitizedNodes): the HTML is read once.
+	 */
+	function showDocument(html: string): void {
+		if (!editorEl) return;
+		// An id the page already uses outside an editor is not the document's to take: see
+		// sanitize.ts. (Another editor on the page may hold a document with the same ids.)
+		const idTaken = (id: string) => {
+			const owner = document.getElementById(id);
+			return owner !== null && owner.closest('.ink-content') === null;
+		};
+		editorEl.replaceChildren(...sanitizedNodes(html, document, idTaken));
+		for (const p of Array.from(editorEl.querySelectorAll('p'))) {
+			if (p.childNodes.length === 0) p.appendChild(document.createElement('br'));
 		}
 	}
 
@@ -229,7 +268,8 @@
 		if (editorEl) {
 			selectedImage = null;
 			documentReplaced();
-			editorEl.innerHTML = '<p></p>';
+			editorEl.innerHTML = EMPTY_DOCUMENT;
+			clearTimeout(saveTimer);
 			try { localStorage.removeItem(storageKey); } catch (e) {}
 			updateCounts();
 			lastSaved = '';
@@ -275,6 +315,7 @@
 	function documentReplaced(): void {
 		indentUndo = [];
 		pastedOver = null;
+		pastedLoss = null;
 		stopCopyFormat();
 	}
 
@@ -1107,21 +1148,43 @@
 		updateToolbarState();
 	}
 
+	/** The editing area was scrolled sideways (a wide table): what is drawn over it moves with it. */
+	function contentScrolled(): void {
+		overlayRef?.reposition();
+		placeCopySourceBox();
+	}
+
 	function updateCounts(): void {
 		if (!editorEl) return;
-		const text = editorEl.innerText || '';
+		const shown = editorEl.innerText || '';
+		// A document with nothing in it is a paragraph with a line break, which innerText gives
+		// as one character: an empty report then counted one, and so did one of blank lines only.
+		const text = shown.trim() === '' && !editorEl.querySelector('img, table, hr') ? '' : shown;
 		const words = text.trim().split(/\s+/).filter((w) => w.length > 0);
 		wordCount = words.length;
 		charCount = text.length;
 	}
 
 	function fireChange(): void {
-		onchange?.({
-			html: editorEl?.innerHTML || '',
-			text: editorEl?.innerText || '',
+		if (!onchange) return;
+		// The HTML, the text and the size estimate each read the whole document, and this runs on
+		// every keystroke: with a few pictures in the document it took a tenth of a second. Each is
+		// worked out when the handler asks for it, once, and not at all if it never does.
+		const el = editorEl;
+		const options = { fontFamily, fontSize };
+		const once = <T,>(read: () => T): (() => T) => {
+			let value: { v: T } | null = null;
+			return () => (value ??= { v: read() }).v;
+		};
+		const html = once(() => el?.innerHTML || '');
+		const text = once(() => el?.innerText || '');
+		const estimate = once(() => (el ? estimateRtfBytes(el, options) : 0));
+		onchange({
+			get html() { return html(); },
+			get text() { return text(); },
 			wordCount,
 			charCount,
-			estimatedRtfBytes: editorEl ? estimateRtfBytes(editorEl, { fontFamily, fontSize }) : 0
+			get estimatedRtfBytes() { return estimate(); }
 		});
 	}
 
@@ -1204,7 +1267,7 @@
 				const range = sel.getRangeAt(0);
 				range.deleteContents();
 				const a = document.createElement('a');
-				a.href = linkUrl;
+				a.href = linkUrl.trim();
 				a.textContent = linkText;
 				range.insertNode(a);
 				range.setStartAfter(a);
@@ -1212,9 +1275,24 @@
 				sel.addRange(range);
 			}
 		} else {
-			document.execCommand('createLink', false, linkUrl);
+			document.execCommand('createLink', false, linkUrl.trim());
 		}
 		linkModalOpen = false;
+		updateCounts();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/**
+	 * Enter in a dialog's field does what the dialog's button does. The key press ends here: the
+	 * dialog hands the keyboard back to the document, where the same Enter would go on to replace
+	 * the selected text with a new line.
+	 */
+	function onEnter(e: KeyboardEvent, act: () => void): void {
+		if (e.key !== 'Enter' || e.isComposing) return;
+		e.preventDefault();
+		e.stopPropagation();
+		act();
 	}
 
 	// ── Images ──
@@ -1553,7 +1631,9 @@
 			if (editorEl) {
 				selectedImage = null;
 				documentReplaced();
-				editorEl.innerHTML = html;
+				// (What the reader writes is safe as it stands; it goes the same way as any other
+				// HTML so there is one way in.)
+				showDocument(html);
 				updateCounts();
 				fireChange();
 				if (autosave) scheduleAutoSave();
@@ -1761,13 +1841,57 @@
 		if (!readonly && editorEl) {
 			const snapshot = new Set(editorEl.querySelectorAll('*'));
 			pastedOver = snapshot;
+			// What the browser's paste may lose (see pasteNotes), and where the paste begins.
+			const notes = pasteNotes(e.clipboardData?.getData('text/html') ?? '');
+			const start = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+			pastedLoss =
+				notes && start && editorEl.contains(start.startContainer)
+					? { notes, from: shownCharsBefore(start.startContainer, start.startOffset) }
+					: null;
 			// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
 			// input event. Left set, the snapshot would make the next keystroke treat the whole
 			// document as pasted.
 			setTimeout(() => {
-				if (pastedOver === snapshot) pastedOver = null;
+				if (pastedOver === snapshot) {
+					pastedOver = null;
+					pastedLoss = null;
+				}
 			}, 0);
 		}
+	}
+
+	/** How many characters that are not white space the document has before a place in it. */
+	function shownCharsBefore(node: Node, offset: number): number {
+		if (!editorEl) return 0;
+		const range = document.createRange();
+		range.selectNodeContents(editorEl);
+		range.setEnd(node, offset);
+		return range.toString().replace(/\s/g, '').length;
+	}
+
+	/**
+	 * Set right what the browser's paste changed before it could be looked at: Word's hidden
+	 * text shown as text, and a text box left empty.
+	 */
+	function restorePasteLoss(before: Set<Element>, loss: { notes: PasteNotes; from: number }): void {
+		if (!editorEl) return;
+		const areas = Array.from(editorEl.querySelectorAll('textarea')).filter((area) => !before.has(area));
+		if (areas.length === loss.notes.textareas.length) {
+			areas.forEach((area, i) => {
+				if (area.value === '') area.textContent = loss.notes.textareas[i];
+			});
+		}
+		// After a paste the caret is at its end.
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !sel.isCollapsed || !editorEl.contains(sel.anchorNode)) return;
+		const caret = sel.getRangeAt(0);
+		const to = shownCharsBefore(caret.startContainer, caret.startOffset);
+		// A pasted element left with nothing in it goes, but not the one the caret is in: that
+		// one becomes an empty line, to type in. (Taken out as well, a paste of hidden text
+		// alone left the caret in no line at all, and the next words typed were in none.)
+		const held = sel.anchorNode instanceof Element ? sel.anchorNode : (sel.anchorNode?.parentElement ?? null);
+		if (!removeWordHidden(editorEl, loss.from, to, loss.notes, (el) => !before.has(el) && !(held !== null && el.contains(held)))) return;
+		if (held && held !== editorEl && held.isConnected && held.childNodes.length === 0) held.appendChild(document.createElement('br'));
 	}
 
 	// ── Pasted formatting ──
@@ -1780,9 +1904,17 @@
 	const PASTED_SPACING = ['margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'text-indent'];
 	/** The elements in the editor just before a paste; what is not in it came from the paste. */
 	let pastedOver: Set<Element> | null = null;
+	/** What the paste under way may lose, and how much text the document had before it. */
+	let pastedLoss: { notes: PasteNotes; from: number } | null = null;
 
 	function tidyPasted(before: Set<Element>): void {
 		if (!editorEl) return;
+		if (pastedLoss) restorePasteLoss(before, pastedLoss);
+		pastedLoss = null;
+		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the
+		// scripts out of a paste itself, but leaves a form, an <iframe>, or a block with
+		// position: fixed that covers the page.
+		sanitizeTree(editorEl, (el) => !before.has(el));
 		for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 			if (before.has(el)) continue;
 			el.removeAttribute('id');
@@ -2080,7 +2212,9 @@
 			try {
 				const saved = localStorage.getItem(storageKey);
 				if (saved) {
-					editorEl.innerHTML = saved;
+					// A draft is HTML from outside like any other: anything that can write to this
+					// origin's storage can write it.
+					showDocument(saved);
 					updateCounts();
 					return;
 				}
@@ -2089,7 +2223,7 @@
 		// Always write the initial content prop so the div isn't empty.
 		// {#html content} must NOT be used inside the contenteditable div —
 		// Svelte would re-inject it on every reactive update, duplicating text.
-		editorEl.innerHTML = content || '<p></p>';
+		showDocument(content || EMPTY_DOCUMENT);
 		updateCounts();
 	});
 
@@ -2167,11 +2301,17 @@
 			class:copy-format-pick={copyFormat === 'pick'}
 			class:copy-format-apply={copyFormat === 'apply'}
 			contenteditable={!readonly}
+			role="textbox"
+			tabindex="0"
+			aria-multiline="true"
+			aria-label={ariaLabel}
+			aria-readonly={readonly ? 'true' : undefined}
 			spellcheck="true"
 			bind:this={editorEl}
 			oninput={handleInput}
 			onmouseup={caretMoved}
 			onkeyup={caretMoved}
+			onscroll={contentScrolled}
 			onkeydown={handleKeydown}
 			onmousedown={() => (tabLeavesEditor = false)}
 			onblur={() => (tabLeavesEditor = false)}
@@ -2197,6 +2337,7 @@
 				bind:this={overlayRef}
 				target={selectedImage}
 				bounds={contentWrapEl}
+				within={editorEl}
 				maxWidth={contentWidth}
 				onchange={handleImageEdited}
 				onremove={removeSelectedImage}
@@ -2217,12 +2358,20 @@
 
 <!-- Link Modal -->
 <Modal title="Insert Link" open={linkModalOpen} onclose={() => (linkModalOpen = false)}>
-	<input type="text" placeholder="Link text (leave empty to use selection)" bind:value={linkText} />
+	<input
+		type="text"
+		placeholder="Link text (leave empty to use selection)"
+		aria-label="Link text"
+		bind:value={linkText}
+		onkeydown={(e) => onEnter(e, applyLink)}
+	/>
 	<input
 		type="url"
 		placeholder="https://example.com"
+		aria-label="Link address"
+		data-autofocus
 		bind:value={linkUrl}
-		onkeydown={(e) => e.key === 'Enter' && applyLink()}
+		onkeydown={(e) => onEnter(e, applyLink)}
 		aria-invalid={linkError ? 'true' : undefined}
 		aria-describedby={linkError ? 'ink-link-error' : undefined}
 	/>
@@ -2253,17 +2402,18 @@
 		<input
 			type="url"
 			placeholder="https://example.com/image.jpg"
+			aria-label="Image address"
 			bind:value={imageUrl}
-			onkeydown={(e) => e.key === 'Enter' && applyImage()}
+			onkeydown={(e) => onEnter(e, () => void applyImage())}
 		/>
 	{/if}
 
 	{#if pendingImageFiles.length > 1}
 		<p class="ink-modal-hint">Add a description under each image after inserting.</p>
 	{:else}
-		<input type="text" placeholder="Description shown below the image (optional)" bind:value={imageCaption} />
+		<input type="text" placeholder="Description shown below the image (optional)" aria-label="Description shown below the image" bind:value={imageCaption} />
 	{/if}
-	<input type="text" placeholder="Alt text for screen readers (optional)" bind:value={imageAlt} />
+	<input type="text" placeholder="Alt text for screen readers (optional)" aria-label="Alt text for screen readers" bind:value={imageAlt} />
 
 	{#snippet actions()}
 		<button class="ink-btn-ghost" onclick={() => (imageModalOpen = false)}>Cancel</button>
@@ -2279,7 +2429,7 @@
 
 <!-- Import Error Toast -->
 {#if importError}
-	<div class="ink-toast-error">
+	<div class="ink-toast-error" role="alert">
 		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
 		{importError}
 	</div>
@@ -2302,6 +2452,9 @@
 
 	/* ── Content Area ── */
 	.ink-content {
+		/* Nothing in the document is drawn outside the editing area, whatever its styles: a table
+		   wider than the area scrolls inside it, and does not run out over the page beside it. */
+		overflow: auto;
 		min-height: var(--ink-min-height, 40vh);
 		padding: 48px 56px;
 		background: white;

@@ -39,7 +39,13 @@
     let copied = $state(false);
 
     async function copyRtf() {
-        await navigator.clipboard.writeText(content ?? "");
+        // The clipboard can be refused (no permission, a page that is not served securely):
+        // then nothing was copied, and the button does not say it was.
+        try {
+            await navigator.clipboard.writeText(content ?? "");
+        } catch {
+            return;
+        }
         copied = true;
         setTimeout(() => (copied = false), 2000);
     }

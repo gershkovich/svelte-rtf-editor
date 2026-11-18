@@ -190,6 +190,9 @@ const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345
 /** 1 px at 96 dpi = 15 twips. */
 const TWIPS_PER_PX = 15;
 
+/** The widest a picture is shown, in px: 22 inches, the largest page Word has. */
+const MAX_PICTURE_PX = 31680 / TWIPS_PER_PX;
+
 /**
  * A paragraph made up of one picture and nothing else is rendered as a <figure>. Two pictures in
  * a paragraph stay a paragraph: a figure is written back as its picture and its caption.
@@ -332,6 +335,10 @@ function renderPicture(group: RtfGroup): string {
 
 	const hex = hexParts.join('').replace(/[^0-9a-fA-F]/g, '');
 	if (hex.length < 8) return '';
+	// The bytes say what the picture is, where they say it: a PNG written as \jpegblip is a PNG.
+	const signature = hex.slice(0, 8).toLowerCase();
+	if (signature === '89504e47') mime = 'image/png';
+	else if (signature.startsWith('ffd8ff')) mime = 'image/jpeg';
 
 	const base64 = hexToBase64(hex);
 	if (!base64) return '';
@@ -340,7 +347,9 @@ function renderPicture(group: RtfGroup): string {
 	// writes a picture someone dragged to half size as \picscalex50, with the goal unchanged.
 	if (scaleX <= 0) scaleX = 100;
 	if (scaleY <= 0) scaleY = 100;
-	const widthPx = Math.round(((wgoal ? wgoal / TWIPS_PER_PX : picw) * scaleX) / 100);
+	// (No wider than the largest page there is, 22 inches: a damaged \picwgoal gave a width of
+	// billions of pixels.)
+	const widthPx = Math.min(MAX_PICTURE_PX, Math.round(((wgoal ? wgoal / TWIPS_PER_PX : picw) * scaleX) / 100));
 	const heightPx = Math.round(((hgoal ? hgoal / TWIPS_PER_PX : pich) * scaleY) / 100);
 
 	const styles: string[] = [];

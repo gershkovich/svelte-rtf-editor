@@ -15,7 +15,8 @@ RTF viewer and rich-text editor components for **Svelte 5**.
   - Block-level controls: headings (H1–H3), paragraph, blockquote, code block
   - Images: upload, paste or drag-and-drop, with a description below each picture, drag-to-resize and left/centre/right placement — embedded in the RTF, not linked
   - Import an RTF file from disk; export as RTF, HTML, or Markdown
-  - Optional auto-save to `localStorage`
+  - Optional auto-save to `localStorage` (off unless asked for)
+  - HTML from outside (the `content` prop, `setHTML`, a restored draft, a paste) is made safe before it is shown. See [HTML from outside](#html-from-outside)
   - Word count and character count status bar
   - Keyboard shortcuts (`Ctrl+S` to save, `Ctrl+B/I/U` for formatting)
 - **Utility functions** — `rtfToHtml`, `htmlToRtf`, `readRtfFile`, `htmlToMarkdown`, `downloadFile`
@@ -120,10 +121,11 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 
 | Prop            | Type       | Default                      | Description                                               |
 |-----------------|------------|------------------------------|-----------------------------------------------------------|
-| `content`       | `string`   | `'<p></p>'`                  | Initial HTML content                                      |
+| `content`       | `string`   | `'<p><br></p>'`              | Initial HTML content. Made safe before it is shown: see [HTML from outside](#html-from-outside) |
 | `placeholder`   | `string`   | `'Start writing something beautiful...'` | Placeholder text when editor is empty     |
-| `autosave`      | `boolean`  | `true`                       | Save content to `localStorage` on change                  |
-| `storageKey`    | `string`   | `'ink-editor-content'`       | `localStorage` key used for auto-save                     |
+| `autosave`      | `boolean`  | `false`                      | Keep a draft in `localStorage`, and show it on mount in place of `content`. See [Auto-save](#auto-save) |
+| `storageKey`    | `string`   | `'ink-editor-content'`       | `localStorage` key the draft is kept under. Give each document its own |
+| `ariaLabel`     | `string`   | `'Document'`                 | The name of the editing area for a screen reader          |
 | `showToolbar`   | `boolean`  | `true`                       | Show the formatting toolbar                               |
 | `showStatusBar` | `boolean`  | `true`                       | Show the word/character count bar                         |
 | `minHeight`     | `string`   | `'40vh'`                     | CSS `min-height` of the editing area                      |
@@ -140,7 +142,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 
 | Prop       | Payload                                      | Description                                 |
 |------------|----------------------------------------------|---------------------------------------------|
-| `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change |
+| `onchange` | `{ html, text, wordCount, charCount, estimatedRtfBytes }` | Fired on every content change. `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads them, so a handler that only wants the counts costs nothing on a long document. They are the document as it is when first read: read them in the handler. A payload kept and read after a later edit gives the document as it is by then |
 | `onsave`   | `{ html }`                                   | Fired on auto-save or `Ctrl+S`              |
 | `onimport` | `{ html }`                                   | Fired after a successful RTF file import    |
 
@@ -149,7 +151,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 ```ts
 editor.getHTML()          // → string  — current editor HTML
 editor.getText()          // → string  — plain text (no tags)
-editor.setHTML(html)      // → void    — replace content programmatically
+editor.setHTML(html)      // → void    — replace content programmatically (made safe first)
 editor.getMarkdown()      // → string  — Markdown conversion of content
 editor.getRTF()           // → string  — RTF conversion of content
 editor.getRtfSize()       // → number  — exact byte size of that RTF
@@ -160,13 +162,40 @@ editor.importRtf()        // → void    — open the file picker to import .rtf
 editor.setFontSize(14)    // → void    — size, in points, of the selected text, or of what is typed next
 ```
 
+#### Auto-save
+
+`autosave` is off by default. Turned on, the editor writes the document's HTML to `localStorage` under `storageKey` a second after each change, and on mount shows a draft it finds there **in place of `content`**. Two things follow, and both matter where the documents are patient reports:
+
+- Give every document its own `storageKey` (`storageKey={`report-${id}`}`). With one key for all of them, the draft of the last document edited is shown in place of the next one opened.
+- The draft is plain text in the browser's storage until `clear()` is called. Call it when the document is saved or abandoned, or leave `autosave` off and keep drafts yourself from `onsave`/`onchange`.
+
+#### HTML from outside
+
+Whatever HTML reaches the editor is made safe before it is shown: the `content` prop, `setHTML()`, a draft restored from `localStorage`, and what a paste brings. `sanitizeHtml` is exported for HTML you show yourself (stored editor output in a preview, say).
+
+| Taken out | Why |
+|---|---|
+| `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<svg>`, `<video>`, `<audio>`, with what is in them | They run code or load a page of their own |
+| `<button>`, `<textarea>`, `<select>`, `<input>` and `<math>`: the element goes, the words it showed stay as text | They take input, or are not something RTF can carry. A formula of numbers and signs in a row stays as those characters (`30%`); one with a fraction, a power or a root is written `[formula]`, since its parts read in a row would say something else. Only words that were shown stay: none of an element that was hidden (`hidden`, `display:none`, `visibility:hidden`, `mso-hide:all`), none of a hidden part of a button, and a formula that KaTeX wrote twice, once as text and once to be read aloud, is kept once. Elements side by side leave their words a space apart (`1 5`, not `15`) |
+| Every attribute but the ones a document uses (`style`, `href`, `src`, `alt`, `colspan`, `start`, …) | That is how `onclick`, `onerror` and the rest go |
+| A link that is not `http(s):`, `mailto:` or `tel:`; a picture address that is not a web address or picture data | `javascript:`, `data:text/html`, `file:` |
+| Style properties that do not format text, a paragraph, a picture or a table (`position`, `z-index`, …), and any value with `url()` | A pasted block with `position: fixed` covered the page the editor sat in |
+| A size that would put an element outside the page: a margin below zero, a margin, padding or width over 2200 px (a little more than the widest page), a width or height on anything but a picture, a table, its cells or a rule, a `width` or `height` attribute over 2200 or 100%, a padding over 32 px on a piece of text inside a line, a border picture, a size in `vw`/`vh` or worked out with `calc()`, a `display` other than the ones a document uses | A block with a negative margin was drawn over the toolbar, and a link with a padding of thousands of pixels was the size of the page. Sizes counted in ems or percent are worked out from the text size the document's styles give, so they do not grow past the limit by being nested. One margin below zero is kept: on a list, up to the half inch a list is indented by itself, which is how a list read from RTF carries an indent smaller than that |
+| A size that would put words out of sight: a first line that starts further left than its paragraph is moved in (`text-indent: -100%`), and a text size under half a pixel | The words were in the RTF and not on the screen. A hanging indent (`margin-left:36pt; text-indent:-36pt`) stays as written |
+| Style text the browser did not read as a property (`width: expression(…)`, a property named twice) | It does nothing here, but it would still be in the HTML for whatever shows it next. Where there is any, the attribute is written again from the properties that were read and kept. An attribute that is all read and kept stays exactly as it was written, `border: 1px solid black` included |
+| `class`; an `id` that names something on `document` or `window`; the `id` of a link; in the editor, an `id` the page already uses for an element outside an editor | They would take on the page's own styles, or answer to a name or an `id` the page's scripts look up. A document's own ids are kept, also when it is shown again while its first showing is still in the editor. They are still names on `window`, as every `id` in a page is: a page whose scripts read settings from `window` by a name they do not define should not show documents from strangers |
+
+The editing area also clips what it holds: nothing in a document is drawn outside it, whatever its styles, and a table wider than the area scrolls inside it. The frame around a selected picture stays inside it too. Text that Word marked hidden (`mso-hide: all`) is hidden on screen as it is left out of the RTF, and in a paste it is not pasted. A closed `<details>` is shown open, since what is in it is written to the RTF either way.
+
+`getHTML()` returns what is in the editor, which has been through this. HTML from `rtfToHtml` is safe by construction (see [What `rtfToHtml` may return](#what-rtftohtml-may-return)).
+
 ---
 
 ## Utility functions
 
 ```ts
 import {
-  rtfToHtml, htmlToRtf, estimateRtfBytes, readRtfFile, htmlToMarkdown, downloadFile,
+  rtfToHtml, htmlToRtf, estimateRtfBytes, readRtfFile, htmlToMarkdown, downloadFile, sanitizeHtml,
   DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, DEFAULT_MAX_RTF_BYTES, isSafeLinkUrl
 } from 'svelte-rtf-editor';
 ```
@@ -179,6 +208,7 @@ import {
 | `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` and `htmlToMarkdown` write any other link as its text alone, and `rtfToHtml` reads any other as text |
 | `readRtfFile(file: File, options?: { fontSize?, maxBytes? }): Promise<string>` | Read a `.rtf` File object and return HTML. Rejects, without reading it, for a file larger than `maxBytes` |
 | `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown. See [Markdown export](#markdown-export) |
+| `sanitizeHtml(html: string): string` | HTML made safe to show and edit. See [HTML from outside](#html-from-outside). Needs a DOM (`DOMParser`); without one it returns `''` |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |
 
 ---
@@ -513,15 +543,18 @@ Commit both your code and the generated `.changeset/*.md` file together.
 
 ### Checks
 
-Three commands must pass before a change is merged, and CI (`.github/workflows/ci.yml`) runs them on every push and pull request:
+Four commands must pass before a change is merged, and CI (`.github/workflows/ci.yml`) runs them on every push and pull request:
 
 ```bash
-npm run check    # svelte-check: types
-npm test         # vitest
-npm run prepack  # build the package and lint it with publint
+npm run check          # svelte-check: types
+npm run test:coverage  # vitest, with a floor under the coverage (vite.config.ts)
+npm run prepack        # build the package and lint it with publint
+npm run test:e2e       # Playwright, in Chromium (once: npx playwright install chromium)
 ```
 
-The publish workflow runs the same three before it publishes, so a release cannot go out with a failing test.
+`npm test` runs the same unit tests without measuring coverage. They run in a test DOM, which has no caret, no editing commands and no clipboard; `e2e/` holds what only a browser shows: where the first words typed go, what a key does after a dialog closes, what a real paste brings in. It drives the page at `src/routes/e2e`.
+
+The publish workflow runs the same four before it publishes, so a release cannot go out with a failing test.
 
 `src/lib/__tests__/random-documents.test.ts` builds 400 documents at random on each run and checks what must hold for all of them: no text lost, the RTF settles after one reload, the size estimate is never low, the HTML read back is made of known elements. For a longer run, in batches:
 
