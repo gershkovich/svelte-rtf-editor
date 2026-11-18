@@ -316,7 +316,27 @@
 	// editor makes, and each element it marked that way is then given the size meant, in points
 	// (<font style="font-size:14pt">), which is what the RTF writer reads. Only attributes are
 	// changed, never the elements, so the browser's undo still finds what it made.
+	//
+	// Undo puts back what the browser itself recorded, which is right: the element goes, or gets
+	// back the size it had. Redo is not: the browser does its own step again, the mark for size 7
+	// and nothing after it, and the text came back at 36 pt. So each change of size is remembered
+	// here with the size every element was given, and after a redo the elements that are marked
+	// again are given theirs again.
+	//
+	// And undo is only right where the browser recorded something to put back. It records the
+	// size it takes off an element, not the one given here afterwards. So a <font> element is
+	// never left without a size of its own: where the text is to have the size of the text around
+	// it, the size stated is 1em, which is that size. The writer reads 1em as no size.
 	const SIZE_MARK = '7';
+	/** The size that is the size of the text around: what "no size of its own" is written as. */
+	const SIZE_AROUND = '1em';
+	/** One change of size: the elements it sized, each with the font-size it was given. */
+	type SizeStep = Map<HTMLElement, string>;
+	/** The changes of size made, in order; those from `sizeStepsApplied` on were undone and can be redone. */
+	let sizeSteps: SizeStep[] = [];
+	let sizeStepsApplied = 0;
+	/** Every element this editor has given a size: a mark on one of these is the browser redoing a step. */
+	const sizedHere = new WeakSet<Element>();
 	/** The size chosen and not yet given to an element: a caret has no text to carry it until something is typed. */
 	let pendingSize: number | null = null;
 	/** Elements that were marked size 7 before the command (pasted that way): not ours to change. */
@@ -328,19 +348,75 @@
 		return Number.isFinite(px) && px > 0 ? Math.round(px * 0.75 * 2) / 2 : null;
 	}
 
-	/** Give the elements the command marked the size that was chosen. */
+	/** Take the mark off an element and state the size it is to have. */
+	function sizeElement(font: HTMLElement, fontSize: string): void {
+		font.removeAttribute('size');
+		font.style.fontSize = fontSize;
+	}
+
+	const markedElements = (): HTMLElement[] =>
+		editorEl ? Array.from(editorEl.querySelectorAll<HTMLElement>(`font[size="${SIZE_MARK}"]`)) : [];
+
+	/** Give the elements the command marked the size that was chosen, and remember the step. */
 	function applyPendingSize(): void {
 		if (!editorEl || pendingSize === null) return;
-		for (const font of Array.from(editorEl.querySelectorAll<HTMLElement>(`font[size="${SIZE_MARK}"]`))) {
+		const step: SizeStep = new Map();
+		for (const font of markedElements()) {
 			if (markedBefore.has(font)) continue;
-			font.removeAttribute('size');
-			font.style.removeProperty('font-size');
+			sizeElement(font, SIZE_AROUND);
 			// Where the text around it has that size already (body text set back to the body
-			// size, a heading to the heading's), no size is stated: the text then follows the
-			// document's size, as text that was never sized does.
-			if (shownSize(font) !== pendingSize) font.style.fontSize = `${pendingSize}pt`;
-			if (!font.getAttribute('style')) font.removeAttribute('style');
+			// size, a heading to the heading's), it stays at the size around it: the text then
+			// follows the document's size, as text that was never sized does.
+			if (shownSize(font) !== pendingSize) sizeElement(font, `${pendingSize}pt`);
+			step.set(font, font.style.fontSize);
+			sizedHere.add(font);
 		}
+		if (step.size === 0) return;
+		// A new change: what was undone before it can no longer be redone.
+		sizeSteps = [...sizeSteps.slice(0, sizeStepsApplied), step];
+		sizeStepsApplied = sizeSteps.length;
+	}
+
+	/** Whether a change of size is in the document as it was made: every element there, with its size. */
+	function stepStands(step: SizeStep | undefined): boolean {
+		if (!step) return false;
+		for (const [font, fontSize] of step) {
+			if (!font.isConnected || font.getAttribute('size') === SIZE_MARK || font.style.fontSize !== fontSize) return false;
+		}
+		return true;
+	}
+
+	/** After an undo or a redo: follow which changes of size are in the document, and finish a redone one. */
+	function afterHistory(): void {
+		const next = sizeSteps[sizeStepsApplied];
+		const marked = markedElements().filter((font) => sizedHere.has(font));
+		if (marked.length > 0) {
+			// The browser redid its part of a change of size. (A mark with no step to go with it
+			// should not happen; it is then taken off, and the text has the size around it,
+			// which is better than 36 pt.)
+			for (const font of marked) sizeElement(font, next?.get(font) ?? SIZE_AROUND);
+			if (next) sizeStepsApplied++;
+		} else if (stepStands(next)) {
+			// Redone, and nothing was marked: the step only made elements, which came back as they were.
+			sizeStepsApplied++;
+		} else if (sizeStepsApplied > 0 && !stepStands(sizeSteps[sizeStepsApplied - 1])) {
+			sizeStepsApplied--;
+		}
+	}
+
+	/** Whether all the text selected has this size already. */
+	function selectionHasSize(points: number): boolean {
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
+		const range = selection.getRangeAt(0);
+		const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT);
+		let texts = 0;
+		for (let node = walker.currentNode.nodeType === Node.TEXT_NODE ? walker.currentNode : walker.nextNode(); node; node = walker.nextNode()) {
+			if (!range.intersectsNode(node) || !(node.textContent || '').trim() || !node.parentElement) continue;
+			if (shownSize(node.parentElement) !== points) return false;
+			texts++;
+		}
+		return texts > 0;
 	}
 
 	/**
@@ -354,8 +430,19 @@
 		editorEl.focus();
 		// The document changes outside an input event: earlier indent steps no longer undo.
 		indentUndo = [];
-		markedBefore = new Set(editorEl.querySelectorAll(`font[size="${SIZE_MARK}"]`));
-		pendingSize = normalizeFontSize(points);
+		const size = normalizeFontSize(points);
+		// Nothing to change: no step is made that would undo to the same thing.
+		if (selectionHasSize(size)) {
+			updateToolbarState();
+			return;
+		}
+		markedBefore = new Set(markedElements());
+		// The command may use a <font> element that is there already (one pasted with a color),
+		// and undo then puts back only a size the command itself took off it: see SIZE_AROUND.
+		for (const font of Array.from(editorEl.querySelectorAll<HTMLElement>('font'))) {
+			if (!font.style.fontSize && !markedBefore.has(font)) font.style.fontSize = SIZE_AROUND;
+		}
+		pendingSize = size;
 		document.execCommand('fontSize', false, SIZE_MARK);
 		applyPendingSize();
 		// With text selected the size is on it now. At a caret it waits for the typing.
@@ -415,6 +502,7 @@
 		}
 		if (cmd === 'undo' && undoIndent()) return;
 		document.execCommand(cmd, false, value ?? undefined);
+		if (cmd === 'undo' || cmd === 'redo') afterHistory();
 		updateToolbarState();
 	}
 
@@ -1060,15 +1148,22 @@
 	}
 
 	// ── Input handler ──
-	function handleInput(): void {
+	function handleInput(e?: Event): void {
 		placeCopySourceBox();
 		if (pastedOver) {
 			tidyPasted(pastedOver);
 			pastedOver = null;
 		}
 		indentUndo = [];
-		// What was typed at a caret after a size was chosen came in marked: give it the size.
-		applyPendingSize();
+		const kind = (e as InputEvent | undefined)?.inputType ?? '';
+		if (kind === 'historyUndo' || kind === 'historyRedo') {
+			afterHistory();
+		} else {
+			// An edit: what was undone can no longer be redone.
+			sizeSteps = sizeSteps.slice(0, sizeStepsApplied);
+			// What was typed at a caret after a size was chosen came in marked: give it the size.
+			applyPendingSize();
+		}
 		pendingSize = null;
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the

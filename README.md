@@ -219,9 +219,9 @@ Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phon
 The toolbar has a list of sizes, next to the list of paragraph kinds. A size chosen there is given to the selected text; with nothing selected, to what is typed next. The list shows the size of the text at the caret, also when it is not one of the sizes offered, and is empty where the selection starts in one size and ends in another.
 
 - The size is written to the RTF as `\fsN` around that text, and read back as that size by `rtfToHtml`.
-- Text set back to the size the text around it has (the body size in a paragraph, the heading's size in a heading) states no size, and follows `fontSize` again like text that was never sized.
+- Text set back to the size the text around it has (the body size in a paragraph, the heading's size in a heading) is given that size as `1em`, and follows `fontSize` again like text that was never sized. The writer reads `1em` as no size.
 - The sizes offered are `fontSizes`; pass your own list, or `[]` to leave the size list out. `editor.setFontSize(points)` does the same from your own toolbar.
-- The editor uses the browser's own font-size command, so a change of size is undone with everything else. In the HTML the size is on a `<font>` element (`<font style="font-size: 14pt">`).
+- The editor uses the browser's own font-size command, so a change of size is undone and redone with everything else. In the HTML the size is on a `<font>` element (`<font style="font-size: 14pt">`).
 - A whole paragraph that is bold and at the size a heading has is read back from RTF as that heading: it looks the same, and the list of paragraph kinds then names it a heading.
 - `htmlToRtf` also reads `<font size="1">` to `<font size="7">`, which is how older pages and mail carry sizes, as the sizes a browser shows them at (7.5, 10, 12, 13.5, 18, 24 and 36 pt). They were shown at those sizes and written at the body size.
 
