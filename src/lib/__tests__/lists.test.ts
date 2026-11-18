@@ -127,7 +127,7 @@ describe('htmlToRtf: what a list item can hold', () => {
 
 	it('a list in a table cell stays in the cell', () => {
 		expect(body('<table><tr><td><ul><li>a<ul><li>b</li></ul></li></ul></td></tr></table>')).toContain(
-			'\\pard\\intbl\\li720\\fi-360\\bullet\\tab a\\par \\pard\\intbl\\li1440\\fi-360\\bullet\\tab b\\par}\\cell'
+			'\\pard\\intbl\\li720\\fi-360\\bullet\\tab a\\par \\pard\\intbl\\li1440\\fi-360\\bullet\\tab b\\cell}'
 		);
 	});
 });
@@ -164,7 +164,7 @@ describe('htmlToRtf: the list a browser\'s own list command makes', () => {
 	it('made in a table cell, it adds no empty line to the cell', () => {
 		const root = el('<table><tr><td><p></p></td></tr></table>');
 		root.querySelector('p')!.innerHTML = '<ul><li>x</li></ul>';
-		expect(bodyOf(root)).toContain('\\fi0 \\pard\\intbl\\li720\\fi-360\\bullet\\tab x\\par}\\cell');
+		expect(bodyOf(root)).toContain('\\fi0 \\pard\\intbl\\li720\\fi-360\\bullet\\tab x\\cell}');
 	});
 
 	it('reads back as the list, and is then written the same', () => {

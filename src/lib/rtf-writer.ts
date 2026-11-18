@@ -83,6 +83,11 @@ interface WalkContext {
 	inTableCell: boolean;
 	/** The element htmlToRtf was called on — used to detect top-level images. */
 	root: Node | null;
+	/**
+	 * For a node, the nearest sibling before it that shows something (see shownBefore). Kept for
+	 * the length of one write, during which the document does not change.
+	 */
+	shownBefore: Map<Node, Node | null>;
 	/*
 	 * The character formatting in effect where the walker is. A closing tag restores
 	 * this, the ENCLOSING state, rather than a fixed default: an inner </b> must not
@@ -103,7 +108,10 @@ interface WalkContext {
 	mono: boolean;
 	/** Left indent of the enclosing indented blocks, in twips (\liN). */
 	indent: number;
-	/** The alignment of the table cell being written (\qc, \qr, \qj), or '' for left or none. */
+	/**
+	 * The alignment the blocks here take when they set none of their own (\qc, \qr, \qj), or ''
+	 * for left: that of the table cell being written, or of a <div> or <center> around them.
+	 */
 	cellAlign: string;
 }
 
@@ -176,7 +184,14 @@ function escapeRtf(text: string): string {
 		const ch = source[i];
 		const code = source.charCodeAt(i);
 
-		if (ch === '\\') out += '\\\\';
+		if (code < 32 || code === 127) {
+			// A control character is not text. Written as it is, it reaches the receiving
+			// system as a raw byte, and 0x0B and 0x1C are the bytes that start and end an HL7
+			// message on the wire. A tab is passed through (see escapeTabs); a vertical tab
+			// or a form feed, which a browser shows as a space, is one; the rest are dropped.
+			if (code === 9) out += ch;
+			else if (code === 11 || code === 12) out += ' ';
+		} else if (ch === '\\') out += '\\\\';
 		else if (ch === '{') out += '\\{';
 		else if (ch === '}') out += '\\}';
 		else if (code > 127) {
@@ -210,6 +225,73 @@ function showsTabs(node: Node): boolean {
 		const ws = el.style?.whiteSpace;
 		if (ws) return ws === 'pre' || ws === 'pre-wrap' || ws === 'break-spaces';
 		if (el.classList?.contains('Apple-tab-span')) return true;
+	}
+	return false;
+}
+
+/**
+ * Whether a text node's line breaks show as line breaks: it sits inside an element whose inline
+ * white-space keeps them (pre-wrap is what many editors and mail programs set on pasted text).
+ */
+function showsLineBreaks(node: Node): boolean {
+	for (let el = node.parentElement; el; el = el.parentElement) {
+		const ws = el.style?.whiteSpace;
+		if (ws) return ws === 'pre' || ws === 'pre-wrap' || ws === 'pre-line' || ws === 'break-spaces';
+	}
+	return false;
+}
+
+// ── Elements that are not shown ──
+
+/** Elements whose content is never shown: a stylesheet, a script, a template. */
+const UNSHOWN_TAGS = new Set(['style', 'script', 'template', 'noscript', 'head', 'title', 'meta', 'link', 'base']);
+
+/**
+ * Whether an element is not shown on screen, so that nothing in it is written: a pasted page's
+ * <style> or <script>, an element with `hidden`, display: none or visibility: hidden, and Word's
+ * hidden text (mso-hide: all). What the person does not see must not reach the report.
+ */
+function isHidden(el: Element): boolean {
+	if (UNSHOWN_TAGS.has(el.tagName.toLowerCase())) return true;
+	if (el.hasAttribute('hidden')) return true;
+	const style = (el as HTMLElement).style;
+	if (style?.display === 'none') return true;
+	// visibility: hidden hides an element's text but not what an element inside it shows again
+	// with visibility: visible. Only without one of those is the whole of it left out; with
+	// one, each piece of text is asked (isUnseen).
+	if (style?.visibility === 'hidden' && !Array.from(el.querySelectorAll<HTMLElement>('[style]')).some((d) => d.style?.visibility === 'visible')) {
+		return true;
+	}
+	return /mso-hide\s*:\s*all/i.test(el.getAttribute('style') ?? '');
+}
+
+/** Whether a text node or a picture sits in an element with visibility: hidden that nothing nearer shows again. */
+function isUnseen(node: Node): boolean {
+	for (let el = node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement; el; el = el.parentElement) {
+		const visibility = el.style?.visibility;
+		if (visibility === 'visible') return false;
+		if (visibility === 'hidden') return true;
+	}
+	return false;
+}
+
+/** The text of an element that the screen shows: without what is hidden in it. */
+function shownText(el: Element): string {
+	let text = '';
+	for (const child of Array.from(el.childNodes)) {
+		if (child.nodeType === Node.TEXT_NODE) {
+			if (!isUnseen(child)) text += child.textContent || '';
+		} else if (child.nodeType === Node.ELEMENT_NODE && !isHidden(child as Element)) {
+			text += shownText(child as Element);
+		}
+	}
+	return text;
+}
+
+/** Whether an element, or anything around it up to `root`, is not shown: a cell in a hidden row. */
+function hiddenWithin(el: Element, root: Element): boolean {
+	for (let at: Element | null = el; at && at !== root; at = at.parentElement) {
+		if (isHidden(at)) return true;
 	}
 	return false;
 }
@@ -350,7 +432,8 @@ function pictureRtf(el: HTMLElement): string {
 	// Accept any image data URL and let the bytes decide the format — the label
 	// is not trustworthy, and a correctly-labelled PNG is not the only way to
 	// arrive at PNG bytes.
-	const m = src.match(/^data:image\/[a-z0-9.+-]+;base64,([\s\S]+)$/i);
+	// (A data URL may carry parameters before ";base64": "data:image/png;name=scan.png;base64,".)
+	const m = src.match(/^data:image\/[a-z0-9.+-]+(?:;[^;,]*)*;base64,([\s\S]+)$/i);
 	if (!m) return '';
 
 	const bytes = base64ToBytes(m[1]);
@@ -383,14 +466,18 @@ function pictureRtf(el: HTMLElement): string {
 function imageBody(el: HTMLElement): string {
 	const pict = pictureRtf(el);
 	if (pict) return pict;
-	const label = el.getAttribute('alt') || el.getAttribute('src') || 'image';
+	// Its description, or else its address. Never picture data: a picture that cannot be
+	// embedded and has no description was written as its whole data URL, hundreds of
+	// kilobytes of base64 in the text of the report.
+	const src = el.getAttribute('src') || '';
+	const label = el.getAttribute('alt') || (/^\s*data:/i.test(src) ? '' : src) || 'image';
 	return `\\i [Image: ${escapeRtf(label)}]\\i0 `;
 }
 
 /** \ql / \qc / \qr / \qj for a block's own text-align, or null when it sets none. */
 function ownAlign(el: HTMLElement): string | null {
 	// Firefox's Center writes <p align="center">, not a style.
-	const align = (el.style?.textAlign || el.getAttribute?.('align') || '').toLowerCase();
+	const align = (el.style?.textAlign || el.getAttribute?.('align') || (el.tagName === 'CENTER' ? 'center' : '')).toLowerCase();
 	if (align === 'center') return '\\qc';
 	if (align === 'right' || align === 'end') return '\\qr';
 	if (align === 'justify') return '\\qj';
@@ -437,15 +524,21 @@ const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
 	pre: 27,
 	figure: 15,
 	figcaption: 29,
+	caption: 20, // "\pard\intbl\qc " + "\par "
+	table: 8, // "\lastrow"
 	tr: 45,
-	td: 55,
-	th: 69, // a header cell also carries \clbrdrb\brdrs
+	td: 51, // "{\pard\intbl \f0 \sa0 \li0 \fi0 " + "\cell}" + "\cellxNNNN", and 3 to spare
+	th: 65, // a header cell also carries \clbrdrb\brdrs
 	// Inline formatting: the control words on either side of the text.
 	b: 7, // "\b " + "\b0 "
 	strong: 7,
 	i: 7,
 	em: 7,
+	cite: 7,
+	var: 7,
+	dfn: 7,
 	u: 12, // "\ul " + "\ulnone "
+	ins: 12,
 	s: 17, // "\strike " + "\strike0 "
 	strike: 17,
 	del: 17,
@@ -457,6 +550,22 @@ const BLOCK_OVERHEAD_BYTES: Record<string, number> = {
 	ul: 0,
 	ol: 0
 };
+
+/**
+ * Blocks that are written as a <div> is: a paragraph when they hold text, a container when they
+ * hold blocks. Pasted pages are made of them, and each one not known as a block had its lines
+ * joined to its neighbours': a definition list read "SpecimenColonMarginsNegative".
+ */
+const DIV_LIKE_TAGS = new Set([
+	'section', 'article', 'aside', 'nav', 'header', 'footer', 'main', 'address', 'details', 'summary',
+	'center', 'fieldset', 'legend', 'form', 'dl', 'dt', 'dd', 'hgroup'
+]);
+
+/** An element's tag in lower case, with every block written as a <div> named "div". */
+function tagOf(el: Element): string {
+	const tag = el.tagName.toLowerCase();
+	return DIV_LIKE_TAGS.has(tag) ? 'div' : tag;
+}
 
 /** Elements that write a paragraph of their own, which inside a table cell carries \intbl. */
 const CELL_PARAGRAPH_TAGS = new Set(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre', 'hr', 'figure', 'figcaption']);
@@ -476,35 +585,57 @@ const LINK_OVERHEAD_BYTES = '{\\field{\\*\\fldinst HYPERLINK ""}{\\fldrslt\\ul\\
  * is negligible precisely when the number matters, and never more than a few
  * hundred bytes even when it does not. The output is ASCII, so bytes and
  * characters are the same number.
+ *
+ * Give it the options htmlToRtf is called with: a longer font name is part of the size, and so
+ * are the extra digits of a large body size.
  */
-export function estimateRtfBytes(editorEl: HTMLElement): number {
-	let total = RTF_PREAMBLE_BYTES;
+export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions = {}): number {
+	// The font table names the font ("\froman" is as long as "\fswiss", "\fmodern" one longer).
+	const font = cleanFontName(options.fontFamily);
+	const fontName = escapeRtf(font);
+	const fontClass = fontFamilyClass(font) === 'modern' ? 1 : 0;
+	// \fsN is counted with two digits everywhere; the largest size written is a first-level
+	// heading's, twice the body.
+	const sizeDigits = Math.max(0, String(bodyHalfPoints(options.fontSize) * 2).length - 2);
+	let total = RTF_PREAMBLE_BYTES + Math.max(0, fontName.length - DEFAULT_FONT_FAMILY.length) + fontClass + sizeDigits;
 
 	for (const img of Array.from(editorEl.querySelectorAll('img'))) {
 		const src = img.getAttribute('src') || '';
 		const comma = src.indexOf(',');
+		// A picture straight in the editor is a paragraph of its own ("\pard " and "\par ").
+		if (img.parentNode === editorEl) total += 11;
+		// A picture that cannot be embedded costs its placeholder text.
+		const placeholder = `\\i [Image: ]\\i0 `.length + escapeRtf(img.getAttribute('alt') || src || 'image').length;
 		if (!src.startsWith('data:image/') || comma < 0) {
-			// A picture that cannot be embedded costs its placeholder text.
-			total += `\\i [Image: ]\\i0 `.length + escapeRtf(img.getAttribute('alt') || src || 'image').length;
+			total += placeholder;
 			continue;
 		}
-		total += base64ByteLength(src.slice(comma + 1)) * 2 + PICTURE_OVERHEAD_BYTES;
+		// Picture data that is neither PNG nor JPEG is written as the placeholder too.
+		total += Math.max(placeholder, base64ByteLength(src.slice(comma + 1)) * 2 + PICTURE_OVERHEAD_BYTES);
 	}
 
 	// A document with a link carries the link color in its color table ("\red0\green0\blue255;").
 	if (hasLink(editorEl)) total += 22;
+	const blockSelector = ['p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'blockquote', 'figure', 'figcaption', ...DIV_LIKE_TAGS].join(', ');
 
 	// Text at its escaped length: a character outside ASCII costs its \uN\'3f escape,
 	// six to nine bytes rather than one.
-	total += escapeRtf(editorEl.textContent || '').length;
+	// (Each line break is counted, not each run of them: text is written node by node, and a
+	// run that crosses from one node into the next is a space in each.)
+	total += escapeRtf((editorEl.textContent || '').replace(/[\r\n]/g, ' ')).length;
 	// A tab that shows is written as "\tab " (5) and counted as 1; counting every tab that way
 	// can only overestimate.
 	total += ((editorEl.textContent || '').match(/\t/g)?.length ?? 0) * 4;
 	// A block's alignment (\qc, 3) and left indent (\liN, up to 7) are written per paragraph,
 	// for every block inside an indented one too: count 12 for each block that could carry them.
 	// A paragraph's own right indent (\\riN) and first-line indent (\\fi-N) are up to 8 more each.
-	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>('p, div, li, h1, h2, h3, h4, h5, h6, pre, blockquote'))) {
-		if (block.closest('[style*="margin"], [style*="text-align"], [align]')) total += 12;
+	for (const block of Array.from(editorEl.querySelectorAll<HTMLElement>(blockSelector))) {
+		if (block.closest('center, [style*="margin"], [style*="text-align"], [align]')) total += 12;
+		// A quotation and a list indent what is in them with no style of their own. An item is
+		// counted with a three-digit indent (\li720); a level further in has four or five.
+		else if (block.tagName === 'LI') {
+			if (block.parentElement?.closest('li, blockquote, ul ul, ul ol, ol ul, ol ol')) total += 2;
+		} else if (block.parentElement?.closest('blockquote')) total += 6; // "\li720"
 		if (block.style?.marginRight) total += 8;
 		if (block.style?.textIndent) total += 8;
 	}
@@ -519,8 +650,25 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		return format;
 	};
 	for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
-		const tag = el.tagName.toLowerCase();
-		total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
+		const tag = tagOf(el);
+		// A <div> that only holds blocks writes nothing of its own: its blocks are counted.
+		const container = tag === 'div' && Array.from(el.children).some(isBlock) && !startsWithInline(el) && !endsWithInline(el);
+		if (!container) total += BLOCK_OVERHEAD_BYTES[tag] ?? 0;
+		// A heading and a code block each write their size and the size around them.
+		if (HEADING_TAGS.has(tag) || tag === 'pre') total += 2 * sizeDigits;
+		// Bold, italic, a line under or through, and raised or lowered text set by a style cost
+		// what the tags for them do; counting each that is named can only overestimate.
+		const style = el.style;
+		if (style) {
+			if (style.fontWeight) total += 7;
+			if (style.fontStyle) total += 7;
+			if (style.textDecoration || style.textDecorationLine) total += 12 + 17;
+			if (style.verticalAlign) total += 19;
+			// Each line break kept by white-space is "\line " (6), as in a code block.
+			if (tag !== 'pre' && /^(pre|pre-wrap|pre-line|break-spaces)$/.test(style.whiteSpace)) {
+				total += ((el.textContent || '').match(/\r\n|\r|\n/g)?.length ?? 0) * 6;
+			}
+		}
 		if (tag === 'a') {
 			const target = linkTarget(el.getAttribute('href') || '');
 			if (target) total += LINK_OVERHEAD_BYTES + escapeRtf(target).length;
@@ -553,7 +701,8 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// is written once in each of them, marked \clvmgf or \clvmrg (7). A table inside a cell
 		// is written as text, which costs less than the cells counted for it.
 		if (tag === 'td' || tag === 'th') {
-			if (el.style?.textAlign || el.hasAttribute('align')) total += 3;
+			// (Its own, or the one a block around the table hands down.)
+			if (el.closest('center, [style*="text-align"], [align]')) total += 3;
 			const rows = parseInt(el.getAttribute('rowspan') ?? '', 10);
 			if (rows !== 1 && Number.isFinite(rows) && !el.parentElement?.closest('td, th')) {
 				// rowspan="0" reaches the last row; no span reaches past the table.
@@ -566,6 +715,16 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		if (tag === 'table' && !el.parentElement?.closest('td, th')) {
 			const model = tableModel(el);
 			for (const row of model.rows) total += row.filter((slot) => slot === null).length * BLOCK_OVERHEAD_BYTES.td;
+		}
+		// Anything in a table that is in no cell is written before it, each run a paragraph
+		// ("\pard\intbl\qc\liN " and "\par ", at most 27).
+		if (tag === 'table' || tag === 'thead' || tag === 'tbody' || tag === 'tfoot' || tag === 'tr') {
+			for (const child of Array.from(el.childNodes)) {
+				const name = child.nodeName.toLowerCase();
+				if (/^(caption|colgroup|col|thead|tbody|tfoot|tr|td|th|#comment)$/.test(name)) continue;
+				if (child.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(child.textContent || '')) continue;
+				total += 27;
+			}
 		}
 		// Text or an inline element after a block starts a paragraph of its own where that
 		// block set an indent or alignment ("\pard\intbl\qc\li1440 ", and its "\par ").
@@ -586,10 +745,13 @@ export function estimateRtfBytes(editorEl: HTMLElement): number {
 		// A figure with no picture is a paragraph of what it holds: "\pard\intbl\qc\liN " and
 		// "\par " (at most 30).
 		if (tag === 'figure' && !el.querySelector('img')) total += 30;
-		// A color costs "\cfN " on and off and, the first time, its color-table entry (at most
-		// 22 bytes, "\red255\green255\blue255;"); a size costs "\fsNN " on and off.
-		if (el.style?.color || (tag === 'font' && el.hasAttribute('color'))) total += 10 + 22;
-		if (el.style?.fontSize) total += 14; // "\fsNNN " on and off, for sizes up to 499 pt
+		// A color costs "\cfN " on and off (up to "\cf123 " each, in a document of many colors)
+		// and, the first time, its color-table entry (at most 25 bytes,
+		// "\red255\green255\blue255;"); a size costs "\fsNN " on and off.
+		if (el.style?.color) total += 14 + 25;
+		// (A <font> with a color attribute and a color style names two colors, and both are in the table.)
+		if (tag === 'font' && el.hasAttribute('color')) total += el.style?.color ? 25 : 14 + 25;
+		if (el.style?.fontSize) total += 14 + sizeDigits; // "\fsNNN " on and off, for sizes up to 499 pt
 	}
 
 	return total;
@@ -739,6 +901,7 @@ export function htmlToRtf(editorEl: HTMLElement, options: RtfWriteOptions = {}):
 		listCounter: 0,
 		inTableCell: false,
 		root: editorEl,
+		shownBefore: new Map(),
 		bold: false,
 		italic: false,
 		underline: false,
@@ -796,6 +959,7 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 	let rtf = '';
 
 	if (node.nodeType === Node.TEXT_NODE) {
+		if (isUnseen(node)) return '';
 		const text = node.textContent || '';
 		// Whitespace between two blocks (the newline in "</p>\n<p>") shows as
 		// nothing in a browser. Written out, it became a space at the start of
@@ -803,11 +967,12 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 		const tabsShow = ctx.inPre || showsTabs(node);
 		if (!tabsShow && COLLAPSIBLE_WHITESPACE.test(text) && besideBlock(node)) return '';
 		if (!ctx.inPre && restate) rtf += restateAfterBlock(node, ctx);
-		if (ctx.inPre) {
+		if (ctx.inPre || showsLineBreaks(node)) {
 			// Split before escaping — escapeRtf collapses newlines, so the
 			// line structure a <pre> block depends on has to become \line
-			// first. Handles CR, LF and CRLF alike.
-			rtf += text.split(/\r\n|\r|\n/).map((line) => escapeTabs(line, true)).join('\\line ');
+			// first. Handles CR, LF and CRLF alike. Text whose own white-space
+			// keeps its line breaks (pre-wrap) is the same.
+			rtf += text.split(/\r\n|\r|\n/).map((line) => escapeTabs(line, tabsShow)).join('\\line ');
 		} else {
 			rtf += escapeTabs(text, tabsShow);
 		}
@@ -817,7 +982,8 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 	if (node.nodeType !== Node.ELEMENT_NODE) return '';
 
 	const el = node as HTMLElement;
-	const tag = el.tagName.toLowerCase();
+	if (isHidden(el)) return '';
+	const tag = tagOf(el);
 	// Text typed straight into the parent before a block ("Diagnosis:<ul>…", the shape Chrome
 	// makes when the line after it becomes a list) has no paragraph of its own: it is ended here,
 	// or \pard would carry it into the block's first line. A <p> or <div>, and a table inside a
@@ -838,13 +1004,15 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 		case 'h5':
 		case 'h6': {
 			const size = scaled(ctx, ALL_HEADING_SCALES[tag]);
+			// The heading's own color and the like, on top of its size and bold.
+			const own = charFormat(el, tag, { ...ctx, bold: true, size }, true);
 			// A heading that holds a block (a list made in it with the browser's list command)
 			// is not a paragraph itself; what is inside is written at the heading's size, bold.
 			if (Array.from(el.children).some(isBlock)) {
-				rtf += `\\fs${size}${ctx.bold ? '' : '\\b'} ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size} `;
+				rtf += `\\fs${size}${ctx.bold ? '' : '\\b'} ${own.on}${walkChildren(el, own.ctx)}${own.off}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size} `;
 				break;
 			}
-			rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${walkChildren(el, { ...ctx, bold: true, size })}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
+			rtf += `\\pard${inCell(ctx)}${headingLayout(el, ctx)}\\f0\\fs${size}\\b ${own.on}${walkChildren(el, own.ctx)}${own.off}${ctx.bold ? '' : '\\b0'}\\fs${ctx.size}\\par `;
 			break;
 		}
 
@@ -864,15 +1032,16 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 			// carried into the blocks instead, and loose text in it gets a paragraph. A <p> that
 			// holds a block is the same: no parser makes one, but a browser's own list command
 			// does, leaving the list inside the paragraph it was made from (<p><ul>…</ul></p>).
+			// The block's own color, and bold and the like where its style sets them.
+			const own = charFormat(el, tag, ctx, true);
 			if (Array.from(el.children).some(isBlock)) {
 				const indent = ctx.indent + leftMarginTwips(el);
-				const colorIdx = colorIndexOf(el, ctx);
-				const inner = { ...ctx, indent, color: colorIdx ?? ctx.color };
-				const lead = startsWithInline(el) ? `\\pard${inCell(ctx)}${cellAlign(ctx)}${liControl(indent)} ` : '';
+				// Its alignment is that of the blocks inside it that set none: text-align is
+				// inherited, and pasted pages center a run of paragraphs with one <div>.
+				const inner = { ...own.ctx, indent, cellAlign: inheritedAlign(el, ctx) };
+				const lead = startsWithInline(el) ? `\\pard${inCell(ctx)}${cellAlign(inner)}${liControl(indent)} ` : '';
 				const tail = endsWithInline(el) ? '\\par ' : '';
-				const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
-				const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
-				rtf += `${afterLooseText ? '\\par ' : ''}${lead}${colorPrefix}${walkChildren(el, inner)}${colorSuffix}${tail}`;
+				rtf += `${afterLooseText ? '\\par ' : ''}${lead}${own.on}${walkChildren(el, inner)}${own.off}${tail}`;
 				break;
 			}
 			if (ctx.inTableCell) {
@@ -885,11 +1054,7 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 					rtf += `${restate}\\par `;
 					break;
 				}
-				const colorIdx = colorIndexOf(el, ctx);
-				const inner = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
-				rtf += colorIdx != null
-					? `${restate}\\cf${colorIdx} ${inner}\\cf${ctx.color} \\par `
-					: `${restate}${inner}\\par `;
+				rtf += `${restate}${own.on}${walkChildren(el, own.ctx)}${own.off}\\par `;
 				break;
 			}
 			// The paragraph's alignment, indents, spacing, keep-with-next and tab stops, if it
@@ -904,11 +1069,7 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 				rtf += `${afterLooseText ? '\\par ' : ''}${reset}\\par `;
 				break;
 			}
-			const colorIdx = colorIndexOf(el, ctx);
-			const inlineRtf = walkChildren(el, colorIdx != null ? { ...ctx, color: colorIdx } : ctx);
-			const colorPrefix = colorIdx != null ? `\\cf${colorIdx} ` : '';
-			const colorSuffix = colorIdx != null ? `\\cf${ctx.color} ` : '';
-			rtf += `${afterLooseText ? '\\par ' : ''}\\pard${para} ${colorPrefix}${inlineRtf}${colorSuffix}\\par `;
+			rtf += `${afterLooseText ? '\\par ' : ''}\\pard${para} ${own.on}${walkChildren(el, own.ctx)}${own.off}\\par `;
 			break;
 		}
 
@@ -956,61 +1117,33 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 		case 'li': {
 			// An item with no list around it (a pasted fragment) shows with a bullet.
 			const left = ctx.indent + LIST_STEP;
-			const start = `\\pard${inCell(ctx)}${cellAlign(ctx)}${liControl(left)}`;
-			rtf += flowRtf(Array.from(el.childNodes), { ...ctx, indent: left }, `${start}\\fi-${LIST_HANG}\\bullet\\tab `, `${start} `);
+			const start = `\\pard${inCell(ctx)}${listAlign(ctx)}${liControl(left)}`;
+			const own = charFormat(el, tag, ctx, true);
+			rtf += `${own.on}${flowRtf(Array.from(el.childNodes), { ...own.ctx, indent: left }, `${start}\\fi-${LIST_HANG}\\bullet\\tab `, `${start} `)}${own.off}`;
 			break;
 		}
 
-		case 'strong':
-		case 'b':
-			rtf += ctx.bold ? walkChildren(el, ctx) : `\\b ${walkChildren(el, { ...ctx, bold: true })}\\b0 `;
-			break;
-
-		case 'em':
-		case 'i':
-			rtf += ctx.italic ? walkChildren(el, ctx) : `\\i ${walkChildren(el, { ...ctx, italic: true })}\\i0 `;
-			break;
-
-		case 'u':
-			rtf += ctx.underline ? walkChildren(el, ctx) : `\\ul ${walkChildren(el, { ...ctx, underline: true })}\\ulnone `;
-			break;
-
-		case 's':
-		case 'strike':
-		case 'del':
-			rtf += ctx.strike ? walkChildren(el, ctx) : `\\strike ${walkChildren(el, { ...ctx, strike: true })}\\strike0 `;
-			break;
-
-		case 'sup':
-		case 'sub': {
-			const script = tag === 'sup' ? 'super' : 'sub';
-			if (ctx.script === script) {
-				rtf += walkChildren(el, ctx);
-				break;
-			}
-			const restore = ctx.script ? `\\${ctx.script} ` : '\\nosupersub ';
-			rtf += `\\${script} ${walkChildren(el, { ...ctx, script })}${restore}`;
-			break;
-		}
-
-		case 'code':
+		case 'code': {
+			const own = charFormat(el, tag, ctx);
 			if (!ctx.inPre && !ctx.mono) {
-				rtf += `\\f1 ${walkChildren(el, { ...ctx, mono: true })}\\f0 `;
+				rtf += `${own.on}\\f1 ${walkChildren(el, { ...own.ctx, mono: true })}\\f0 ${own.off}`;
 			} else {
-				rtf += walkChildren(el, ctx);
+				rtf += `${own.on}${walkChildren(el, own.ctx)}${own.off}`;
 			}
 			break;
+		}
 
 		case 'a': {
+			const own = charFormat(el, tag, ctx);
 			// A link is written only for an absolute web, mail or phone address; anything
 			// else (a relative or UNC path, javascript:, data:, file:) as its text alone.
 			const target = linkTarget(el.getAttribute('href') || '');
 			if (target) {
-				const inner = walkChildren(el, { ...ctx, underline: true, color: 1 });
-				const underlineOff = ctx.underline ? '' : '\\ulnone';
-				rtf += `{\\field{\\*\\fldinst HYPERLINK "${escapeRtf(target)}"}{\\fldrslt\\ul\\cf1 ${inner}\\cf${ctx.color}${underlineOff} }}`;
+				const inner = walkChildren(el, { ...own.ctx, underline: true, color: 1 });
+				const underlineOff = own.ctx.underline ? '' : '\\ulnone';
+				rtf += `${own.on}{\\field{\\*\\fldinst HYPERLINK "${escapeRtf(target)}"}{\\fldrslt\\ul\\cf1 ${inner}\\cf${own.ctx.color}${underlineOff} }}${own.off}`;
 			} else {
-				rtf += walkChildren(el, ctx);
+				rtf += `${own.on}${walkChildren(el, own.ctx)}${own.off}`;
 			}
 			break;
 		}
@@ -1021,12 +1154,20 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 		// re-attached to the figure on import. Other RTF readers skip the tag and
 		// simply show an italic line under the image.
 		case 'figure': {
-			const img = el.querySelector('img');
+			// The editor's figure is one picture and its caption. A figure with more in it (a
+			// second picture, text typed beside the picture) is written as the block of what it
+			// holds, like one with no picture: everything in it is kept, where only its first
+			// picture was.
+			// (What is hidden in a figure is no part of it: a picture, a caption, a note in one.)
+			const within = <T extends Element>(found: T[]) => found.filter((f) => !hiddenWithin(f, el) && !isUnseen(f));
+			const pictures = within(Array.from(el.querySelectorAll('img')));
+			const anyCaption = within(Array.from(el.querySelectorAll('figcaption')))[0] ?? null;
+			const img = pictures.length === 1 && !hasTextOutside(el, anyCaption) ? pictures[0] : null;
 			// A figure with a picture takes the caption the editor gives it, wherever it sits. One
 			// with no picture takes only its own (a child): a caption further in belongs to what
 			// holds it (a figure inside this one), and is written there.
-			const captionEl = img ? el.querySelector('figcaption') : Array.from(el.children).find((c) => c.tagName === 'FIGCAPTION');
-			const caption = (captionEl?.textContent || '').trim();
+			const captionEl = img ? anyCaption : Array.from(el.children).find((c) => c.tagName === 'FIGCAPTION' && !isHidden(c));
+			const caption = (captionEl ? shownText(captionEl) : '').trim();
 			const align = `${ownAlign(el) ?? (cellAlign(ctx) || '\\ql')}${liControl(ctx.indent + leftMarginTwips(el))}`;
 
 			if (img) {
@@ -1047,6 +1188,7 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 		case 'img': {
 			// A picture directly under the editor root has no paragraph of its
 			// own; anywhere else it is inline content of the enclosing block.
+			if (isUnseen(el)) break;
 			const standalone = el.parentNode === ctx.root;
 			rtf += standalone ? `\\pard ${imageBody(el)}\\par ` : imageBody(el);
 			break;
@@ -1058,34 +1200,134 @@ function walkNode(node: Node, ctx: WalkContext, restate = true, endLooseText = t
 			if (ctx.inPre || !isTrailingBreak(el, ctx)) rtf += '\\line ';
 			break;
 
-		case 'span': {
-			const colorIdx = colorIndexOf(el, ctx);
-			const size = sizeOf(el);
-			const colorPfx = colorIdx != null ? `\\cf${colorIdx} ` : '';
-			const sizePfx = size != null ? `\\fs${size} ` : '';
-			const sizeSfx = size != null ? `\\fs${ctx.size} ` : '';
-			const colorSfx = colorIdx != null ? `\\cf${ctx.color} ` : '';
-			const inner = walkChildren(el, { ...ctx, color: colorIdx ?? ctx.color, size: size ?? ctx.size });
-
-			rtf += `${colorPfx}${sizePfx}${inner}${sizeSfx}${colorSfx}`;
+		// Every other element is inline: <b>, <em>, <sup>, <span>, <font color> (which
+		// execCommand('foreColor') makes) and whatever a paste brings. What it does to its text
+		// is its tag's meaning and its own style (charFormat).
+		default: {
+			const own = charFormat(el, tag, ctx);
+			rtf += `${own.on}${walkChildren(el, own.ctx)}${own.off}`;
 			break;
 		}
-
-		// <font color="..."> is produced by execCommand('foreColor') in contenteditable
-		case 'font': {
-			const colorIdx = colorIndexOf(el, ctx);
-			const colorPfx = colorIdx != null ? `\\cf${colorIdx} ` : '';
-			const colorSfx = colorIdx != null ? `\\cf${ctx.color} ` : '';
-			rtf += `${colorPfx}${walkChildren(el, { ...ctx, color: colorIdx ?? ctx.color })}${colorSfx}`;
-			break;
-		}
-
-		default:
-			rtf += walkChildren(el, ctx);
-			break;
 	}
 
 	return rtf;
+}
+
+// ── Character formatting ──
+
+/** What a tag by itself does to its text. */
+const TAG_FORMAT: Record<string, { bold?: true; italic?: true; underline?: true; strike?: true; script?: 'super' | 'sub' }> = {
+	b: { bold: true },
+	strong: { bold: true },
+	i: { italic: true },
+	em: { italic: true },
+	cite: { italic: true },
+	var: { italic: true },
+	dfn: { italic: true },
+	u: { underline: true },
+	ins: { underline: true },
+	s: { strike: true },
+	strike: { strike: true },
+	del: { strike: true },
+	sup: { script: 'super' },
+	sub: { script: 'sub' }
+};
+
+/** Whether a font-weight is bold; null when it does not say. */
+function cssBold(weight: string | undefined): boolean | null {
+	if (!weight) return null;
+	if (weight === 'bold' || weight === 'bolder') return true;
+	if (weight === 'normal' || weight === 'lighter') return false;
+	const n = Number(weight);
+	return Number.isFinite(n) ? n >= 600 : null;
+}
+
+/**
+ * The character formatting an element gives its text, as the control words that turn it on and
+ * the ones that put back what was in force before, and the context its children are written in.
+ *
+ * It is what the tag means (<b>, <sup>), unless the element's own style says otherwise. Google
+ * Docs wraps everything it pastes in <b style="font-weight:normal">, which is not bold, and writes
+ * bold, italic, underline, strikethrough, superscript and subscript as styles on a <span>, which
+ * are. Only what differs from the text around it is written: <b> inside <b> writes nothing.
+ *
+ * A block (`block`) takes its color and these toggles; a size is read from inline elements only.
+ */
+function charFormat(el: HTMLElement, rawTag: string, ctx: WalkContext, block = false): { on: string; off: string; ctx: WalkContext } {
+	const style = el.style;
+	const tagFormat = TAG_FORMAT[rawTag] ?? {};
+
+	const weight = cssBold(style?.fontWeight);
+	const bold = weight ?? (tagFormat.bold || ctx.bold);
+
+	const fontStyle = style?.fontStyle ?? '';
+	const italic = fontStyle === 'normal' ? false : fontStyle === 'italic' || fontStyle.startsWith('oblique') || tagFormat.italic || ctx.italic;
+
+	// A line under or through text cannot be taken off by an element inside it (CSS draws it
+	// across everything within), so "none" only stops the element's own tag: <u> or <s>.
+	const decoration = `${style?.textDecorationLine ?? ''} ${style?.textDecoration ?? ''}`;
+	const noLine = /\bnone\b/.test(decoration);
+	const underline = /\bunderline\b/.test(decoration) || (!noLine && tagFormat.underline) || ctx.underline;
+	const strike = /\bline-through\b/.test(decoration) || (!noLine && tagFormat.strike) || ctx.strike;
+
+	const vertical = style?.verticalAlign ?? '';
+	const script: WalkContext['script'] =
+		vertical === 'super' ? 'super' : vertical === 'sub' ? 'sub' : vertical === 'baseline' ? null : (tagFormat.script ?? ctx.script);
+
+	const color = colorIndexOf(el, ctx);
+	const size = block ? null : sizeOf(el);
+
+	let on = '';
+	let off = '';
+	if (color != null) {
+		on += `\\cf${color} `;
+		off = `\\cf${ctx.color} `;
+	}
+	if (size != null) {
+		on += `\\fs${size} `;
+		off = `\\fs${ctx.size} ${off}`;
+	}
+	if (bold !== ctx.bold) {
+		on += bold ? '\\b ' : '\\b0 ';
+		off = `${ctx.bold ? '\\b ' : '\\b0 '}${off}`;
+	}
+	if (italic !== ctx.italic) {
+		on += italic ? '\\i ' : '\\i0 ';
+		off = `${ctx.italic ? '\\i ' : '\\i0 '}${off}`;
+	}
+	if (underline !== ctx.underline) {
+		on += '\\ul ';
+		off = `\\ulnone ${off}`;
+	}
+	if (strike !== ctx.strike) {
+		on += '\\strike ';
+		off = `\\strike0 ${off}`;
+	}
+	if (script !== ctx.script) {
+		on += script ? `\\${script} ` : '\\nosupersub ';
+		off = `${ctx.script ? `\\${ctx.script} ` : '\\nosupersub '}${off}`;
+	}
+
+	if (!on) return { on, off, ctx };
+	return { on, off, ctx: { ...ctx, bold, italic, underline, strike, script, color: color ?? ctx.color, size: size ?? ctx.size } };
+}
+
+/** Whether an element is shown and holds text or a picture: an empty <form> or a hidden <input> does not. */
+function holdsSomething(el: Element): boolean {
+	return !isHidden(el) && (el.tagName === 'IMG' || el.querySelector('img') !== null || hasTextOutside(el, null));
+}
+
+/** Whether an element holds text that shows, outside `skip`: any text other than collapsible whitespace. */
+function hasTextOutside(el: Node, skip: Node | null): boolean {
+	for (const child of Array.from(el.childNodes)) {
+		if (child === skip) continue;
+		if (child.nodeType === Node.TEXT_NODE) {
+			if (!COLLAPSIBLE_WHITESPACE.test(child.textContent || '') && !isUnseen(child)) return true;
+		} else if (child.nodeType === Node.ELEMENT_NODE && !isHidden(child as Element) && hasTextOutside(child, skip)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 // ── Lists ──
@@ -1102,7 +1344,7 @@ const LIST_HANG = 360;
  * indented one level further. Numbers start at the list's `start`.
  */
 function listRtf(list: HTMLElement, ctx: WalkContext): string {
-	const ordered = list.tagName.toLowerCase() === 'ol';
+	const ordered = tagOf(list) === 'ol';
 	// A list read back from RTF carries the indent beyond its level's own as a margin, which
 	// is negative for a list nested by less than half an inch.
 	const margin = lengthTwips(list.style?.marginLeft, true) ?? 0;
@@ -1110,8 +1352,8 @@ function listRtf(list: HTMLElement, ctx: WalkContext): string {
 	const start = parseInt(list.getAttribute('start') ?? '', 10);
 	let counter = ordered && Number.isFinite(start) ? start : 1;
 
-	const itemCtx = { ...ctx, indent: left };
-	const paragraph = `\\pard${inCell(ctx)}${cellAlign(ctx)}${liControl(left)}`;
+	const itemCtx = { ...ctx, indent: left, cellAlign: listAlign(ctx) };
+	const paragraph = `\\pard${inCell(ctx)}${listAlign(ctx)}${liControl(left)}`;
 	let rtf = '';
 	/** Text or inline elements written straight into the list, between its items. */
 	let loose: Node[] = [];
@@ -1121,11 +1363,14 @@ function listRtf(list: HTMLElement, ctx: WalkContext): string {
 	};
 
 	for (const child of Array.from(list.childNodes)) {
-		const tag = child.nodeType === Node.ELEMENT_NODE ? (child as Element).tagName.toLowerCase() : '';
+		const tag = child.nodeType === Node.ELEMENT_NODE ? tagOf(child as Element) : '';
+		if (tag && isHidden(child as Element)) continue;
 		if (tag === 'li') {
 			flushLoose();
 			const marker = ordered ? ` ${counter}.\\tab ` : '\\bullet\\tab ';
-			rtf += flowRtf(Array.from(child.childNodes), itemCtx, `${paragraph}\\fi-${LIST_HANG}${marker}`, `${paragraph} `);
+			// The item's own color and the like; its marker takes them too, as on screen.
+			const own = charFormat(child as HTMLElement, tag, itemCtx, true);
+			rtf += `${own.on}${flowRtf(Array.from(child.childNodes), own.ctx, `${paragraph}\\fi-${LIST_HANG}${marker}`, `${paragraph} `)}${own.off}`;
 			counter++;
 		} else if (tag === 'ul' || tag === 'ol') {
 			flushLoose();
@@ -1138,6 +1383,16 @@ function listRtf(list: HTMLElement, ctx: WalkContext): string {
 	}
 	flushLoose();
 	return rtf;
+}
+
+/**
+ * The alignment a list's items are written with: the table cell's, inside one. Anywhere else a
+ * list is written left-aligned, whatever a <div> around it says, because only a left-aligned
+ * list is read back as a list; centered, its items came back as paragraphs with a bullet typed
+ * in front.
+ */
+function listAlign(ctx: WalkContext): string {
+	return ctx.inTableCell ? ctx.cellAlign : '';
 }
 
 /**
@@ -1171,7 +1426,8 @@ function flowRtf(nodes: Node[], ctx: WalkContext, first: string | null, plain: s
 		}
 		if (node.nodeType !== Node.ELEMENT_NODE) continue;
 		const el = node as HTMLElement;
-		const tag = el.tagName.toLowerCase();
+		if (isHidden(el)) continue;
+		const tag = tagOf(el);
 
 		// A caption outside a figure is text where it stands, as everywhere else.
 		if (!endsItsLine(el)) {
@@ -1184,10 +1440,8 @@ function flowRtf(nodes: Node[], ctx: WalkContext, first: string | null, plain: s
 		end();
 		if ((tag === 'p' || tag === 'div') && !Array.from(el.children).some(isBlock)) {
 			start();
-			const colorIdx = colorIndexOf(el, ctx);
-			rtf += colorIdx != null
-				? `\\cf${colorIdx} ${walkChildren(el, { ...ctx, color: colorIdx })}\\cf${ctx.color} `
-				: walkChildren(el, ctx);
+			const own = charFormat(el, tag, ctx, true);
+			rtf += `${own.on}${walkChildren(el, own.ctx)}${own.off}`;
 			end();
 			continue;
 		}
@@ -1221,19 +1475,24 @@ const PAGE_WIDTH = 8640;
  *
  * A <th> gets a bottom border, which is how the parser knows a header cell, and a cell's own
  * text-align is its paragraphs' alignment.
+ *
+ * A cell's text ends with \cell inside its group and no \par before it. With "\par}\cell", as
+ * cells were written up to 1.9.0, Apple's reader (TextEdit, Pages, Mail) put an empty paragraph
+ * at the end of every cell, so every row was twice as tall. The last row carries \lastrow, which
+ * is what tells a reader that a table following straight after is another table.
  */
 function tableRtf(table: HTMLElement, ctx: WalkContext): string {
 	const model = tableModel(table);
-	if (model.columns === 0) return '';
+	let rtf = tableCaptionRtf(table, ctx, `\\pard${inCell(ctx)}`);
+	if (model.columns === 0) return rtf;
 
 	let cumulative = 0;
-	const edges = columnShares(model).map((share) => {
+	const edges = columnShares(model, table).map((share) => {
 		cumulative += share;
 		return Math.round(cumulative * PAGE_WIDTH);
 	});
 	edges[edges.length - 1] = PAGE_WIDTH; // snap last edge to avoid rounding drift
 
-	let rtf = '';
 	const started = new Set<GridCell>();
 	for (let r = 0; r < model.rows.length; r++) {
 		const row = model.rows[r];
@@ -1254,16 +1513,51 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
 			if (cell?.el.tagName.toLowerCase() === 'th') definition += '\\clbrdrb\\brdrs';
 			definition += `\\cellx${edges[last]}`;
 
-			const align = cell && origin ? alignOf(cell.el) : '';
-			const content = cell && origin
-				? withoutTrailingPar(walkChildren(cell.el, { ...ctx, inTableCell: true, cellAlign: align }))
-				: '';
-			bodies += `{\\pard\\intbl${align} \\f0 \\sa0 \\li0 \\fi0 ${content}\\par}\\cell`;
+			// A cell with no alignment of its own takes that of what the table is in.
+			const align = cell && origin ? alignOf(cell.el, ctx) : '';
+			let content = '';
+			// (A cell that is not shown keeps its place in the row, empty.)
+			if (cell && origin && !hiddenWithin(cell.el, table)) {
+				// The cell's own color and the like. They end with the cell's group.
+				const own = charFormat(cell.el, 'td', { ...ctx, inTableCell: true, cellAlign: align }, true);
+				content = `${own.on}${withoutTrailingPar(walkChildren(cell.el, own.ctx))}`;
+			}
+			bodies += `{\\pard\\intbl${align} \\f0 \\sa0 \\li0 \\fi0 ${content}\\cell}`;
 			c = last + 1;
 		}
 
-		rtf += `{\\trowd\\trgaph120${definition}\\trkeep\\intbl{${bodies}}\\intbl\\row}`;
+		const lastRow = r === model.rows.length - 1 ? '\\lastrow' : '';
+		rtf += `{\\trowd\\trgaph120${definition}\\trkeep\\intbl{${bodies}}\\intbl${lastRow}\\row}`;
 	}
+	return rtf;
+}
+
+/**
+ * A table's <caption>, as a centered paragraph before the table, which is where and how a
+ * browser shows it. Anything else in a table that is in no cell (text a script put between the
+ * rows) is written before the table too: nothing in a table is dropped for being outside a cell.
+ */
+function tableCaptionRtf(table: HTMLElement, ctx: WalkContext, paragraph: string): string {
+	let rtf = '';
+	const loose: Node[] = [];
+	const collect = (parent: Element, depth: number) => {
+		for (const child of Array.from(parent.childNodes)) {
+			const tag = child.nodeType === Node.ELEMENT_NODE ? (child as Element).tagName.toLowerCase() : '';
+			if (tag === 'caption') {
+				if (isHidden(child as Element)) continue;
+				const align = ownAlign(child as HTMLElement) ?? '\\qc';
+				rtf += flowRtf(Array.from(child.childNodes), ctx, null, `${paragraph}${align === '\\ql' ? '' : align}${liControl(ctx.indent)} `);
+			} else if (tag === 'td' || tag === 'th' || tag === 'colgroup' || tag === 'col') {
+				// A cell is written in its row; a column definition holds no text.
+			} else if (depth < 2 && (tag === 'thead' || tag === 'tbody' || tag === 'tfoot' || tag === 'tr')) {
+				collect(child as Element, tag === 'tr' ? 2 : depth + 1);
+			} else if (tag ? holdsSomething(child as Element) : child.nodeType === Node.TEXT_NODE && !COLLAPSIBLE_WHITESPACE.test(child.textContent || '')) {
+				loose.push(child);
+			}
+		}
+	};
+	collect(table, 0);
+	if (loose.length > 0) rtf += flowRtf(loose, ctx, null, `${paragraph}${cellAlign(ctx)}${liControl(ctx.indent)} `);
 	return rtf;
 }
 
@@ -1275,10 +1569,11 @@ function tableRtf(table: HTMLElement, ctx: WalkContext): string {
  */
 function nestedTableRtf(table: HTMLElement, ctx: WalkContext): string {
 	let rtf = followsInlineContent(table, ctx.root) ? '\\par ' : '';
+	rtf += tableCaptionRtf(table, ctx, '\\pard\\intbl');
 	for (const row of tableRowsInOrder(table)) {
 		const cells = rowCells(row);
 		if (cells.length === 0) continue;
-		const line = cells.map((cell) => withoutTrailingPar(walkChildren(cell, ctx))).join('\\tab ');
+		const line = cells.map((cell) => (hiddenWithin(cell, table) ? '' : withoutTrailingPar(walkChildren(cell, ctx)))).join('\\tab ');
 		rtf += `\\pard\\intbl${cellAlign(ctx)} ${line}\\par `;
 	}
 	return rtf;
@@ -1300,8 +1595,9 @@ const BLOCK_TAGS = new Set([
 	'tbody', 'tfoot', 'tr', 'td', 'th', 'blockquote', 'pre', 'hr', 'figure', 'figcaption'
 ]);
 
+/** (An element that is not shown is no block: it ends no line, and the space beside it is still a space.) */
 function isBlock(node: Node | null): boolean {
-	return node?.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((node as Element).tagName.toLowerCase());
+	return node?.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has(tagOf(node as Element)) && !isHidden(node as Element);
 }
 
 /** A text node with a block element on either side, or at the edge of one. */
@@ -1322,6 +1618,7 @@ function isTrailingBreak(br: Node, ctx: WalkContext): boolean {
 		while (
 			next &&
 			(next.nodeType === Node.COMMENT_NODE ||
+				(next.nodeType === Node.ELEMENT_NODE && isHidden(next as Element)) ||
 				(next.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(next.textContent || '') && !showsTabs(next)))
 		) {
 			next = next.nextSibling;
@@ -1341,8 +1638,9 @@ function isBlankLine(el: HTMLElement): boolean {
 	return el.childNodes.length === 0 || (el.childNodes.length === 1 && el.childNodes[0].nodeName === 'BR');
 }
 
-/** Collapsible whitespace or a comment: nothing that shows. */
+/** Collapsible whitespace, a comment, or an element that is not shown: nothing that shows. */
 function showsNothing(node: Node): boolean {
+	if (node.nodeType === Node.ELEMENT_NODE) return isHidden(node as Element);
 	return node.nodeType === Node.COMMENT_NODE || (node.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(node.textContent || ''));
 }
 
@@ -1370,27 +1668,61 @@ function endsWithBlock(el: Node): boolean {
  * with that block's.
  */
 function followsInlineContent(el: HTMLElement, root: Node | null = null): boolean {
-	let prev = el.previousSibling;
-	while (prev && showsNothing(prev)) prev = prev.previousSibling;
-	if (!prev) return false;
-	if (prev.nodeType === Node.TEXT_NODE) return true;
-	if (prev.nodeType !== Node.ELEMENT_NODE || endsItsLine(prev)) return false;
-	if (prev.nodeName === 'IMG' && root !== null && prev.parentNode === root) return false;
-	return !endsWithBlock(prev);
+	let node: Node = el;
+	for (;;) {
+		let prev = node.previousSibling;
+		while (prev && showsNothing(prev)) prev = prev.previousSibling;
+		if (prev) {
+			if (prev.nodeType === Node.TEXT_NODE) return true;
+			if (prev.nodeType !== Node.ELEMENT_NODE || endsItsLine(prev)) return false;
+			if (prev.nodeName === 'IMG' && root !== null && prev.parentNode === root) return false;
+			return !endsWithBlock(prev);
+		}
+		// The first thing in an inline wrapper (<b><p>…</p></b>, the wrapper of a Google Docs
+		// paste, a <span> around a list) follows what the wrapper follows: text typed before
+		// the paste was run into its first paragraph.
+		const parent = node.parentNode;
+		if (!parent || parent === root || parent.nodeType !== Node.ELEMENT_NODE || isBlock(parent)) return false;
+		node = parent;
+	}
+}
+
+/**
+ * The nearest sibling before a node that shows something, past white space, comments and hidden
+ * elements. Each node passed on the way is remembered with the same answer, so a page of
+ * thousands of comments in a row is looked back over once, not from every piece of text among
+ * them: that took seconds, and in a test DOM, where stepping to a sibling is itself slow, far more.
+ */
+function shownBefore(node: Node, ctx: WalkContext): Node | null {
+	const passed: Node[] = [];
+	let found = ctx.shownBefore.get(node);
+	for (let at: Node = node; found === undefined; ) {
+		passed.push(at);
+		const prev: Node | null = at.previousSibling;
+		if (!prev || !showsNothing(prev)) found = prev;
+		else {
+			found = ctx.shownBefore.get(prev);
+			at = prev;
+		}
+	}
+	for (const each of passed) ctx.shownBefore.set(each, found);
+	return found;
 }
 
 /** Whether the nearest sibling after this element, skipping collapsible whitespace, is text or an inline element. */
 function followedByInline(el: HTMLElement): boolean {
 	let next = el.nextSibling;
-	while (next && next.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(next.textContent || '')) {
-		next = next.nextSibling;
-	}
+	while (next && showsNothing(next)) next = next.nextSibling;
 	if (!next) return false;
 	return next.nodeType === Node.TEXT_NODE || (next.nodeType === Node.ELEMENT_NODE && !isBlock(next));
 }
 
-/** Blocks whose last paragraph always carries an indent or alignment of its own. */
-const FORMATTED_BLOCK_TAGS = new Set(['ul', 'ol', 'li', 'blockquote', 'figure', 'hr']);
+/**
+ * Blocks whose last paragraph always carries an indent or alignment of its own. A table is one:
+ * its rows are a group, and when the group ends the paragraph formatting in force is that of
+ * whatever came before the table.
+ */
+const FORMATTED_BLOCK_TAGS = new Set(['ul', 'ol', 'li', 'blockquote', 'figure', 'hr', 'table']);
 
 /**
  * Loose text or an inline element right after a block has no paragraph of its own, and would
@@ -1399,16 +1731,14 @@ const FORMATTED_BLOCK_TAGS = new Set(['ul', 'ol', 'li', 'blockquote', 'figure', 
  * nothing is written, as before.
  */
 function restateAfterBlock(node: Node, ctx: WalkContext): string {
-	let prev = node.previousSibling;
-	while (prev && prev.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(prev.textContent || '')) {
-		prev = prev.previousSibling;
-	}
+	const prev = shownBefore(node, ctx);
 	if (!isBlock(prev)) return '';
 	const block = prev as HTMLElement;
-	const tag = block.tagName.toLowerCase();
+	const tag = tagOf(block);
 	const formatted =
 		FORMATTED_BLOCK_TAGS.has(tag) ||
-		(['p', 'div'].includes(tag) && (ctx.inTableCell ? paragraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '') ||
+		// (A container's own alignment or indent is its blocks': what is inside it had them.)
+		(['p', 'div'].includes(tag) && ((ctx.inTableCell ? paragraphLayout(block, ctx) : paragraphFormat(block, ctx)) !== '' || Array.from(block.children).some(isBlock))) ||
 		(HEADING_TAGS.has(tag) && headingLayout(block, ctx) !== '') ||
 		(tag === 'pre' && ctx.indent + leftMarginTwips(block) > 0);
 	return formatted ? `\\pard${inCell(ctx)}${cellAlign(ctx)}${liControl(ctx.indent)} ` : '';
@@ -1503,7 +1833,14 @@ function edgeIndents(el: HTMLElement): string {
  * indent of the blocks around it plus its own margin.
  */
 function paragraphFormat(el: HTMLElement, ctx: WalkContext): string {
-	return `${alignOf(el)}${paragraphControls(el, ctx.indent + leftMarginTwips(el))}`;
+	return `${alignOf(el, ctx)}${paragraphControls(el, ctx.indent + leftMarginTwips(el))}`;
+}
+
+/** The alignment a container hands to the blocks inside it: its own, or the one it was handed. */
+function inheritedAlign(el: HTMLElement, ctx: WalkContext): string {
+	const own = ownAlign(el);
+	if (own == null) return ctx.cellAlign;
+	return own === '\\ql' ? '' : own;
 }
 
 /**
@@ -1546,7 +1883,7 @@ function paragraphControls(el: HTMLElement, leftTwips: number): string {
 function followsFormattedParagraph(el: HTMLElement, ctx: WalkContext): boolean {
 	const prev = el.previousElementSibling as HTMLElement | null;
 	if (!prev) return false;
-	const tag = prev.tagName.toLowerCase();
+	const tag = tagOf(prev);
 	return (tag === 'p' || tag === 'div') && paragraphFormat(prev, ctx) !== '';
 }
 
@@ -1563,7 +1900,7 @@ function edgeIsInline(el: HTMLElement, edge: 'first' | 'last'): boolean {
 	const nodes = Array.from(el.childNodes);
 	if (edge === 'last') nodes.reverse();
 	for (const n of nodes) {
-		if (n.nodeType === Node.TEXT_NODE && COLLAPSIBLE_WHITESPACE.test(n.textContent || '')) continue;
+		if (showsNothing(n)) continue;
 		return !isBlock(n);
 	}
 	return false;
@@ -1574,9 +1911,12 @@ function inCell(ctx: WalkContext): string {
 	return ctx.inTableCell ? '\\intbl' : '';
 }
 
-/** The alignment of the table cell the walker is in (\qc, \qr or \qj), which its paragraphs share. */
+/**
+ * The alignment a block takes when it sets none (\qc, \qr or \qj): that of the table cell the
+ * walker is in, or of a <div> or <center> around the block.
+ */
 function cellAlign(ctx: WalkContext): string {
-	return ctx.inTableCell ? ctx.cellAlign : '';
+	return ctx.cellAlign;
 }
 
 /** Whether a rule stands for a page break: <hr style="break-after:page">, as the parser writes \page. */

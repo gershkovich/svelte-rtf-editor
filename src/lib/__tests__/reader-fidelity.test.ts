@@ -171,19 +171,36 @@ describe('headings (#3.7)', () => {
 		expect(htmlToRtf(el(html))).toContain('\\fs28\\b \\fs32 Sixteen point\\fs28 \\b0\\fs24\\par ');
 	});
 
-	it('at another body size a heading must be bold; at 12 pt its size is enough', () => {
+	it('a heading must be bold as well as large, at every body size', () => {
+		// Changed on purpose for issue 21 (item 5). At 12 pt, size alone used to make a heading:
+		// a report set in 14 pt throughout came back as nothing but headings and was saved bold.
 		expect(read(R`\pard\fs40 large\fs20\par`, 10)).toBe('<p><span style="font-size:20pt">large</span></p>');
 		expect(read(R`\pard\b\fs40 large\b0\fs20\par`, 10)).toBe('<h1>large</h1>');
-		expect(read(R`\pard\fs48 large\fs24\par`)).toBe('<h1>large</h1>');
+		expect(read(R`\pard\fs48 large\fs24\par`)).toBe('<p><span style="font-size:24pt">large</span></p>');
+		expect(read(R`\pard\b\fs48 large\b0\fs24\par`)).toBe('<h1>large</h1>');
 	});
 
-	it('a heading is bold throughout, so text in it that differs only in bold is one piece', () => {
-		// Written again a heading is all bold; read as three pieces it then became one, and
-		// the document changed on its second save as well as its first.
+	it('a 14 pt report keeps its one bold word bold, and nothing else', () => {
+		const html = read(R`\pard\fs28 Final: \b carcinoma\b0 , margins negative.\par`);
+		expect(html).toBe(
+			'<p><span style="font-size:14pt">Final: </span><strong><span style="font-size:14pt">carcinoma</span></strong><span style="font-size:14pt">, margins negative.</span></p>'
+		);
+		const saved = htmlToRtf(el(html));
+		expect(saved).toContain('\\fs28 Final: \\fs24 \\b \\fs28 carcinoma\\fs24 \\b0 \\fs28 , margins negative.');
+		expect(htmlToRtf(el(rtfToHtml(saved)))).toBe(saved);
+	});
+
+	it('large text that is bold only in part is a paragraph, and is saved the same twice', () => {
+		// Changed on purpose for issue 21: this was read as a heading, and all of it became bold.
 		const html = read(R`\pard\fs48\super a\b b\b0 c\nosupersub\fs24\par`);
-		expect(html).toBe('<h1><sup>abc</sup></h1>');
+		expect(html.startsWith('<p>')).toBe(true);
+		expect(html).toContain('<strong><span style="font-size:24pt">b</span></strong>');
 		const saved = htmlToRtf(el(html));
 		expect(htmlToRtf(el(rtfToHtml(saved)))).toBe(saved);
+	});
+
+	it('a heading whose bold stops for a space is still one piece', () => {
+		expect(read(R`\pard\fs48\b Gross\b0  \b description\b0\fs24\par`)).toBe('<h1>Gross description</h1>');
 	});
 
 	it('a heading keeps its alignment and indents', () => {

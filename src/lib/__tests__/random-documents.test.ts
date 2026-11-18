@@ -14,6 +14,9 @@ import { rtfToHtml } from '../rtf-parser.js';
  * - the size estimate is never below the real size;
  * - what the reader returns is made only of elements it is known to produce.
  *
+ * A second set is the same blocks as a paste brings them: inside the elements of a web page, with
+ * formatting set by styles, with captions, hidden elements and text typed in a figure.
+ *
  * The generator is seeded, so a failure names a document that can be built again. Invented text.
  */
 
@@ -144,6 +147,51 @@ function block(r: Random, depth: number): string {
 	}
 }
 
+/** One of the shapes a paste brings, around or beside the blocks the editor makes itself. */
+function pastedBlock(r: Random, depth: number): string {
+	const inner = () => (depth > 0 ? pastedBlock(r, depth - 1) : block(r, 0));
+	switch (r.int(14)) {
+		case 0: {
+			const tag = r.pick(['section', 'article', 'main', 'aside']);
+			return `<${tag}>${inner()}${inner()}</${tag}>`;
+		}
+		case 1: return `<div style="text-align:${r.pick(['center', 'right'])}">${inner()}${words(r, 2)}${inner()}</div>`;
+		case 2: return `<center>${r.chance(0.5) ? words(r, 3) : inner()}</center>`;
+		case 3: return `<dl><dt>${words(r, 2)}</dt><dd>${inline(r, 1)}</dd><dt>${words(r, 2)}</dt><dd>${inline(r, 1)}</dd></dl>`;
+		case 4: {
+			const style = () =>
+				[
+					`font-weight:${r.pick(['700', '400', 'bold', 'normal'])}`,
+					`font-style:${r.pick(['italic', 'normal'])}`,
+					`text-decoration:${r.pick(['underline', 'none', 'line-through'])}`,
+					`vertical-align:${r.pick(['baseline', 'super', 'sub'])}`
+				].join(';');
+			const around = r.pick(['b', 'i', 'sup', 'u']);
+			return `<p>${words(r, 2)} <span style="${style()}">${inline(r, 1)}</span> <${around}><span style="${style()}">${words(r, 2)}</span>${words(r, 1)}</${around}></p>`;
+		}
+		// The wrapper Google Docs puts around a paste.
+		case 5: return `<b style="font-weight:normal" id="docs-internal-guid-${r.int(100)}">${inner()}${inner()}</b>`;
+		case 6: return table(r, 1).replace(/^<table>/, `<table><caption>${words(r, 3)}</caption>`);
+		case 7: {
+			const picture = `<img src="${PNG}" style="width:10px;height:auto" alt="">`;
+			return `<figure>${r.pick(['', `${words(r, 2)} `])}${picture}${r.pick(['', picture])} ${words(r, 2)}<figcaption>${words(r, 2)}</figcaption></figure>`;
+		}
+		case 8:
+			return `<style>p { color: red }</style><p>${words(r, 2)}<span style="display:none">not shown</span><span hidden>nor this</span><span style="mso-hide:all">nor this</span> ${words(r, 2)}</p><p hidden>gone</p>`;
+		case 9: return `<p style="white-space:pre-wrap">${words(r, 3)}\n${words(r, 2)}\n\n${words(r, 2)}</p>`;
+		case 10:
+			return `<h2 style="color:red">${inline(r, 1)}</h2><ul><li style="color:blue;font-weight:bold">${inline(r, 1)}</li><li>${words(r, 2)}</li></ul><table><tr><td style="color:#00f">${words(r, 2)}</td><td style="width:${r.pick([60, 120])}px">${words(r, 1)}</td></tr></table>`;
+		case 11: return `<details><summary>${words(r, 2)}</summary>${words(r, 3)}</details><address>${words(r, 2)}<br>${words(r, 2)}</address>`;
+		case 12: return `${table(r, 1)}${words(r, 2)}`;
+		default: return block(r, depth);
+	}
+}
+
+function pastedDocumentHtml(seed: number): string {
+	const r = generator(seed);
+	return Array.from({ length: 1 + r.int(5) }, () => pastedBlock(r, 2)).join(r.pick(['', '\n']));
+}
+
 function documentHtml(seed: number): string {
 	const r = generator(seed);
 	return Array.from({ length: 1 + r.int(6) }, () => block(r, 2)).join(r.pick(['', '\n']));
@@ -157,6 +205,12 @@ const el = (html: string) => {
 const write = (html: string) => htmlToRtf(el(html));
 /** The text of a document without what a reload may respell: spaces, list markers, rule dashes. */
 const letters = (html: string) => (el(html).textContent || '').replace(/[\s •—]|\d+\./g, '');
+/** The same, of the text the screen shows: without the elements a paste brings hidden. */
+const shownLetters = (html: string) => {
+	const dom = el(html);
+	for (const hidden of Array.from(dom.querySelectorAll('style, [hidden], [style*="display:none"], [style*="mso-hide"]'))) hidden.remove();
+	return letters(dom.innerHTML);
+};
 
 const KNOWN_TAGS = new Set([
 	'P', 'BR', 'STRONG', 'EM', 'U', 'S', 'SUP', 'SUB', 'SPAN', 'H1', 'H2', 'H3', 'HR', 'TABLE', 'TBODY', 'TR', 'TD', 'TH',
@@ -164,14 +218,18 @@ const KNOWN_TAGS = new Set([
 ]);
 
 /**
- * How many documents, and the seed of the first. 400 run with the suite. For a longer run, in
- * batches the test environment has memory for:
- *   RTF_RANDOM_DOCUMENTS=5000 RTF_RANDOM_FIRST=5001 npx vitest run random-documents
+ * How many documents of each set, and the seed of the first. 400 run with the suite. For a longer
+ * run, in batches the test environment has memory for:
+ *   RTF_RANDOM_DOCUMENTS=1000 RTF_RANDOM_FIRST=1001 npx vitest run random-documents
  */
 const COUNT = Number(process.env.RTF_RANDOM_DOCUMENTS) || 400;
 const FIRST = Number(process.env.RTF_RANDOM_FIRST) || 1;
 
-describe(`${COUNT} random documents`, () => {
+// Each test below goes through every document, and a build machine is several times slower than
+// a desk: the usual five seconds for a test are not enough there (the paste set took 5.05).
+const ROOM = { timeout: 120_000 };
+
+describe(`${COUNT} random documents`, ROOM, () => {
 	const documents = Array.from({ length: COUNT }, (_, i) => ({ seed: FIRST + i, html: documentHtml(FIRST + i) }));
 
 	it('use every construct, so the checks below mean something', () => {
@@ -226,6 +284,55 @@ describe(`${COUNT} random documents`, () => {
 				(href) => !/^(https:\/\/x\.test\/|mailto:)/.test(href)
 			);
 			expect(unsafe, `seed ${seed}: ${html}`).toEqual([]);
+		}
+	});
+});
+
+describe(`${COUNT} random documents as a paste brings them`, ROOM, () => {
+	const documents = Array.from({ length: COUNT }, (_, i) => ({ seed: FIRST + i, html: pastedDocumentHtml(FIRST + i) }));
+
+	it('use every pasted shape, so the checks below mean something', () => {
+		const all = documents.map((d) => d.html).join('');
+		for (const part of ['<section>', '<center>', '<dl>', 'font-weight:700', 'vertical-align:super', 'docs-internal-guid', '<caption>', '<figure>', 'display:none', 'pre-wrap', '<li style="color', '<details>', '</table>']) {
+			expect(all, part).toContain(part);
+		}
+	});
+
+	it('lose no character of the text that shows, and write none of the text that does not', () => {
+		for (const { seed, html } of documents) {
+			expect(letters(rtfToHtml(write(html))), `seed ${seed}: ${html}`).toBe(shownLetters(html));
+		}
+	});
+
+	it('settle: after one reload each is written the same, save after save', () => {
+		for (const { seed, html } of documents) {
+			const second = write(rtfToHtml(write(html)));
+			const third = write(rtfToHtml(second));
+			expect(third, `seed ${seed}: ${html}`).toBe(second);
+		}
+	});
+
+	it('are written as one line of ASCII with balanced braces, and are never larger than their size estimate', () => {
+		for (const { seed, html } of documents) {
+			const dom = el(html);
+			const rtf = htmlToRtf(dom);
+			expect(rtf, `seed ${seed}`).toMatch(/^[\x20-\x7e]*$/);
+			let depth = 0;
+			for (let i = 0; i < rtf.length; i++) {
+				if (rtf[i] === '\\') i++;
+				else if (rtf[i] === '{') depth++;
+				else if (rtf[i] === '}') depth--;
+				if (depth < 1 && i < rtf.length - 1) throw new Error(`seed ${seed}: the document closes early at ${i}`);
+			}
+			expect(depth, `seed ${seed}`).toBe(0);
+			expect(estimateRtfBytes(dom), `seed ${seed}: ${html}`).toBeGreaterThanOrEqual(rtf.length);
+		}
+	});
+
+	it('read back as elements the reader is known to produce', () => {
+		for (const { seed, html } of documents) {
+			const unknown = Array.from(el(rtfToHtml(write(html))).querySelectorAll('*'), (node) => node.tagName).filter((tag) => !KNOWN_TAGS.has(tag));
+			expect(unknown, `seed ${seed}: ${html}`).toEqual([]);
 		}
 	});
 });

@@ -27,7 +27,7 @@ const rows = (rtf: string) => rtf.split('\\trowd').slice(1);
 const definition = (row: string) =>
 	Array.from(row.slice(0, row.indexOf('\\trkeep')).matchAll(/((?:\\cl[a-z]+|\\brdrs)*)\\cellx(\d+)/g)).map((m) => `${m[1]}${m[2]}`);
 /** The text of each cell of a row, in order. */
-const texts = (row: string) => Array.from(row.matchAll(/\\fi0 (.*?)\\par\}\\cell/g)).map((m) => m[1]);
+const texts = (row: string) => Array.from(row.matchAll(/\\fi0 (.*?)\\cell\}/g)).map((m) => m[1]);
 const read = (rtfBody: string) => rtfToHtml(`{\\rtf1\\ansi\\deff0 ${rtfBody}}`);
 /** A table as rows of "text" or "text[colspan x rowspan]". */
 const shape = (html: string) =>
@@ -240,10 +240,12 @@ describe('htmlToRtf: the table as a whole', () => {
 		expect(body('<table><tr></tr></table>')).toBe('');
 	});
 
-	it('an ordinary table is written exactly as before', () => {
+	it('an ordinary table: each cell ends inside its group, and the last row says it is the last', () => {
+		// Changed on purpose for issue 21: a cell ended "\\par}\\cell", which Apple's reader showed
+		// as an extra empty paragraph in every cell, and no row said where the table ended.
 		expect(body('<table><tr><th>H1</th><th>H2</th></tr><tr><td>a</td><td>b</td></tr></table>')).toBe(
-			'{\\trowd\\trgaph120\\clbrdrb\\brdrs\\cellx4320\\clbrdrb\\brdrs\\cellx8640\\trkeep\\intbl{{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 H1\\par}\\cell{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 H2\\par}\\cell}\\intbl\\row}' +
-			'{\\trowd\\trgaph120\\cellx4320\\cellx8640\\trkeep\\intbl{{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 a\\par}\\cell{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 b\\par}\\cell}\\intbl\\row}'
+			'{\\trowd\\trgaph120\\clbrdrb\\brdrs\\cellx4320\\clbrdrb\\brdrs\\cellx8640\\trkeep\\intbl{{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 H1\\cell}{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 H2\\cell}}\\intbl\\row}' +
+			'{\\trowd\\trgaph120\\cellx4320\\cellx8640\\trkeep\\intbl{{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 a\\cell}{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 b\\cell}}\\intbl\\lastrow\\row}'
 		);
 	});
 
@@ -273,12 +275,12 @@ describe('htmlToRtf: a cell\'s alignment', () => {
 	it('a paragraph with an alignment of its own keeps it, and one set left says so', () => {
 		const rtf = body('<table><tr><td style="text-align:center"><p style="text-align:right">r</p><p style="text-align:left">l</p></td></tr></table>');
 		expect(rtf).toContain('\\pard\\intbl\\qr r\\par ');
-		expect(rtf).toContain('\\pard\\intbl\\ql l\\par');
+		expect(rtf).toContain('\\pard\\intbl\\ql l\\cell}');
 	});
 
 	it('does not reach the next cell, or the paragraph after the table', () => {
 		const rtf = body('<table><tr><td style="text-align:right">a</td><td><p>b</p><p>c</p></td></tr></table><p>after</p>');
-		expect(rtf).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 b\\par \\pard\\intbl c\\par}\\cell');
+		expect(rtf).toContain('{\\pard\\intbl \\f0 \\sa0 \\li0 \\fi0 b\\par \\pard\\intbl c\\cell}');
 		expect(rtf.endsWith('\\pard after\\par ')).toBe(true);
 	});
 });
@@ -288,7 +290,7 @@ describe('htmlToRtf: a table inside a table cell', () => {
 
 	it('is written as lines of text in that cell, its cells a tab apart: no row opens inside a cell', () => {
 		expect(rows(rtf).length).toBe(1);
-		expect(rtf).toContain('before\\par \\pard\\intbl in 1\\tab in 2\\par \\pard\\intbl in 3\\tab in 4\\par after\\par}\\cell');
+		expect(rtf).toContain('before\\par \\pard\\intbl in 1\\tab in 2\\par \\pard\\intbl in 3\\tab in 4\\par \\pard\\intbl after\\cell}');
 	});
 
 	it('loses none of the text, and reads back as those lines', () => {

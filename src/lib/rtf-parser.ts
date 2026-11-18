@@ -43,12 +43,6 @@ interface RtfText {
 
 type RtfNode = RtfGroup | RtfControl | RtfText;
 
-type Token =
-	| { type: 'open' }
-	| { type: 'close' }
-	| { type: 'control'; word: string; param: number | null }
-	| { type: 'text'; value: string; hex?: boolean };
-
 interface RenderState {
 	bold: boolean;
 	italic: boolean;
@@ -62,6 +56,11 @@ interface RenderState {
 	fontIndex: number;
 	ucSkip: number;
 	inList: boolean;
+	/** \v: hidden text, which Word does not show. \deleted: text a tracked change took out. */
+	hidden: boolean;
+	deleted: boolean;
+	/** \ql, \qc, \qr, \qj: like the indents, it holds until \pard and ends with its group. */
+	align: string;
 	/** The address of the link this text is in ({\field{\*\fldinst HYPERLINK …}}), or ''. */
 	link: string;
 	/**
@@ -191,8 +190,11 @@ const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345
 /** 1 px at 96 dpi = 15 twips. */
 const TWIPS_PER_PX = 15;
 
-/** A paragraph made up of nothing but pictures is rendered as a <figure>. */
-const IMAGE_ONLY_PARAGRAPH = /^(?:<img\b[^>]*>\s*)+$/;
+/**
+ * A paragraph made up of one picture and nothing else is rendered as a <figure>. Two pictures in
+ * a paragraph stay a paragraph: a figure is written back as its picture and its caption.
+ */
+const IMAGE_ONLY_PARAGRAPH = /^<img\b[^>]*>$/;
 
 /** Nibble value of each hex digit's char code; -1 for anything else. */
 const HEX_NIBBLE = (() => {
@@ -216,6 +218,9 @@ const LIST_MARKER = /^\s*(?:\u2022|(\d+)\.)\s*$/;
  * arrives as a middle dot or as the font's private-use character.
  */
 const SYMBOL_BULLET = /^\s*[\u00b7\uf0b7]\s*$/;
+
+/** U+2028, the line separator, and U+2029, the paragraph separator. */
+const LINE_SEPARATOR = /[\u2028\u2029]/;
 
 /** Text a browser shows as nothing but space. */
 const ONLY_SPACES = /^[ \t\r\n\f]*$/;
@@ -294,10 +299,9 @@ function hexToBase64(hex: string): string {
  * formats a browser cannot display (metafiles, device-dependent bitmaps).
  *
  * Only hexadecimal picture data is read. RTF also allows \binN, where the next
- * N bytes are raw binary — rare outside of Word's own output, and it cannot
- * survive readRtfFile() reading the document as text anyway. Such a picture is
- * skipped rather than mis-decoded: \bin is not a recognised control word here,
- * so its bytes fall through the tokenizer and the hex filter discards them.
+ * N bytes are raw binary: rare outside of Word's own output. Such a picture is
+ * skipped rather than mis-decoded: parseTree steps over the bytes, so nothing
+ * of it is left here.
  */
 function renderPicture(group: RtfGroup): string {
 	let mime = '';
@@ -332,12 +336,12 @@ function renderPicture(group: RtfGroup): string {
 	const base64 = hexToBase64(hex);
 	if (!base64) return '';
 
-	const widthPx = wgoal
-		? Math.round(wgoal / TWIPS_PER_PX)
-		: Math.round((picw * scaleX) / 100);
-	const heightPx = hgoal
-		? Math.round(hgoal / TWIPS_PER_PX)
-		: Math.round((pich * scaleY) / 100);
+	// \picwgoal is the size the picture was placed at and \picscalex a percentage of it: Word
+	// writes a picture someone dragged to half size as \picscalex50, with the goal unchanged.
+	if (scaleX <= 0) scaleX = 100;
+	if (scaleY <= 0) scaleY = 100;
+	const widthPx = Math.round(((wgoal ? wgoal / TWIPS_PER_PX : picw) * scaleX) / 100);
+	const heightPx = Math.round(((hgoal ? hgoal / TWIPS_PER_PX : pich) * scaleY) / 100);
 
 	const styles: string[] = [];
 	if (widthPx > 0) styles.push(`width:${widthPx}px`);
@@ -371,8 +375,41 @@ function cp1252Char(byte: number): string {
 	return code ? String.fromCharCode(code) : '';
 }
 
-function tokenize(rtf: string): Token[] {
-	const tokens: Token[] = [];
+/**
+ * The deepest group the tree holds. Thousands of nested groups (damaged or hostile input) are
+ * nothing a real document has: those nest a few dozen deep at most. Groups below this depth are
+ * folded into the one at it: their text is kept, and their formatting carries on to the end of
+ * that group.
+ */
+const MAX_GROUP_DEPTH = 500;
+
+/**
+ * The most pieces (groups, control words, runs of text) a document is read into. Each costs
+ * memory, and a file well inside the size limit can be made of nothing but braces: 36 MB of them
+ * ran a process out of 4 GB. A report has thousands of pieces, a long Word document some hundreds
+ * of thousands; picture data is one for each line of the file it takes up.
+ */
+const MAX_NODES = 5_000_000;
+
+/** C0 control characters other than tab, and DEL: no reader shows them, and NUL ends a string for some. */
+const CONTROL_CHARACTER = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+const CONTROL_CHARACTERS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+
+/** RTF text as a tree of groups, control words and text. */
+function parseTree(rtf: string): RtfGroup {
+	const root: RtfGroup = { type: 'group', children: [] };
+	const stack: RtfGroup[] = [root];
+	let current = root;
+	/** Groups opened past MAX_GROUP_DEPTH and not closed yet. */
+	let folded = 0;
+	let count = 0;
+	const add = (node: RtfNode): void => {
+		if (++count > MAX_NODES) {
+			throw new RangeError('This document is too complex to show: it has more than 5 million parts');
+		}
+		current.children.push(node);
+	};
+
 	let i = 0;
 	const len = rtf.length;
 
@@ -380,10 +417,21 @@ function tokenize(rtf: string): Token[] {
 		const ch = rtf[i];
 
 		if (ch === '{') {
-			tokens.push({ type: 'open' });
+			if (stack.length > MAX_GROUP_DEPTH) {
+				folded++;
+			} else {
+				const group: RtfGroup = { type: 'group', children: [] };
+				add(group);
+				stack.push(group);
+				current = group;
+			}
 			i++;
 		} else if (ch === '}') {
-			tokens.push({ type: 'close' });
+			if (folded > 0) folded--;
+			else if (stack.length > 1) {
+				stack.pop();
+				current = stack[stack.length - 1];
+			}
 			i++;
 		} else if (ch === '\\') {
 			i++;
@@ -401,31 +449,37 @@ function tokenize(rtf: string): Token[] {
 				// which became a NUL in the HTML.)
 				if (hi >= 0 && lo >= 0) {
 					i += 2;
-					tokens.push({ type: 'text', value: cp1252Char((hi << 4) | lo), hex: true });
+					const byte = (hi << 4) | lo;
+					// A control character written as an escape is no more text than one written
+					// as itself: a tab is a tab, the rest are dropped.
+					// (Dropped as an empty piece, so that it still counts as the one character
+					// that stands in for the Unicode escape before it.)
+					if (byte === 9) add({ type: 'control', word: 'tab', param: null });
+					else add({ type: 'text', value: byte >= 0x20 && byte !== 0x7f ? cp1252Char(byte) : '', hex: true });
 				}
 			}
 			// Special escapes
 			else if (next === '\\' || next === '{' || next === '}') {
-				tokens.push({ type: 'text', value: next });
+				add({ type: 'text', value: next });
 				i++;
 			}
 			// Line breaks as control
 			else if (next === '\n' || next === '\r') {
-				tokens.push({ type: 'control', word: 'par', param: null });
+				add({ type: 'control', word: 'par', param: null });
 				i++;
 				if (i < len && rtf[i] === '\n') i++;
 			}
 			// Tilde = non-breaking space
 			else if (next === '~') {
-				tokens.push({ type: 'text', value: '\u00A0' });
+				add({ type: 'text', value: '\u00A0' });
 				i++;
 			}
 			// Hyphen shortcuts
 			else if (next === '-') {
-				tokens.push({ type: 'text', value: '\u00AD' }); // soft hyphen
+				add({ type: 'text', value: '\u00AD' }); // soft hyphen
 				i++;
 			} else if (next === '_') {
-				tokens.push({ type: 'text', value: '\u2011' }); // non-breaking hyphen
+				add({ type: 'text', value: '\u2011' }); // non-breaking hyphen
 				i++;
 			}
 			// Control word or control symbol
@@ -454,15 +508,27 @@ function tokenize(rtf: string): Token[] {
 				// Consume optional trailing space delimiter
 				if (i < len && rtf[i] === ' ') i++;
 
-				tokens.push({ type: 'control', word, param });
+				// \binN: the next N bytes are raw picture data, not RTF. They are stepped over
+				// whole: read as RTF, a brace among them closed the group, and with enough of
+				// them the document, and everything after was gone. (readRtfFile reads a file
+				// one character to the byte, so N characters is N bytes.)
+				if (word === 'bin' && param != null && param > 0) {
+					i += param;
+					continue;
+				}
+				add({ type: 'control', word, param });
 			}
 			// Control symbol (single non-alpha char)
 			else {
-				tokens.push({ type: 'control', word: next, param: null });
+				add({ type: 'control', word: next, param: null });
 				i++;
 			}
 		} else if (ch === '\r' || ch === '\n') {
 			// Skip bare newlines (they're not meaningful in RTF)
+			i++;
+		} else if (ch === '\t') {
+			// A tab character is a tab, the same as \tab: TextEdit writes every tab this way.
+			add({ type: 'control', word: 'tab', param: null });
 			i++;
 		} else {
 			// Plain text — slice up to the next special char. Slicing rather than
@@ -471,52 +537,12 @@ function tokenize(rtf: string): Token[] {
 			const start = i;
 			while (i < len) {
 				const c = rtf[i];
-				if (c === '\\' || c === '{' || c === '}' || c === '\r' || c === '\n') break;
+				if (c === '\\' || c === '{' || c === '}' || c === '\r' || c === '\n' || c === '\t') break;
 				i++;
 			}
-			if (i > start) {
-				tokens.push({ type: 'text', value: rtf.substring(start, i) });
-			}
-		}
-	}
-
-	return tokens;
-}
-
-// ── AST Builder ──
-
-/**
- * The deepest group the tree holds. The renderer walks groups recursively, and thousands of
- * nested groups (damaged or hostile input) would overflow the stack; real documents nest a few
- * dozen deep at most. Groups below this depth are folded into the one at it: their text is kept,
- * and their formatting carries on to the end of that group.
- */
-const MAX_GROUP_DEPTH = 500;
-
-function buildTree(tokens: Token[]): RtfGroup {
-	const root: RtfGroup = { type: 'group', children: [] };
-	const stack: RtfGroup[] = [root];
-	/** Groups opened past MAX_GROUP_DEPTH and not closed yet. */
-	let folded = 0;
-
-	for (const tok of tokens) {
-		const current = stack[stack.length - 1];
-
-		if (tok.type === 'open') {
-			if (stack.length > MAX_GROUP_DEPTH) {
-				folded++;
-				continue;
-			}
-			const group: RtfGroup = { type: 'group', children: [] };
-			current.children.push(group);
-			stack.push(group);
-		} else if (tok.type === 'close') {
-			if (folded > 0) folded--;
-			else if (stack.length > 1) stack.pop();
-		} else if (tok.type === 'control') {
-			current.children.push({ type: 'control', word: tok.word, param: tok.param ?? null });
-		} else if (tok.type === 'text') {
-			current.children.push(tok.hex ? { type: 'text', value: tok.value, hex: true } : { type: 'text', value: tok.value });
+			let value = rtf.substring(start, i);
+			if (CONTROL_CHARACTER.test(value)) value = value.replace(CONTROL_CHARACTERS, '');
+			if (value) add({ type: 'text', value });
 		}
 	}
 
@@ -564,22 +590,74 @@ function parseColorTable(group: RtfGroup): string[] {
 // ── Font table parser ──
 
 /**
- * The numbers of the fonts that are monospace: named like one (Courier New, Consolas), or declared
- * \fmodern or fixed-pitch (\fprq1). Reads both shapes a font table comes in: one group per font
+ * What each byte of the Symbol font shows, from 0x20 to 0xFF: Greek letters where the Latin ones
+ * are, and mathematical signs. Text set in Symbol is stored as those bytes, so "5 mg" with its m
+ * in Symbol is 5 micrograms. The table is the one macOS reads Symbol text with; 0 is a byte the font has
+ * nothing for.
+ */
+const SYMBOL_FONT = [
+	0x0020, 0x0021, 0x2200, 0x0023, 0x2203, 0x0025, 0x0026, 0x220d, 0x0028, 0x0029, 0x2217, 0x002b, 0x002c, 0x2212, 0x002e, 0x002f,
+	0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003a, 0x003b, 0x003c, 0x003d, 0x003e, 0x003f,
+	0x2245, 0x0391, 0x0392, 0x03a7, 0x0394, 0x0395, 0x03a6, 0x0393, 0x0397, 0x0399, 0x03d1, 0x039a, 0x039b, 0x039c, 0x039d, 0x039f,
+	0x03a0, 0x0398, 0x03a1, 0x03a3, 0x03a4, 0x03a5, 0x03c2, 0x03a9, 0x039e, 0x03a8, 0x0396, 0x005b, 0x2234, 0x005d, 0x22a5, 0x005f,
+	0x203e, 0x03b1, 0x03b2, 0x03c7, 0x03b4, 0x03b5, 0x03c6, 0x03b3, 0x03b7, 0x03b9, 0x03d5, 0x03ba, 0x03bb, 0x03bc, 0x03bd, 0x03bf,
+	0x03c0, 0x03b8, 0x03c1, 0x03c3, 0x03c4, 0x03c5, 0x03d6, 0x03c9, 0x03be, 0x03c8, 0x03b6, 0x007b, 0x007c, 0x007d, 0x223c, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0x20ac, 0x03d2, 0x2032, 0x2264, 0x2044, 0x221e, 0x0192, 0x2663, 0x2666, 0x2665, 0x2660, 0x2194, 0x2190, 0x2191, 0x2192, 0x2193,
+	0x00b0, 0x00b1, 0x2033, 0x2265, 0x00d7, 0x221d, 0x2202, 0x2022, 0x00f7, 0x2260, 0x2261, 0x2248, 0x2026, 0x23d0, 0x23af, 0x21b5,
+	0x2135, 0x2111, 0x211c, 0x2118, 0x2297, 0x2295, 0x2205, 0x2229, 0x222a, 0x2283, 0x2287, 0x2284, 0x2282, 0x2286, 0x2208, 0x2209,
+	0x2220, 0x2207, 0x00ae, 0x00a9, 0x2122, 0x220f, 0x221a, 0x22c5, 0x00ac, 0x2227, 0x2228, 0x21d4, 0x21d0, 0x21d1, 0x21d2, 0x21d3,
+	0x25ca, 0x3008, 0x00ae, 0x00a9, 0x2122, 0x2211, 0x239b, 0x239c, 0x239d, 0x23a1, 0x23a2, 0x23a3, 0x23a7, 0x23a8, 0x23a9, 0x23aa,
+	0, 0x3009, 0x222b, 0x2320, 0x23ae, 0x2321, 0x239e, 0x239f, 0x23a0, 0x23a4, 0x23a5, 0x23a6, 0x23ab, 0x23ac, 0x23ad, 0
+];
+
+/** A font named Symbol, or Symbol MT. */
+function isSymbolFontName(name: string): boolean {
+	return /^symbol(?: ?mt)?$/i.test(name.trim());
+}
+
+/** Text set in the Symbol font as the characters it shows. */
+function symbolText(text: string): string {
+	let out = '';
+	for (let i = 0; i < text.length; i++) {
+		let code = text.charCodeAt(i);
+		// Word writes a Symbol character as U+F000 plus its byte.
+		if (code >= 0xf020 && code <= 0xf0ff) code -= 0xf000;
+		const shown = code >= 0x20 && code <= 0xff ? SYMBOL_FONT[code - 0x20] : 0;
+		out += shown ? String.fromCharCode(shown) : text[i];
+	}
+	return out;
+}
+
+/**
+ * The numbers of the fonts that are monospace, and of the ones that are Symbol. A font is
+ * monospace when it is named like one (Courier New, Consolas), or declared \fmodern or
+ * fixed-pitch (\fprq1). It is Symbol when it is named Symbol and declared in the symbol
+ * character set (\fcharset2), which is how Word declares it: only then are its bytes places in
+ * that font. TextEdit declares its Symbol font in the Mac character set (\fcharset77), where a
+ * byte is an ordinary character, and Apple's reader maps neither that nor a Symbol with no
+ * character set. Reads both shapes a font table comes in: one group per font
  * ({\f1\fmodern Courier New;}), and TextEdit's run of entries with no groups
  * (\f0\fswiss Helvetica;\f1\fmodern Courier;).
  */
-function monospaceFonts(group: RtfGroup): Set<number> {
+function readFontTable(group: RtfGroup): { mono: Set<number>; symbol: Set<number> } {
 	const mono = new Set<number>();
+	const symbol = new Set<number>();
 	let num: number | null = null;
 	let name = '';
 	let fixed = false;
+	let symbolSet = false;
 
 	const finish = () => {
-		if (num != null && (fixed || isMonospaceFontName(name))) mono.add(num);
+		if (num != null) {
+			if (fixed || isMonospaceFontName(name)) mono.add(num);
+			if (symbolSet && isSymbolFontName(name)) symbol.add(num);
+		}
 		num = null;
 		name = '';
 		fixed = false;
+		symbolSet = false;
 	};
 
 	const read = (nodes: RtfNode[]) => {
@@ -590,6 +668,8 @@ function monospaceFonts(group: RtfGroup): Set<number> {
 					num = node.param;
 				} else if (node.word === 'fmodern' || (node.word === 'fprq' && node.param === 1)) {
 					fixed = true;
+				} else if (node.word === 'fcharset') {
+					symbolSet = node.param === 2;
 				}
 			} else if (node.type === 'text') {
 				// A name ends at its ';'.
@@ -610,7 +690,7 @@ function monospaceFonts(group: RtfGroup): Set<number> {
 	read(group.children.filter((n) => n.type !== 'group'));
 	finish();
 
-	return mono;
+	return { mono, symbol };
 }
 
 // ── Links ──
@@ -631,6 +711,8 @@ function fieldInstruction(group: RtfGroup): string | null {
 			for (let i = node.children.length - 1; i >= 0; i--) pending.push(node.children[i]);
 		} else if (node.type === 'control') {
 			if (node.word === 'u') return null;
+			// A tab between the instruction's words is a space between them.
+			if (node.word === 'tab') text += ' ';
 		} else {
 			text += node.value;
 			if (text.length > MAX_FIELD_INSTRUCTION) return null;
@@ -639,21 +721,52 @@ function fieldInstruction(group: RtfGroup): string | null {
 	return text;
 }
 
+/** The instruction of a {\field …} group as text, or null when it has none that can be read. */
+function fieldText(field: RtfGroup): string | null {
+	const instruction = field.children.find(
+		(n): n is RtfGroup => n.type === 'group' && n.children.some((c) => c.type === 'control' && c.word === 'fldinst')
+	);
+	return instruction ? fieldInstruction(instruction) : null;
+}
+
 /**
  * The address a {\field …} group links to, or '' when it is not a link, or not one that may be
  * followed. Only what the writer itself would write is accepted (linkTarget): an absolute web,
  * mail or phone address. A javascript: or file: address, or a link to a bookmark, stays text.
  */
 function fieldLink(field: RtfGroup): string {
-	const instruction = field.children.find(
-		(n): n is RtfGroup => n.type === 'group' && n.children.some((c) => c.type === 'control' && c.word === 'fldinst')
-	);
-	if (!instruction) return '';
-	const text = fieldInstruction(instruction);
+	const text = fieldText(field);
 	if (text == null) return '';
 	const m = text.match(/^\s*HYPERLINK\s+(?:"([^"]*)"|([^\s"\\]\S*))/i);
 	if (!m) return '';
 	return linkTarget(m[1] ?? m[2] ?? '') ?? '';
+}
+
+/**
+ * The character of a symbol field, {\field{\*\fldinst SYMBOL 176 \\f "Symbol"}}, which is how Word
+ * stores a character put in with Insert Symbol: its number, and the font it is a character of.
+ * '' when the field is not one, or its font is one whose characters are not known here
+ * (Wingdings): the field's own result is shown then, as for any other field.
+ */
+function fieldSymbol(field: RtfGroup): string {
+	const text = fieldText(field);
+	if (text == null) return '';
+	const m = text.match(/^\s*SYMBOL\s+(0x[0-9a-f]+|\d+)(?![0-9a-z])([\s\S]*)$/i);
+	if (!m) return '';
+	const code = Number(m[1]);
+	const font = /\\f\s*"([^"]*)"/i.exec(m[2])?.[1] ?? /\\f\s+([^\s"\\]+)/i.exec(m[2])?.[1];
+	if (font != null && isSymbolFontName(font)) {
+		const byte = code >= 0xf020 && code <= 0xf0ff ? code - 0xf000 : code;
+		const shown = byte >= 0x20 && byte <= 0xff ? SYMBOL_FONT[byte - 0x20] : 0;
+		return shown ? String.fromCharCode(shown) : '';
+	}
+	// Another font: what the number shows depends on that font.
+	if (font != null) return '';
+	// No font: the number is the character's own. A \\u switch says Unicode; without it a
+	// number below 256 is a byte of Windows-1252.
+	if (code < 0x20 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return '';
+	if (code < 256 && !/\\u(?![a-z])/i.test(m[2])) return cp1252Char(code);
+	return String.fromCodePoint(code);
 }
 
 // ── Body size ──
@@ -666,7 +779,12 @@ const destinationWords = new Set([
 	'nonshppict',
 	// {\nonesttables \par} is for readers that do not know nested tables; \nestrow is read here
 	'nonesttables',
-	'object', 'fldinst', 'xmlnstbl', 'listtable', 'listoverridetable',
+	// (\object is handled where groups are read: its data is skipped and its \result shown)
+	'objdata', 'objclass', 'objname', 'fldinst', 'xmlnstbl',
+	// An index entry and a contents entry: text that is shown in the index, not where it is marked
+	'xe', 'tc', 'tcn',
+	// The drawing a shape is shown as where shapes are not read; the shape itself is read
+	'shprslt', 'listtable', 'listoverridetable',
 	'rsidtbl', 'generator', 'datafield', 'themedata', 'colorschememapping',
 	'latentstyles', 'datastore', 'mmathPr', 'author', 'operator',
 	'title', 'subject', 'doccomm', 'company', 'category', 'keywords'
@@ -734,7 +852,18 @@ function figureIndentStyle(block: ParagraphBlock): string {
  * a non-breaking space or an em space there is text someone put there, and is kept.
  */
 function trimSpaces(html: string): string {
-	return html.replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/g, '');
+	// Two loops, not a regular expression: /[ \t]+$/ starts again at every space of a long run
+	// that does not reach the end, and 200,000 spaces in a paragraph took 23 seconds.
+	let start = 0;
+	let end = html.length;
+	while (start < end && isSpace(html.charCodeAt(start))) start++;
+	while (end > start && isSpace(html.charCodeAt(end - 1))) end--;
+	return start === 0 && end === html.length ? html : html.slice(start, end);
+}
+
+/** Space, tab, line feed, form feed, carriage return. */
+function isSpace(code: number): boolean {
+	return code === 32 || (code >= 9 && code <= 13 && code !== 11);
 }
 
 function escapeText(text: string): string {
@@ -792,23 +921,49 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		);
 	}
 
-	const tokens = tokenize(rtfString);
-	const tree = buildTree(tokens);
+	const tree = parseTree(rtfString);
 
 	let colorTable: string[] = [''];
 	let monoFonts = new Set<number>();
+	let symbolFonts = new Set<number>();
 	let defaultFont = 0;
 
-	const blocks: Block[] = [];
+	/** Where finished paragraphs and tables go: the document, or the footnote or text box being read. */
+	let blocks: Block[] = [];
 
 	// The paragraph being read
 	let runs: Run[] = [];
+	/** Nothing but text has been read into the paragraph so far. */
+	let onlyText = true;
+	/**
+	 * The alignment in force where the paragraph's last piece was read. A paragraph whose
+	 * alignment was set in a group that closes before its \par ({\qc Title}\par, or a cell
+	 * written {\pard\intbl\qr 1.0\par}\cell) is still that paragraph's: Apple's reader shows it
+	 * so, and so did this one while alignment was not kept with the group.
+	 */
+	let contentAlign = 'left';
 	let marker: ListMarker | null = null;
 	let paragraphHasListMarker = false;
 	let paragraphIsCaption = false;
 
-	// Paragraph alignment (reset by \pard, affects cells and paragraphs)
-	let currentAlign = 'left';
+	/**
+	 * Text boxes met while a paragraph or a table was being read. A box is not part of the line
+	 * it is anchored in: its text goes after that paragraph, or after that table.
+	 */
+	let paragraphAsides: Block[] = [];
+	let tableAsides: Block[] = [];
+	/** Each footnote's paragraphs, in the order the notes were met. They go at the end. */
+	const notes: Block[][] = [];
+	/** How many footnotes have been given a number. */
+	let noteCount = 0;
+	/** The number written where the text refers to a note, until the note itself takes it. */
+	let noteMark = 0;
+	/** Inside a footnote: its number, or 0 until it has one. Outside: -1. */
+	let noteNumber = -1;
+	/** Reading a footnote or text box that sits in hidden or deleted text: none of it is shown. */
+	let unshown = false;
+	/** Where in the stack of formatting states the footnote or text box being read begins. */
+	let stateBase = 0;
 
 	// Table state
 	let tableRows: TableRow[] = [];
@@ -819,11 +974,18 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	let pendingDef = newCellDef();
 	/** The side a \clbrdrX just named, until a border type (\brdrs...) confirms or \brdrnone clears it. */
 	let pendingSide: 'b' | 'other' | null = null;
-	/** The sides of the cell being defined that have a real border. */
-	let cellBorders = { b: false, other: false };
+	/**
+	 * The sides of the cell being defined that have a real border, and whether the bottom one is
+	 * the bare \brdrs the writer marks a header cell with: no width, no color.
+	 */
+	let cellBorders = { b: false, other: false, bare: false };
+	/** The side whose border type was read last, which a \brdrw or \brdrcf after it belongs to. */
+	let borderSide: 'b' | 'other' | null = null;
 	let inTableCell = false;
 	/** \par seen in a table cell since its last text: line breaks owed if more text follows. */
 	let cellBreaks = 0;
+	/** \lastrow seen in the definition of the row being read: its \row ends the table. */
+	let lastRow = false;
 	/** \nestcell seen: a tab is owed if more text follows on the line. */
 	let nestTabPending = false;
 
@@ -831,8 +993,19 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		return { right: 0, header: false, vmgf: false, vmrg: false, hmgf: false, hmrg: false };
 	}
 
+	// The document is the first group. A byte-order mark or blank lines before it (a file saved
+	// by a tool that adds them) do not make it something else: with those the color and font
+	// tables were not found, and every color and code font was lost.
+	const firstGroupAt = tree.children.findIndex((n) => n.type === 'group');
+	const rootGroup =
+		firstGroupAt >= 0 &&
+		tree.children
+			.slice(0, firstGroupAt)
+			.every((n) => (n.type === 'text' ? /^[\s\uFEFF\u00EF\u00BB\u00BF]*$/.test(n.value) : n.type === 'control' && n.word === 'tab'))
+			? (tree.children[firstGroupAt] as RtfGroup)
+			: tree;
+
 	// First pass: extract color table and font table from the root group
-	const rootGroup = tree.children[0]?.type === 'group' ? (tree.children[0] as RtfGroup) : tree;
 
 	for (let i = 0; i < rootGroup.children.length; i++) {
 		const child = rootGroup.children[i];
@@ -841,7 +1014,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			if (firstControl?.word === 'colortbl') {
 				colorTable = parseColorTable(child);
 			} else if (firstControl?.word === 'fonttbl') {
-				monoFonts = monospaceFonts(child);
+				({ mono: monoFonts, symbol: symbolFonts } = readFontTable(child));
 			}
 		} else if (child.type === 'control' && child.word === 'deff' && child.param != null) {
 			defaultFont = child.param;
@@ -873,6 +1046,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			fontIndex: defaultFont,
 			ucSkip: 1,
 			inList: false,
+			hidden: false,
+			deleted: false,
+			align: 'left',
 			link: '',
 			leftIndent: 0,
 			rightIndent: 0,
@@ -987,6 +1163,25 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	/** Half of a surrogate pair read from \uN, waiting for the \uN that completes the character. */
 	let pendingHighSurrogate = 0;
 
+	/** A piece of the paragraph that is not text: a line break, a tab, a picture. */
+	function pushHtml(kind: 'br' | 'tab' | 'gap' | 'img', html: string, state: RenderState): void {
+		runs.push({ type: 'html', kind, html, fmt: formatOf(state) });
+		onlyText = false;
+	}
+
+	/** An empty paragraph to read into. */
+	function newRuns(): void {
+		runs = [];
+		onlyText = true;
+		contentAlign = 'left';
+		marker = null;
+	}
+
+	/** The alignment of the paragraph, or the cell, that ends here: see contentAlign. */
+	function alignHere(state: RenderState): string {
+		return state.align !== 'left' || runs.length === 0 ? state.align : contentAlign;
+	}
+
 	function pushText(text: string, state: RenderState): void {
 		if (!text) return;
 		const fmt = formatOf(state);
@@ -1017,6 +1212,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 
 	/** What is owed before the next piece of a paragraph: see cellBreaks and nestTabPending. */
 	function beforeContent(state: RenderState): void {
+		contentAlign = state.align;
 		if (pendingHighSurrogate) {
 			// A lone half of a pair is no character.
 			pendingHighSurrogate = 0;
@@ -1027,7 +1223,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			cellBreaks = 0;
 			if (inTableCell) {
 				// A paragraph mark inside a cell: the cell's text goes on, on a new line.
-				for (let k = 0; k < count; k++) runs.push({ type: 'html', kind: 'br', html: '<br>', fmt: formatOf(state) });
+				for (let k = 0; k < count; k++) pushHtml('br', '<br>', state);
 			} else {
 				// \pard has left the table without a \cell: what was read is a paragraph.
 				for (let k = 0; k < count; k++) flushParagraph();
@@ -1035,19 +1231,65 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		}
 		if (nestTabPending) {
 			nestTabPending = false;
-			runs.push({ type: 'html', kind: 'tab', html: TAB_HTML, fmt: formatOf(state) });
+			pushHtml('tab', TAB_HTML, state);
 		}
 	}
 
+	/**
+	 * Whether what is being read is shown at all. Hidden text (\v) is not, in Word or anywhere:
+	 * it holds notes and field codes. Nor is text a tracked change deleted (\deleted), which is
+	 * still in the file beside what replaced it, so "malignant" struck out and "benign" put in
+	 * read "malignantbenign".
+	 */
+	function shown(state: RenderState): boolean {
+		return !unshown && !state.hidden && !state.deleted;
+	}
+
 	function appendText(text: string, state: RenderState): void {
-		if (!text) return;
+		if (!text || !shown(state)) return;
 		beforeContent(state);
 		pushText(text, state);
 	}
 
 	function appendHtml(kind: 'br' | 'tab' | 'gap' | 'img', html: string, state: RenderState): void {
+		if (!shown(state)) return;
 		beforeContent(state);
-		runs.push({ type: 'html', kind, html, fmt: formatOf(state) });
+		pushHtml(kind, html, state);
+	}
+
+	/** \par, where it ends a paragraph and where, in a table cell, it starts a new line. */
+	function paragraphMark(state: RenderState): void {
+		if (inTableCell) {
+			cellBreaks++;
+		} else {
+			// Paragraph marks from a cell that \pard has since left end paragraphs too.
+			for (; cellBreaks > 0; cellBreaks--) flushParagraph();
+			flushParagraph();
+		}
+	}
+
+	/**
+	 * Text as the file has it. In a Symbol font each character is the sign that font shows for
+	 * it. U+2028 is a line break (TextEdit writes Shift-Return that way; a browser shows nothing
+	 * for the character itself, and the two lines ran together) and U+2029 a paragraph mark.
+	 */
+	function appendChars(text: string, state: RenderState, bytes = true): void {
+		if (!text || !shown(state)) return;
+		if (bytes && symbolFonts.has(state.fontIndex)) text = symbolText(text);
+		if (!LINE_SEPARATOR.test(text)) {
+			appendText(text, state);
+			return;
+		}
+		let from = 0;
+		for (let i = 0; i < text.length; i++) {
+			const code = text.charCodeAt(i);
+			if (code !== 0x2028 && code !== 0x2029) continue;
+			appendText(text.slice(from, i), state);
+			if (code === 0x2028) appendHtml('br', '<br>', state);
+			else paragraphMark(state);
+			from = i + 1;
+		}
+		appendText(text.slice(from), state);
 	}
 
 	/** The text of the line being read, back to the last line break, if text is all it holds. */
@@ -1063,17 +1305,18 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 	}
 
 	function appendTab(state: RenderState): void {
+		if (!shown(state)) return;
 		beforeContent(state);
 		// A real tab, in the shape the editor's Tab key inserts, so it shows as
-		// one and is written back as \tab (an em space came back as 膕).
+		// one and is written back as \tab (an em space came back as a \u escape for U+2003).
 		// After a list marker ("\bullet\tab", "1.\tab") the gap stays an em
 		// space where the line is read as a plain one: a full tab there is too wide.
 		const lead = lineText();
 		// Only a marker that opens the paragraph can make it a list item.
-		const opensParagraph = marker === null && runs.every((r) => r.type === 'text');
+		const opensParagraph = marker === null && onlyText;
 		const listed = lead != null ? lead.match(LIST_MARKER) : null;
 		if (listed) {
-			runs.push({ type: 'html', kind: 'gap', html: '&emsp;', fmt: formatOf(state) });
+			pushHtml('gap', '&emsp;', state);
 			// (A number too long to be an item's number is text, and so is one written with a
 			// leading zero, "01.": a list would show it as "1.".)
 			if (opensParagraph && (!listed[1] || (listed[1].length <= MAX_LIST_NUMBER_DIGITS && !/^0\d/.test(listed[1])))) {
@@ -1083,7 +1326,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			}
 			return;
 		}
-		runs.push({ type: 'html', kind: 'tab', html: TAB_HTML, fmt: formatOf(state) });
+		pushHtml('tab', TAB_HTML, state);
 		// Word's bullet, inside {\listtext …} or {\pntext …}.
 		if (opensParagraph && lead != null && state.inList && SYMBOL_BULLET.test(lead)) {
 			marker = { kind: 'ul', number: 0, end: runs.length };
@@ -1170,12 +1413,15 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 
 		// A vertical merge: the cell marked \clvmgf takes in each \clvmrg cell under it, row
 		// after row. A \clvmrg cell with nothing above it to join stays an ordinary cell.
+		// Each row's cells by the column they start in, so the cell under another is looked up,
+		// not searched for: a search per merged cell took a second for a row of 40,000.
+		const byStart = placedRows.map((row) => new Map(row.map((c) => [c.start, c])));
 		for (let r = 0; r < placedRows.length; r++) {
 			for (const cell of placedRows[r]) {
 				if (!cell.def.vmgf || cell.merged) continue;
 				for (let below = r + 1; below < placedRows.length; below++) {
-					const under = placedRows[below].find((c) => c.start === cell.start && c.def.vmrg && !c.merged);
-					if (!under) break;
+					const under = byStart[below].get(cell.start);
+					if (!under || !under.def.vmrg || under.merged) break;
 					under.merged = true;
 					cell.rowspan++;
 					// A merged cell is empty; if a damaged file has text there, it is kept.
@@ -1209,6 +1455,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		}
 		html += '</table>';
 		blocks.push({ kind: 'table', html });
+		for (const aside of tableAsides) blocks.push(aside);
+		tableAsides = [];
 	}
 
 	function flushParagraph() {
@@ -1223,7 +1471,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			blocks.push({
 				kind: 'paragraph',
 				runs,
-				align: currentAlign,
+				align: alignHere(state),
 				left: state.leftIndent,
 				right: state.rightIndent,
 				first: state.firstLineIndent,
@@ -1232,12 +1480,37 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				inTable: inTableCell
 			});
 		}
-		runs = [];
-		marker = null;
+		newRuns();
 		paragraphHasListMarker = false;
 		paragraphIsCaption = false;
-		currentAlign = 'left';
 		nestTabPending = false;
+		for (const aside of paragraphAsides) blocks.push(aside);
+		paragraphAsides = [];
+	}
+
+	/** What is still being read when the document, a footnote or a text box ends. */
+	function finishContent(): void {
+		if (pendingHighSurrogate) {
+			pendingHighSurrogate = 0;
+			pushText('\uFFFD', currentState());
+		}
+		// A row the file ends in the middle of, with cells and no \row, is still a row.
+		if (currentRowCells.length > 0) {
+			tableRows.push({ cells: currentRowCells, defs: currentRowDefs.length > 0 ? currentRowDefs : lastRowDefs });
+			currentRowCells = [];
+			inTableCell = false;
+		}
+		flushTable(); // flush any trailing table rows
+		// Only flush if there's actually pending content — the final \par in most RTF
+		// files already flushed the last paragraph, so an unconditional call here
+		// would push a spurious empty paragraph that becomes a trailing <p><br></p>.
+		if (runs.length > 0) {
+			flushParagraph();
+		}
+		for (const aside of tableAsides) blocks.push(aside);
+		for (const aside of paragraphAsides) blocks.push(aside);
+		tableAsides = [];
+		paragraphAsides = [];
 	}
 
 	let pendingUnicodeSkip = 0;
@@ -1251,6 +1524,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		index: number;
 		/** Whether leaving this group ends a formatting state. */
 		scoped: boolean;
+		/** Run when the group is reached, and when it has been read. */
+		enter?: () => void;
+		exit?: () => void;
 	}
 	const frames: Frame[] = [{ nodes: rootGroup.children, index: 0, scoped: false }];
 
@@ -1259,21 +1535,157 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		frames.push({ nodes: group.children, index: 0, scoped: true });
 	};
 
+	const firstControl = (group: RtfGroup) => group.children.find((n) => n.type === 'control') as RtfControl | undefined;
+
+	/**
+	 * A group whose text is not part of the line it sits in: a footnote, a text box. It is read
+	 * as a small document of its own, with its own paragraphs and tables, and what was being read
+	 * around it is put back as it was afterwards. Read in place, a footnote's paragraph mark
+	 * split the sentence it was in, and its \pard took a table cell out of its table.
+	 */
+	function aside(group: RtfGroup, done: (read: Block[]) => void, note = false): Frame {
+		let restore = (): void => {};
+		return {
+			nodes: group.children,
+			index: 0,
+			scoped: true,
+			enter() {
+				const saved = {
+					blocks, runs, onlyText, marker, paragraphHasListMarker, paragraphIsCaption, paragraphAsides,
+					tableAsides, tableRows, currentRowCells, currentRowDefs, lastRowDefs, pendingDef, pendingSide,
+					cellBorders, borderSide, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
+					pendingHighSurrogate, pendingUnicodeSkip, noteNumber, unshown, stateBase
+				};
+				restore = () => {
+					({
+						blocks, runs, onlyText, marker, paragraphHasListMarker, paragraphIsCaption, paragraphAsides,
+						tableAsides, tableRows, currentRowCells, currentRowDefs, lastRowDefs, pendingDef, pendingSide,
+						cellBorders, borderSide, inTableCell, cellBreaks, contentAlign, lastRow, nestTabPending,
+						pendingHighSurrogate, pendingUnicodeSkip, noteNumber, unshown, stateBase
+					} = saved);
+				};
+				blocks = [];
+				newRuns();
+				paragraphHasListMarker = false;
+				paragraphIsCaption = false;
+				paragraphAsides = [];
+				tableAsides = [];
+				tableRows = [];
+				currentRowCells = [];
+				currentRowDefs = [];
+				lastRowDefs = [];
+				pendingDef = newCellDef();
+				pendingSide = null;
+				cellBorders = { b: false, other: false, bare: false };
+				borderSide = null;
+				inTableCell = false;
+				cellBreaks = 0;
+				lastRow = false;
+				nestTabPending = false;
+				pendingHighSurrogate = 0;
+				pendingUnicodeSkip = 0;
+				if (note) {
+					noteNumber = noteMark;
+					noteMark = 0;
+				}
+				// Its own formatting from the start: Word opens every one with \pard\plain. What
+				// stays is whether the text around it is shown at all: a note in hidden or
+				// deleted text is not, whatever \plain inside it resets.
+				const outer = currentState();
+				unshown = !shown(outer);
+				stateBase = stateStack.length;
+				stateStack.push({ ...defaultState(), ucSkip: outer.ucSkip });
+			},
+			exit() {
+				finishContent();
+				const read = unshown ? [] : blocks;
+				restore();
+				done(read);
+			}
+		};
+	}
+
+	/** A text box's paragraphs, kept until the paragraph or the table it is anchored in is done. */
+	const keepAside = (read: Block[]) => {
+		const target = inTableCell || currentRowCells.length > 0 ? tableAsides : paragraphAsides;
+		for (const block of read) target.push(block);
+	};
+
+	/**
+	 * A drawing, {\shp{\*\shpinst …}}: a text box, a picture with text wrapped around it. The
+	 * pictures in it are shown where it is anchored and the text of its boxes is read after the
+	 * paragraph; the rest of a drawing (lines, fills, positions) is not shown.
+	 */
+	function readShape(shape: RtfGroup): void {
+		const boxes: RtfGroup[] = [];
+		const pending: RtfNode[] = [shape];
+		while (pending.length > 0) {
+			const node = pending.pop()!;
+			if (node.type !== 'group') continue;
+			const word = node.children.find((n): n is RtfControl => n.type === 'control' && n.word !== '*')?.word;
+			if (word === 'shptxt') {
+				boxes.push(node);
+				continue;
+			}
+			if (word === 'sp') {
+				// A property of the shape. The one named pib holds its picture.
+				const groups = node.children.filter((n): n is RtfGroup => n.type === 'group');
+				const name = groups.find((g) => firstControl(g)?.word === 'sn');
+				const value = groups.find((g) => firstControl(g)?.word === 'sv');
+				const isPicture = name?.children.some((n) => n.type === 'text' && n.value.trim() === 'pib');
+				const picture = isPicture
+					? value?.children.find((n): n is RtfGroup => n.type === 'group' && firstControl(n)?.word === 'pict')
+					: undefined;
+				if (picture) {
+					const img = renderPicture(picture);
+					if (img) appendHtml('img', img, currentState());
+				}
+				continue;
+			}
+			for (let i = node.children.length - 1; i >= 0; i--) pending.push(node.children[i]);
+		}
+		// The last one first: the frame pushed last is read first.
+		for (let i = boxes.length - 1; i >= 0; i--) frames.push(aside(boxes[i], keepAside));
+	}
+
 	while (frames.length > 0) {
 		const frame = frames[frames.length - 1];
+		if (frame.enter) {
+			const enter = frame.enter;
+			frame.enter = undefined;
+			enter();
+		}
 		if (frame.index >= frame.nodes.length) {
 			frames.pop();
+			frame.exit?.();
 			if (frame.scoped) stateStack.pop();
 			continue;
 		}
 		const node = frame.nodes[frame.index++];
 
 		if (node.type === 'group') {
-			const firstCtrl = node.children.find((n) => n.type === 'control') as RtfControl | undefined;
+			const firstCtrl = firstControl(node);
 
 			if (firstCtrl?.word === 'pict') {
 				const img = renderPicture(node);
 				if (img) appendHtml('img', img, currentState());
+				continue;
+			}
+
+			if (firstCtrl?.word === 'footnote') {
+				// A footnote or an endnote. Its text goes to the end of the document; the number
+				// that refers to it (\chftn) stays where it is in the text.
+				frames.push(
+					aside(node, (read) => notes.push(read), true)
+				);
+				continue;
+			}
+
+			if (firstCtrl?.word === 'object') {
+				// An embedded object: a spreadsheet, an equation. Its data is not read; what it
+				// carries to be shown in its place, {\result …}, is.
+				const result = node.children.find((n): n is RtfGroup => n.type === 'group' && firstControl(n)?.word === 'result');
+				if (result) enterGroup(result, cloneState());
 				continue;
 			}
 
@@ -1292,6 +1704,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				// rather than dropping the picture with the rest of the ignorables.
 				if (dest?.word === 'shppict') {
 					enterGroup(node, cloneState());
+				} else if (dest?.word === 'shpinst') {
+					readShape(node);
 				} else if (dest?.word === 'inkcap') {
 					// Marks the paragraph that follows as a picture caption.
 					paragraphIsCaption = true;
@@ -1308,6 +1722,13 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 			// {\field{\*\fldinst HYPERLINK "…"}{\fldrslt text}}: the text is a link, if the
 			// address is one the writer would write.
 			if (firstCtrl?.word === 'field') {
+				// A character put in with Insert Symbol: the field says which, and that is
+				// shown in place of the field's own result.
+				const symbol = fieldSymbol(node);
+				if (symbol) {
+					appendText(symbol, currentState());
+					continue;
+				}
 				const href = fieldLink(node);
 				if (href) state.link = href;
 			}
@@ -1344,7 +1765,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					state.sub = false;
 					break;
 				case 'fs':
-					if (p != null) state.fontSize = p;
+					// (Up to Word's limit of 1638 pt; a damaged file can say anything.)
+					if (p != null) state.fontSize = Math.min(Math.max(p, 0), 3276);
 					break;
 				case 'cf':
 					if (p != null) state.colorIndex = p;
@@ -1357,17 +1779,25 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'f':
 					if (p != null) state.fontIndex = p;
 					break;
+				// Alignment is the paragraph's and holds, like an indent, until \pard: Word and
+				// TextEdit state it once for a run of centered paragraphs, not once for each.
 				case 'ql':
-					currentAlign = 'left';
+					state.align = 'left';
 					break;
 				case 'qr':
-					currentAlign = 'right';
+					state.align = 'right';
 					break;
 				case 'qc':
-					currentAlign = 'center';
+					state.align = 'center';
 					break;
 				case 'qj':
-					currentAlign = 'justify';
+					state.align = 'justify';
+					break;
+				case 'v':
+					state.hidden = p !== 0;
+					break;
+				case 'deleted':
+					state.deleted = p !== 0;
 					break;
 				case 'li':
 					state.leftIndent = p ?? 0;
@@ -1381,13 +1811,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'par':
 				case 'sect':
 					// \sect ends a section, and with it the paragraph: "A\sect B" is two lines.
-					if (inTableCell) {
-						cellBreaks++;
-					} else {
-						// Paragraph marks from a cell that \pard has since left end paragraphs too.
-						for (; cellBreaks > 0; cellBreaks--) flushParagraph();
-						flushParagraph();
-					}
+					paragraphMark(state);
 					break;
 				case 'trowd':
 					// A row's definition, not its start: Word writes the definition before the
@@ -1395,7 +1819,12 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					currentRowDefs = [];
 					pendingDef = newCellDef();
 					pendingSide = null;
-					cellBorders = { b: false, other: false };
+					borderSide = null;
+					cellBorders = { b: false, other: false, bare: false };
+					lastRow = false;
+					break;
+				case 'lastrow':
+					lastRow = true;
 					break;
 				case 'trgaph':
 				case 'trkeep':
@@ -1407,13 +1836,23 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'clbrdrl':
 				case 'clbrdrt':
 					pendingSide = 'other';
+					borderSide = null;
 					break;
 				case 'clbrdrb':
 					pendingSide = 'b';
+					borderSide = null;
 					break;
 				case 'brdrnone':
 				case 'brdrnil':
 					pendingSide = null;
+					borderSide = null;
+					break;
+				case 'brdrw':
+				case 'brdrcf':
+					// A width or a color: a line someone drew under the cell (a signature line,
+					// the rule that closes a table), which Word and TextEdit never write
+					// without one. The writer's header mark is the bare \clbrdrb\brdrs.
+					if (borderSide === 'b') cellBorders.bare = false;
 					break;
 				// Every border style RTF names: any of them makes the side a border.
 				case 'brdrs':
@@ -1443,7 +1882,11 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'brdrengrave':
 				case 'brdroutset':
 				case 'brdrinset':
-					if (pendingSide) cellBorders[pendingSide] = true;
+					if (pendingSide) {
+						cellBorders[pendingSide] = true;
+						if (pendingSide === 'b') cellBorders.bare = w === 'brdrs';
+					}
+					borderSide = pendingSide;
 					pendingSide = null;
 					break;
 				case 'clvmgf':
@@ -1461,12 +1904,13 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'cellx':
 					if (p != null) {
 						pendingDef.right = p;
-						pendingDef.header = cellBorders.b && !cellBorders.other;
+						pendingDef.header = cellBorders.b && cellBorders.bare && !cellBorders.other;
 						currentRowDefs.push(pendingDef);
 					}
 					pendingDef = newCellDef();
 					pendingSide = null;
-					cellBorders = { b: false, other: false };
+					borderSide = null;
+					cellBorders = { b: false, other: false, bare: false };
 					break;
 				case 'intbl':
 					inTableCell = true;
@@ -1476,10 +1920,14 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						pendingHighSurrogate = 0;
 						pushText('\ufffd', state);
 					}
-					currentRowCells.push({ html: trimSpaces(renderRuns(runs)), align: currentAlign });
-					runs = [];
-					marker = null;
-					currentAlign = 'left';
+					currentRowCells.push({
+						html: trimSpaces(renderRuns(runs)),
+						// The alignment of the cell's last paragraph, also where that paragraph
+						// was ended inside a group ({\pard\intbl\qr 1.0\par}\cell, as this writer
+						// wrote cells up to 1.9.0).
+						align: alignHere(state)
+					});
+					newRuns();
 					// The paragraph mark that ends a cell's last paragraph adds no line.
 					cellBreaks = 0;
 					nestTabPending = false;
@@ -1497,9 +1945,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					// Text after the row's last \cell is a cell that was not closed, not the
 					// start of the paragraph after the table.
 					if (trimSpaces(renderRuns(runs))) {
-						currentRowCells.push({ html: trimSpaces(renderRuns(runs)), align: currentAlign });
-						runs = [];
-						marker = null;
+						currentRowCells.push({ html: trimSpaces(renderRuns(runs)), align: alignHere(state) });
+						newRuns();
 					}
 					// A row with no definition of its own repeats the one before it.
 					const defs = currentRowDefs.length > 0 ? currentRowDefs : lastRowDefs;
@@ -1511,15 +1958,27 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					inTableCell = false;
 					cellBreaks = 0;
 					nestTabPending = false;
-					// The cell's indents end with the table, in whichever group set them:
-					// \row may sit in a group of its own ({\row}).
-					stateStack.forEach(resetIndents);
+					// The cell's indents and alignment end with the row, in whichever group
+					// set them: \row may sit in a group of its own ({\row}). Not in the text a
+					// footnote or text box is anchored in, though: a table in a note left the
+					// paragraph around the note uncentered.
+					for (let k = stateBase; k < stateStack.length; k++) {
+						resetIndents(stateStack[k]);
+						stateStack[k].align = 'left';
+					}
+					// \lastrow: the table ends here. Without this, a table that follows with
+					// no paragraph between was read as more rows of the same one, and where
+					// their columns differed the cells came out merged.
+					if (lastRow) {
+						lastRow = false;
+						flushTable();
+					}
 					break;
 				}
 				case 'pard':
 					// \pard resets the paragraph, not the characters: bold, italic, underline
 					// and strikethrough carry on until \plain or their own \b0. Word relies on it.
-					currentAlign = 'left';
+					state.align = 'left';
 					resetIndents(state);
 					// Being in a table is a paragraph property too. Without this, one \intbl with
 					// no \row made a single cell of the rest of the document. The marker group
@@ -1529,7 +1988,22 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					if (!state.inList && currentRowCells.length === 0) inTableCell = false;
 					break;
 				case 'line':
+				case 'column':
+					// (\column: the text goes on in the next column, which on a screen with one
+					// column is the next line.)
 					appendHtml('br', '<br>', state);
+					break;
+				case 'chftn':
+					// The number of a footnote: where the text refers to it, and again at the
+					// start of the note itself.
+					if (!shown(state)) break;
+					if (noteNumber < 0) {
+						noteMark = ++noteCount;
+						appendText(String(noteMark), state);
+					} else {
+						if (noteNumber === 0) noteNumber = ++noteCount;
+						appendText(String(noteNumber), state);
+					}
 					break;
 				case 'tab':
 					appendTab(state);
@@ -1545,6 +2019,7 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 						// \uN is a signed 16-bit number; some writers give the code point itself.
 						const code = p < 0 ? p + 65536 : p;
 						if (code <= 0 || code > 0x10ffff) break; // no character: a NUL, or out of range
+						if (!shown(state)) break;
 						if (code >= 0xd800 && code <= 0xdbff) {
 							// The first half of a pair: one character with the \u that follows.
 							if (pendingHighSurrogate) appendText('\ufffd', state);
@@ -1553,8 +2028,13 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 							const high = pendingHighSurrogate;
 							pendingHighSurrogate = 0;
 							appendText(high ? String.fromCharCode(high, code) : '\ufffd', state);
+						} else if (code < 0x20 || code === 0x7f) {
+							// A control character: a tab is a tab, the rest are not text.
+							if (code === 9) appendTab(state);
 						} else {
-							appendText(String.fromCodePoint(code), state);
+							// A Unicode character is itself in any font. Only Word's U+F0xx,
+							// its way of writing a byte of a symbol font, is a place in Symbol.
+							appendChars(String.fromCodePoint(code), state, code >= 0xf020 && code <= 0xf0ff);
 						}
 					}
 					break;
@@ -1575,6 +2055,8 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 					state.colorIndex = 0;
 					state.highlightIndex = 0;
 					state.fontIndex = defaultFont;
+					state.hidden = false;
+					state.deleted = false;
 					break;
 				case 'page':
 					// A page break. On screen it is a rule; the writer sends it back as \page.
@@ -1590,6 +2072,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				case 'emspace':
 				case 'enspace':
 					appendHtml('gap', '&emsp;', state);
+					break;
+				case 'qmspace':
+					appendText('\u2005', state); // a quarter of an em
 					break;
 				case 'emdash':
 					appendText('\u2014', state);
@@ -1625,29 +2110,17 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 				}
 				const skipCount = Math.min(pendingUnicodeSkip, node.value.length);
 				pendingUnicodeSkip -= skipCount;
-				appendText(node.value.slice(skipCount), state);
+				appendChars(node.value.slice(skipCount), state);
 				continue;
 			}
-			appendText(node.value, state);
+			appendChars(node.value, state);
 		}
 	}
 
-	if (pendingHighSurrogate) {
-		pendingHighSurrogate = 0;
-		pushText('\ufffd', currentState());
-	}
-	// A row the file ends in the middle of, with cells and no \row, is still a row.
-	if (currentRowCells.length > 0) {
-		tableRows.push({ cells: currentRowCells, defs: currentRowDefs.length > 0 ? currentRowDefs : lastRowDefs });
-		currentRowCells = [];
-		inTableCell = false;
-	}
-	flushTable(); // flush any trailing table rows
-	// Only flush if there's actually pending content — the final \par in most RTF
-	// files already flushed the last paragraph, so an unconditional call here
-	// would push a spurious empty paragraph that becomes a trailing <p><br></p>.
-	if (runs.length > 0) {
-		flushParagraph();
+	finishContent();
+	// Footnotes, after everything else: each begins with the number the text refers to it by.
+	for (const note of notes) {
+		for (const block of note) blocks.push(block);
 	}
 
 	// ── Building the HTML ──
@@ -1725,11 +2198,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		if (visible.some((r) => r.fmt.fontSize !== size)) return null;
 		if (size === preSize && visible.every((r) => r.fmt.mono)) return { tag: 'pre' };
 		if (size === bodySize) return null;
-		const allBold = visible.every((r) => r.fmt.bold);
-		// At the default 12 pt, size alone makes a heading, as it always has. At
-		// another screen size, ordinary 12 pt text can be a step above the body,
-		// so a heading must also be bold, as every heading the writer emits is.
-		if (bodySize !== 24 && !allBold) return null;
+		// A heading is larger than the body and bold throughout, as every heading the writer
+		// emits is. Size alone does not make one: a report set in 14 pt throughout, read on a
+		// 12 pt screen, came back as nothing but headings, and was saved all bold.
+		if (!visible.every((r) => r.fmt.bold)) return null;
 		// Compared in half-points, rounded the way the writer rounds them, so
 		// a heading written at any body size is read back as the same level.
 		for (const tag of ['h1', 'h2', 'h3'] as const) {
@@ -1790,7 +2262,9 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 		if (
 			align === 'center' &&
 			block.runs.every((r) => r.type === 'text' && !r.fmt.bold && !r.fmt.italic && !r.fmt.underline && !r.fmt.strike && !r.fmt.link) &&
-			block.runs.map((r) => (r.type === 'text' ? r.text : '')).join('') === RULE_DASHES
+			// (Spaces around the dashes do not show: a space written between two blocks lands in
+			// front of them, and the rule was then a line of dashes until the next save.)
+			trimSpaces(block.runs.map((r) => (r.type === 'text' ? r.text : '')).join('')) === RULE_DASHES
 		) {
 			rendered.push('<hr>');
 			continue;
@@ -1849,7 +2323,10 @@ export function rtfToHtml(rtfString: string, options: RtfReadOptions = {}): stri
 
 /** Captions are written as italic text; <figcaption> supplies its own styling. */
 function stripWrappingEm(html: string): string {
-	return html.replace(/^<em>([\s\S]*)<\/em>$/, '$1');
+	// Only when the italics are one piece: "<em>a</em> b <em>c</em>" starts and ends the same way.
+	if (!html.startsWith('<em>') || !html.endsWith('</em>')) return html;
+	const inner = html.slice(4, -5);
+	return inner.includes('</em>') ? html : inner;
 }
 
 export function readRtfFile(file: File, options: RtfReadOptions = {}): Promise<string> {
