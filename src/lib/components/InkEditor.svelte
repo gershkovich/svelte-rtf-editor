@@ -1258,7 +1258,18 @@
 
 		insertingImages = true;
 		try {
-			const { src, embedded } = await urlToImageSrc(url, imageLimits());
+			const { src, embedded, tooLarge, unreadable } = await urlToImageSrc(url, imageLimits());
+			// Picture data over the size limit that could not be reduced is not inserted:
+			// once in the document it would be written to the RTF at its full size.
+			if (tooLarge) {
+				showError(TOO_LARGE_MESSAGE);
+				return;
+			}
+			// Nor is picture data the browser cannot open: it would show as a broken picture.
+			if (unreadable) {
+				showError(UNREADABLE_MESSAGE);
+				return;
+			}
 			restoreSelection();
 			editorEl?.focus();
 			finishInsert(insertFigure(src, alt || caption, caption));
@@ -1270,6 +1281,13 @@
 			insertingImages = false;
 		}
 	}
+
+	/** Said when picture data given by address or pasted is over the size limit and cannot be reduced. */
+	const TOO_LARGE_MESSAGE = 'That picture is over the size limit and could not be made smaller, so it was not inserted';
+
+	/** Said when picture data given by address is in a format the browser cannot show, or is damaged. */
+	const UNREADABLE_MESSAGE =
+		'That picture could not be opened (the browser cannot show its format, or it is damaged), so it was not inserted';
 
 	/** Caps applied to a picture as it is inserted. */
 	function imageLimits(): { maxEdge: number; maxBytes: number } {
@@ -1421,9 +1439,14 @@
 		finishInsert(inserted);
 	}
 
+	let errorTimer: ReturnType<typeof setTimeout> | undefined;
+
 	function showError(message: string): void {
 		importError = message;
-		setTimeout(() => (importError = ''), 4000);
+		// Up for long enough to be read: four seconds, and longer for a message that says more
+		// than one thing. An earlier message's timer must not take a later message down early.
+		clearTimeout(errorTimer);
+		errorTimer = setTimeout(() => (importError = ''), Math.max(4000, message.length * 50));
 	}
 
 	// ── Image selection / editing ──
@@ -1779,49 +1802,276 @@
 		// JPEG data held in the document reaches the RTF, so each one goes through the same step as
 		// the image dialog: fetched, converted and scaled as needed.
 		const pasted = Array.from(editorEl.querySelectorAll('img')).filter((img) => !before.has(img));
-		if (pasted.length > 0) void embedPastedImages(pasted);
+		if (pasted.length === 0) return;
+		// A browser pasting a block into an empty line puts the block in the line's place. If the
+		// pictures of the paste are then taken out, that line is put back (removePastedImages).
+		const replaced = Array.from(before).find(
+			(el) => !el.isConnected && el.parentNode === null && el.matches('p, div') && showsNothing(el)
+		);
+		void embedPastedImages(pasted, before, replaced ?? null);
 	}
 
 	/**
 	 * Fetch each pasted picture and hold its data in the document. One that cannot be fetched
 	 * (the site forbids it, or there is no network) still shows, but leaves in the RTF as an
 	 * "[Image: …]" placeholder: the editor says so now, rather than letting it be found downstream.
+	 * `before` is what was in the document before the paste, and `replaced` an empty line of it
+	 * whose place the paste took.
 	 */
-	async function embedPastedImages(images: HTMLImageElement[]): Promise<void> {
+	async function embedPastedImages(images: HTMLImageElement[], before: Set<Element>, replaced: Element | null): Promise<void> {
 		let failed = 0;
 		let changed = false;
+		// Pictures that must not stay: pasted picture data over the size limit that could not be
+		// reduced, which left in the document would be written to the RTF at its full size, and
+		// picture data the browser cannot open, which would show as a broken picture.
+		const leftOut = new Map<HTMLImageElement, 'tooLarge' | 'unreadable'>();
+		const embed = async (img: HTMLImageElement): Promise<void> => {
+			const url = img.getAttribute('src') || '';
+			if (!isSafeImageUrl(url)) {
+				failed++;
+				return;
+			}
+			const { src, embedded, tooLarge, unreadable } = await urlToImageSrc(url, imageLimits());
+			// It may have been deleted or replaced while it was fetched.
+			if (!img.isConnected || img.getAttribute('src') !== url) return;
+			if (tooLarge || unreadable) {
+				leftOut.set(img, tooLarge ? 'tooLarge' : 'unreadable');
+			} else if (!embedded) {
+				failed++;
+			} else if (src !== url) {
+				img.setAttribute('src', src);
+				changed = true;
+			}
+		};
+		/** What to say of the pictures left out so far; they are taken out as this is asked. */
+		const takeOut = (): string[] => {
+			const gone = images.filter((img) => leftOut.has(img) && img.isConnected);
+			if (gone.length > 0) {
+				removePastedImages(gone, before, replaced);
+				updateCounts();
+				fireChange();
+				if (autosave) scheduleAutoSave();
+			}
+			const count = (kind: 'tooLarge' | 'unreadable') => Array.from(leftOut.values()).filter((k) => k === kind).length;
+			const tooLarge = count('tooLarge');
+			const unreadable = count('unreadable');
+			const said: string[] = [];
+			if (tooLarge > 0) {
+				said.push(
+					tooLarge === 1
+						? 'A pasted picture was over the size limit and could not be made smaller, so it was left out'
+						: `${tooLarge} pasted pictures were over the size limit and could not be made smaller, so they were left out`
+				);
+			}
+			if (unreadable > 0) {
+				said.push(
+					unreadable === 1
+						? 'A pasted picture could not be opened (the browser cannot show its format, or it is damaged), so it was left out'
+						: `${unreadable} pasted pictures could not be opened (the browser cannot show their format, or they are damaged), so they were left out`
+				);
+			}
+			return said;
+		};
+
 		// All at once, each with its own timeout, so one slow site does not hold up the rest.
-		await Promise.all(
-			images.map(async (img) => {
-				const url = img.getAttribute('src') || '';
-				if (!isSafeImageUrl(url)) {
-					failed++;
-					return;
-				}
-				const { src, embedded } = await urlToImageSrc(url, imageLimits());
-				// It may have been deleted or replaced while it was fetched.
-				if (!img.isConnected || img.getAttribute('src') !== url) return;
-				if (!embedded) {
-					failed++;
-				} else if (src !== url) {
-					img.setAttribute('src', src);
-					changed = true;
-				}
-			})
-		);
+		const isData = (img: HTMLImageElement) => /^\s*data:/i.test(img.getAttribute('src') || '');
+		const fetched = images.filter((img) => !isData(img)).map(embed);
+		// Picture data needs no network. Once all of it is settled, what has to go is taken out
+		// in one pass in the order of the document, without waiting for a slow site: in the
+		// order each happened to finish, what is left of a figure would depend on chance.
+		await Promise.all(images.filter(isData).map(embed));
+		const saidFirst = takeOut();
+		if (saidFirst.length > 0) showError(saidFirst.join('. '));
+
+		await Promise.all(fetched);
+		// One paste can do all of it, and each is something the user has to know: a picture that
+		// is gone, and a picture that is there but will leave as a placeholder. So what was said
+		// of the first is said again with the second, not replaced by it.
+		const said = takeOut();
 		if (failed > 0) {
-			showError(
+			said.push(
 				failed === 1
 					? 'A pasted image could not be embedded — it will export as a placeholder'
 					: `${failed} pasted images could not be embedded — they will export as placeholders`
 			);
 		}
+		if (failed > 0 || said.length > saidFirst.length) showError(said.join('. '));
 		if (changed) {
 			updateCounts();
 			fireChange();
 			if (autosave) scheduleAutoSave();
 		}
 	}
+
+	/** Things that show without holding any text; an element with one of these is not empty. */
+	const SHOWN_WITHOUT_TEXT = 'img, table, hr, svg, video, audio, canvas, iframe, object, embed, input, select, textarea, button, math';
+
+	/** Whether an element shows nothing. A figure's caption does not count: it describes the picture. */
+	function showsNothing(el: Element): boolean {
+		let check = el;
+		if (el.tagName === 'FIGURE') {
+			check = el.cloneNode(true) as Element;
+			for (const caption of Array.from(check.querySelectorAll('figcaption'))) caption.remove();
+		}
+		return !check.querySelector(SHOWN_WITHOUT_TEXT) && (check.textContent || '').trim().length === 0;
+	}
+
+	/**
+	 * The next thing shown after a node (`forward`) or before it, in or beyond what it ends or
+	 * starts: an element or some text. Not a line break, a comment or white space.
+	 */
+	function shownBeside(node: Node, root: Element, forward: boolean): Node | null {
+		for (let at: Node | null = node; at && at !== root; at = at.parentNode) {
+			for (let near = forward ? at.nextSibling : at.previousSibling; near; near = forward ? near.nextSibling : near.previousSibling) {
+				if (near.nodeType === Node.ELEMENT_NODE ? (near as Element).tagName !== 'BR' : near.nodeType === Node.TEXT_NODE && (near.textContent || '').trim()) {
+					return near;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Whether this is a figure holding a caption and nothing else, or a wrapper around such a
+	 * figure and nothing else (a <div>, a <section>, a link).
+	 */
+	function isCaptionAlone(el: Element): boolean {
+		const figure = el.tagName === 'FIGURE' ? el : el.querySelector('figure');
+		if (!figure || !figure.querySelector('figcaption') || !showsNothing(figure)) return false;
+		if (figure === el) return true;
+		const rest = el.cloneNode(true) as Element;
+		rest.querySelector('figure')?.remove();
+		return showsNothing(rest);
+	}
+
+	/** Lines of text: an empty one that was in the document before the paste stays a line. */
+	const LINES = 'p, div, li, h1, h2, h3, h4, h5, h6, blockquote, pre';
+
+	/**
+	 * Take pasted pictures out of the document, each with everything that was only there for it:
+	 * its figure and caption, a link around it, a paragraph or list item that held nothing else.
+	 * Left behind, the caption of a picture that is not there and an empty paragraph went into the
+	 * RTF. Text that shared a paragraph with a picture stays, and so does whatever was in the
+	 * document before the paste; a table cell stays, since the table needs it. `replaced` is an
+	 * empty line whose place the paste took: if nothing of the paste is left, it is put back.
+	 */
+	function removePastedImages(images: HTMLImageElement[], before: Set<Element>, replaced: Element | null): void {
+		if (!editorEl) return;
+		const root = editorEl;
+		const selection = window.getSelection();
+		const caret = selection?.anchorNode && root.contains(selection.anchorNode) ? selection.anchorNode : null;
+		// Holds the caret's place once what the caret was in has gone. (Written this way so the
+		// type checker does not take it to be null for good: it is set inside `take`.)
+		let place = null as Comment | null;
+		// Holds the place of the first thing taken out, for the line the paste took the place of.
+		let first = null as Comment | null;
+		// What is put in here, as opposed to what the paste brought.
+		const made = new Set<Element>();
+		const take = (node: Element): void => {
+			if (place ? node.contains(place) : !!caret && node.contains(caret)) {
+				place ??= document.createComment('');
+				node.after(place);
+			}
+			if (first && node.contains(first)) node.after(first);
+			node.remove();
+		};
+		/** Take a node out, and after it each thing around it that came with the paste and now shows nothing. */
+		const takeWithEmptied = (start: Element): void => {
+			let node = start;
+			let parent: Element | null;
+			let next: Node | null;
+			for (;;) {
+				parent = node.parentElement;
+				next = node.nextSibling;
+				take(node);
+				if (!parent || parent === root || before.has(parent) || parent.matches('td, th')) break;
+				if (!showsNothing(parent)) break;
+				node = parent;
+			}
+			if (!parent) return;
+			if (!first) {
+				first = document.createComment('');
+				parent.insertBefore(first, next);
+			}
+			// A line that was in the document before the paste and is empty again stays a line.
+			if (parent !== root && before.has(parent) && parent.matches(LINES) && showsNothing(parent) && !parent.querySelector('br')) {
+				const lineBreak = document.createElement('br');
+				made.add(lineBreak);
+				parent.appendChild(lineBreak);
+			}
+		};
+		const pastedPicture = (node: Node | null) =>
+			node instanceof Element && node.isConnected && !before.has(node) && (node.tagName === 'IMG' || node.querySelector('img') !== null);
+
+		for (const img of images) {
+			if (!img.isConnected) continue;
+			// The overlay and the Backspace key act on the selected picture: not on one that is gone.
+			if (selectedImage === img) selectedImage = null;
+			const after = shownBeside(img, root, true);
+			const prior = shownBeside(img, root, false);
+			takeWithEmptied(img);
+
+			// Chromium, pasting a figure at the end of a line of text, moves its pictures into that
+			// line and leaves the figure after them with the caption alone (inside the wrapper the
+			// figure came in, if it had one). A pasted caption alone, straight after the picture, is
+			// that picture's, and goes with it, unless another picture pasted with it is still
+			// there before it: the caption is then that one's too.
+			if (after instanceof Element && after.isConnected && !before.has(after) && isCaptionAlone(after) && !pastedPicture(prior)) {
+				takeWithEmptied(after);
+			}
+		}
+
+		// The paste took the place of an empty line, and nothing of the paste that shows is
+		// left: the line is put back where the paste stood, as if nothing had been pasted.
+		let line: HTMLElement | null = null;
+		const holder = (first as Comment | null)?.parentElement ?? null;
+		if (replaced && !replaced.isConnected && holder && !holder.matches('ul, ol, table, thead, tbody, tfoot, tr')) {
+			const left = Array.from(root.querySelectorAll('*')).some((el) => !before.has(el) && !made.has(el) && !showsNothing(el));
+			if (!left) {
+				line = replaced as HTMLElement;
+				// (Chromium takes the line's own line break out before it takes the line out.)
+				if (!line.querySelector('br')) line.appendChild(document.createElement('br'));
+				first!.before(line);
+			}
+		}
+		first?.remove();
+
+		// The caret goes back into the line that was put back: it was there when the paste was made.
+		if (line && caret) {
+			placeCaret(line);
+			place?.remove();
+			return;
+		}
+
+		// The caret went with what was removed: put it where typing carries on from.
+		if (place?.isConnected) {
+			const textBlock = (el: Element | null) => (el && !el.matches(`figure, ${SHOWN_WITHOUT_TEXT}`) ? (el as HTMLElement) : null);
+			const previous = textBlock(place.previousElementSibling);
+			const next = textBlock(place.nextElementSibling);
+			if (place.parentElement && place.parentElement !== root) {
+				// Inside something that stays (a line of text, a table cell): where it was.
+				const range = document.createRange();
+				range.setStartBefore(place);
+				range.collapse(true);
+				selection?.removeAllRanges();
+				selection?.addRange(range);
+				savedSelection = range.cloneRange();
+			} else if (previous) {
+				placeCaret(previous, false);
+			} else if (next) {
+				placeCaret(next, true);
+			} else {
+				// Nothing to type in next to it (the document is empty, or a table or another
+				// picture is all there is): leave one empty line.
+				const empty = document.createElement('p');
+				empty.appendChild(document.createElement('br'));
+				place.before(empty);
+				placeCaret(empty);
+			}
+		}
+		place?.remove();
+	}
+
 
 	// ── Lifecycle ──
 	onMount(() => {
