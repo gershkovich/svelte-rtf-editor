@@ -245,6 +245,204 @@ test.describe('what a review of these changes found', () => {
 	});
 });
 
+test.describe('what a second review found', () => {
+	// What only a real browser shows of the fixes in sanitize.ts: where text is drawn, what a
+	// paste brings, an id as a name on `window`. Invented text.
+	const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+	const rtfBody = (page: Page) => page.evaluate(() => window.ed.getRTF()).then(body);
+	async function paste(page: Page, pasted: string, typedFirst = ''): Promise<void> {
+		await open(page);
+		await page.evaluate(async (pasted) => {
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([pasted], { type: 'text/html' }) })]);
+		}, pasted);
+		await page.click(content);
+		if (typedFirst) await page.keyboard.type(typedFirst);
+		await page.keyboard.press('ControlOrMeta+v');
+	}
+
+	test('words hidden in a button or a text box are not shown and not written', async ({ page }) => {
+		await open(page);
+		await page.evaluate(() =>
+			window.ed.setHTML(
+				'<p>Press <button>Sign<span style="display:none">SECRET</span></button></p><p>a<input hidden value="HIDDENINPUT">b</p>' +
+					'<p>c<textarea style="display:none">HIDDENTEXT</textarea>d</p><p>e<math style="display:none"><mn>42</mn></math>f</p>'
+			)
+		);
+		expect(await html(page)).toBe('<p>Press Sign</p><p>ab</p><p>cd</p><p>ef</p>');
+		expect(await rtfBody(page)).toBe('\\pard Press Sign\\par \\pard ab\\par \\pard cd\\par \\pard ef\\par }');
+	});
+
+	test('a list read from RTF is written back at the indent it had', async ({ page }) => {
+		await open(page);
+		const rtf = String.raw`{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}}\f0\fs24 \pard\li720\fi-360\bullet\tab a\par \pard\li1080\fi-360\bullet\tab b\par \pard\li360\fi-360\bullet\tab c\par }`;
+		const read = await page.evaluate((rtf) => {
+			const parsed = window.lib.rtfToHtml(rtf);
+			window.ed.setHTML(parsed);
+			return parsed;
+		}, rtf);
+		expect(await html(page)).toBe(read);
+		expect(await rtfBody(page)).toBe('\\pard\\li720\\fi-360\\bullet\\tab a\\par \\pard\\li1080\\fi-360\\bullet\\tab b\\par \\pard\\li360\\fi-360\\bullet\\tab c\\par }');
+	});
+
+	test('a table border written in one word stays as it was written', async ({ page }) => {
+		await open(page);
+		const kept = await page.evaluate(() =>
+			[
+				'<table><tbody><tr><td style="border: 1px solid black">x</td></tr></tbody></table>',
+				'<blockquote style="margin: 0 0 0 40px; border: none; padding: 0px;">q</blockquote>',
+				'<p style="border-bottom: 2px dotted red; border-top: none">x</p>'
+			].map((html) => [html, window.lib.sanitizeHtml(html)])
+		);
+		for (const [given, got] of kept) expect(got).toBe(given);
+		// A border picture is drawn outside its element, and a document has none.
+		const picture = await page.evaluate(() => window.lib.sanitizeHtml('<p style="border: 1px solid; border-image: linear-gradient(red, blue) 1 / 1 / 5000px">x</p>'));
+		expect(picture).not.toMatch(/gradient|5000|border-image/);
+		expect(picture).toMatch(/border-style: solid/);
+	});
+
+	test('a document shown again keeps its ids, and an id still cannot stand in for a name of the page', async ({ page }) => {
+		await open(page, { content: '<p id="dx-1">first</p>' });
+		expect(await page.evaluate(() => 'dx-1' in window)).toBe(true);
+		await page.evaluate(() => window.ed.setHTML('<p id="dx-1">again</p><p id="dx-2">new</p>'));
+		expect(await html(page)).toBe('<p id="dx-1">again</p><p id="dx-2">new</p>');
+		await page.evaluate(() => window.ed.setHTML(window.ed.getHTML()));
+		expect(await html(page)).toBe('<p id="dx-1">again</p><p id="dx-2">new</p>');
+		await page.evaluate(() => window.ed.setHTML('<a id="appConfig" href="https://evil.test/api">c</a><p id="location">x</p><p id="dx-3">y</p>'));
+		expect(await html(page)).toBe('<a href="https://evil.test/api">c</a><p>x</p><p id="dx-3">y</p>');
+		expect(await page.evaluate(() => String((window as unknown as Record<string, unknown>).appConfig))).toBe('undefined');
+	});
+
+	test('no first line is drawn outside the editing area, and no text has no size', async ({ page }) => {
+		await open(page);
+		for (const style of ['text-indent:-100%', 'text-indent:-2200px', 'margin-left: 20px; text-indent: -600px']) {
+			await page.evaluate((style) => window.ed.setHTML(`<p style="${style}">FIRST LINE</p><p>second</p>`), style);
+			const [text, area] = await page.evaluate(() => {
+				const editing = document.querySelector('.ink-content')!;
+				const range = document.createRange();
+				range.selectNodeContents(editing.querySelector('p')!);
+				return [range.getBoundingClientRect().left, editing.getBoundingClientRect().left];
+			});
+			expect(text, style).toBeGreaterThanOrEqual(area);
+			expect(await rtfBody(page), style).toContain('FIRST LINE\\par');
+			expect(await rtfBody(page), style).not.toContain('\\fi-');
+		}
+		// A hanging indent is drawn inside, and written.
+		await page.evaluate(() => window.ed.setHTML('<p style="margin-left:48px;text-indent:-24px">hang</p>'));
+		expect(await rtfBody(page)).toBe('\\pard\\li720\\fi-360 hang\\par }');
+		await page.evaluate(() => window.ed.setHTML('<p><span style="font-size:0">INVISIBLE</span>seen</p>'));
+		const box = await page.locator(`${content} span`).boundingBox();
+		expect(box!.width).toBeGreaterThan(20);
+		expect(box!.height).toBeGreaterThan(8);
+	});
+
+	test('a pasted span that only Word hid is not pasted as words', async ({ page }) => {
+		await paste(page, '<p>one <span style="mso-hide:all">HID ONE</span> two</p><p style="mso-hide:all">whole para</p><p>three</p>');
+		await expect(page.locator(content)).toContainText('three');
+		expect(await html(page)).toBe('<p>one two</p><p>three</p>');
+		// As Word writes a copy: styles in the head, the copied part marked.
+		await paste(
+			page,
+			'<html><head><style>p.MsoNormal{margin:0in;font-size:11pt}</style></head><body><!--StartFragment--><p class=MsoNormal>Shown <span style=\'mso-hide:all\'>hidden words</span>text</p><!--EndFragment--></body></html>'
+		);
+		await expect(page.locator(content)).toContainText('text');
+		expect(await page.locator(content).textContent()).toBe('Shown text');
+	});
+
+	test('after such a paste the caret is where the paste ended', async ({ page }) => {
+		await paste(page, '<span style="mso-hide:all">all hidden</span>', 'x');
+		await page.waitForTimeout(100);
+		expect(await html(page)).toBe('<p>x</p>');
+		await page.keyboard.type('y');
+		expect(await html(page)).toBe('<p>xy</p>');
+		// And inside a line, between what was there.
+		await paste(page, 'in<span style="mso-hide:all">HIDDEN</span>side', 'ab');
+		await expect(page.locator(content)).toContainText('side');
+		await page.keyboard.type('!');
+		expect(await html(page)).toBe('<p>abinside!</p>');
+		// A paste that ends in a hidden paragraph, or is nothing else, leaves an empty line
+		// with the caret in it.
+		await paste(page, '<p>one</p><p style="mso-hide:all">whole para</p>');
+		await expect(page.locator(content)).toContainText('one');
+		await expect.poll(() => html(page)).toBe('<p>one</p><p><br></p>');
+		await page.keyboard.type('two');
+		expect(await html(page)).toBe('<p>one</p><p>two</p>');
+		await paste(page, '<p style="mso-hide:all">all hidden</p>');
+		await expect.poll(() => html(page)).toBe('<p><br></p>');
+		await page.keyboard.type('typed');
+		expect(await html(page)).toBe('<p>typed</p>');
+	});
+
+	test('a text box pasted last keeps its words', async ({ page }) => {
+		await paste(page, '<p>note <textarea>margins clear</textarea></p>');
+		await expect(page.locator(content)).toContainText('note');
+		expect(await html(page)).toBe('<p>note margins clear</p>');
+	});
+
+	test('a link with padding does not cover the lines above it', async ({ page }) => {
+		await open(page);
+		await page.evaluate(() => window.ed.setHTML('<p>Report body, first paragraph</p><p><a href="https://example.com/" style="padding:2200px">link</a></p><p>last</p>'));
+		const first = page.locator(`${content} p`).first();
+		const box = (await first.boundingBox())!;
+		const hit = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)!.tagName, [box.x + 40, box.y + box.height / 2]);
+		expect(hit).toBe('P');
+		await page.evaluate(() => window.ed.setHTML('<table width="100000"><tbody><tr><td>x</td></tr></tbody></table>'));
+		expect((await page.locator(`${content} table`).boundingBox())!.width).toBeLessThan(2300);
+	});
+
+	test('the frame around a picture is not drawn outside the editing area', async ({ page }) => {
+		await open(page);
+		await page.evaluate((png) => {
+			// Room to the left of the editor, where the frame used to be drawn.
+			document.body.style.paddingLeft = '300px';
+			window.ed.setHTML(`<table style="width:2000px"><tbody><tr><td><img src="${png}" style="width:200px;height:120px"></td><td>wide</td></tr></tbody></table>`);
+		}, PNG);
+		await page.click(`${content} img`);
+		const frame = page.locator('.ink-img-frame');
+		await expect(frame).toBeVisible();
+		const area = (await page.locator(content).boundingBox())!;
+		expect((await frame.boundingBox())!.width).toBeCloseTo(200, 0);
+		// Part of the picture scrolled out: the frame is over the part still in view.
+		const pictureLeft = (await page.locator(`${content} img`).boundingBox())!.x - area.x;
+		await page.evaluate((by) => (document.querySelector('.ink-content')!.scrollLeft = by), pictureLeft + 80);
+		await expect.poll(async () => Math.round((await frame.boundingBox())!.width)).toBe(120);
+		expect((await frame.boundingBox())!.x).toBeGreaterThanOrEqual(area.x - 0.5);
+		// All of it scrolled out: no frame, and no tools.
+		await page.evaluate((by) => (document.querySelector('.ink-content')!.scrollLeft = by), pictureLeft + 400);
+		await expect(frame).toHaveCount(0);
+		// Scrolled back, it is around the whole picture again.
+		await page.evaluate(() => (document.querySelector('.ink-content')!.scrollLeft = 0));
+		await expect.poll(async () => Math.round((await frame.boundingBox())?.width ?? 0)).toBe(200);
+	});
+
+	test('style text the browser did not read is not passed on behind a short form and one of its parts', async ({ page }) => {
+		await open(page);
+		const out = await page.evaluate(() =>
+			[
+				'<p style="margin: 0; margin-left: expr/**/ession(alert(1))">x</p>',
+				'<p style="border: expr/**/ession(alert(1)); border-top-color: red">x</p>',
+				'<p style="margin: 0 0 0 -9999px junk; margin-top: 1px">x</p>'
+			].map((html) => window.lib.sanitizeHtml(html))
+		);
+		for (const html of out) expect(html).not.toMatch(/expr|ession|junk|9999/);
+		expect(out[1]).toContain('border-top-color: red');
+		expect(out[2]).toContain('margin-top: 1px');
+		// Both read: left as written.
+		const both = '<p style="margin: 0; margin-left: 4px">x</p>';
+		expect(await page.evaluate((html) => window.lib.sanitizeHtml(html), both)).toBe(both);
+	});
+
+	test('a formula written twice is read once, and two boxes side by side are two words', async ({ page }) => {
+		await open(page);
+		await page.evaluate(() =>
+			window.ed.setHTML(
+				'<p>Ki-67 <span class="katex"><span class="katex-mathml"><math><semantics><mrow><mn>30</mn><mi mathvariant="normal">%</mi></mrow><annotation encoding="application/x-tex">30\\%</annotation></semantics></math></span>' +
+					'<span class="katex-html" aria-hidden="true"><span class="mord">30</span><span class="mord">%</span></span></span> positive</p><p>Size <input value="1"><input value="5"> cm</p>'
+			)
+		);
+		expect(await rtfBody(page)).toBe('\\pard Ki-67 30% positive\\par \\pard Size 1 5 cm\\par }');
+	});
+});
+
 test.describe('the writers', () => {
 	test('numbers stay in range in a real browser', async ({ page }) => {
 		await open(page);

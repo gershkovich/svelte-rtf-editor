@@ -16,6 +16,8 @@
 		target?: HTMLImageElement | null;
 		/** Positioned element the overlay coordinates are relative to. */
 		bounds?: HTMLElement | null;
+		/** The editing area. It scrolls sideways, and the frame is not drawn outside it. */
+		within?: HTMLElement | null;
 		/** Widest the image may become — the editor's content box width in px. */
 		maxWidth?: () => number;
 		onchange?: () => void;
@@ -23,7 +25,7 @@
 		oncaption?: (img: HTMLImageElement) => void;
 	}
 
-	let { target = null, bounds = null, maxWidth, onchange, onremove, oncaption }: Props = $props();
+	let { target = null, bounds = null, within = null, maxWidth, onchange, onremove, oncaption }: Props = $props();
 
 	const MIN_WIDTH = 40;
 	const CORNERS = ['nw', 'ne', 'sw', 'se'] as const;
@@ -41,8 +43,14 @@
 		}
 		const t = target.getBoundingClientRect();
 		const b = bounds.getBoundingClientRect();
-		frame = { left: t.left - b.left, top: t.top - b.top, width: t.width, height: t.height };
-		visible = t.width > 0 && t.height > 0;
+		// A picture in a wide table can be scrolled part or all of the way out of the editing
+		// area. The frame is drawn over the part of it still in view, and not at all when none
+		// is: it used to follow the picture out over the page beside the editor, tools and all.
+		const area = within?.getBoundingClientRect();
+		const left = area ? Math.max(t.left, area.left) : t.left;
+		const right = area ? Math.min(t.right, area.right) : t.right;
+		frame = { left: left - b.left, top: t.top - b.top, width: Math.max(0, right - left), height: t.height };
+		visible = t.width > 0 && t.height > 0 && right > left;
 	}
 
 	$effect(() => {
