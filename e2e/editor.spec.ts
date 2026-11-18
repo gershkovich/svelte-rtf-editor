@@ -134,6 +134,28 @@ test.describe('HTML from outside', () => {
 		expect(await html(page)).toContain('<p>Body</p>');
 	});
 
+	test('marks the application named stay on what it sets and on a paste, and nothing else does', async ({ page }) => {
+		const MARKED = '<p data-section="A" data-other="x" class="summary wide" onclick="window.__ran = 1">Marked</p>';
+		await open(page, { content: MARKED, keepAttributes: 'data-section,onclick', keepClasses: 'summary' });
+		expect(await html(page)).toBe('<p data-section="A" class="summary">Marked</p>');
+		await page.evaluate(async (pasted) => {
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([pasted.replace('Marked', 'Pasted')], { type: 'text/html' }) })]);
+		}, MARKED);
+		await page.click(content);
+		await page.keyboard.press('ControlOrMeta+a');
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(`${content} [data-section="A"]`)).toHaveText('Pasted');
+		expect(await html(page)).not.toMatch(/data-other|onclick|wide/);
+		await page.locator(`${content} [data-section="A"]`).click();
+		expect(await page.evaluate(() => window.__ran)).toBeUndefined();
+		// And with nothing named, the same paste keeps neither.
+		await open(page);
+		await page.click(content);
+		await page.keyboard.press('ControlOrMeta+v');
+		await expect(page.locator(content)).toContainText('Pasted');
+		expect(await html(page)).not.toMatch(/data-section|class=/);
+	});
+
 	test('a paste cannot cover the page, and brings no form, frame or script', async ({ page }) => {
 		await open(page);
 		await page.evaluate(async () => {

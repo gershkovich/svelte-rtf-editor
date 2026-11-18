@@ -37,6 +37,15 @@
 	 *                   selected text. The body size is always among them. An empty
 	 *                   list takes the size list off the toolbar.
 	 *                   Default: 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36.
+	 *   keepAttributes — `data-` attributes the application's documents carry, which
+	 *                   the editor leaves on their elements: a mark on a paragraph that
+	 *                   the application reads back (`data-section="2"`). Every other
+	 *                   attribute the editor does not know is taken off HTML as it comes
+	 *                   in, set or pasted. Names that do not start with `data-` are not
+	 *                   kept. Default: none.
+	 *   keepClasses   — Class names of the application's own that stay in an element's
+	 *                   class list the same way (`<pre class="summary">`). Every other
+	 *                   class is taken off. Default: none.
 	 *
 	 * Events (callback props):
 	 *   onchange      — Fires on content change with
@@ -62,7 +71,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
-	import { pasteNotes, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
+	import { keptMarks, pasteNotes, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -120,6 +129,10 @@
 		fontFamily?: string;
 		fontSize?: number;
 		fontSizes?: number[];
+		/** `data-` attributes of the application's own, kept on HTML that is set or pasted. */
+		keepAttributes?: string[];
+		/** Class names of the application's own, kept the same way. */
+		keepClasses?: string[];
 		onchange?: (payload: ChangePayload) => void;
 		onsave?: (payload: { html: string }) => void;
 		onimport?: (payload: { html: string }) => void;
@@ -134,6 +147,7 @@
 
 	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
 	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
+	const NO_KEPT_ATTRIBUTES: string[] = [];
 
 	// ── Props ──
 	let {
@@ -153,10 +167,14 @@
 		fontFamily = DEFAULT_FONT_FAMILY,
 		fontSize = DEFAULT_FONT_SIZE,
 		fontSizes = DEFAULT_FONT_SIZES,
+		keepAttributes = NO_KEPT_ATTRIBUTES,
+		keepClasses = NO_KEPT_ATTRIBUTES,
 		onchange,
 		onsave,
 		onimport
 	}: Props = $props();
+
+	const keptNames = $derived(keptMarks({ keepAttributes, keepClasses }));
 
 	// The same font and size go to the screen and to the RTF, so the editor
 	// shows what the receiving system will show.
@@ -236,7 +254,7 @@
 			const owner = document.getElementById(id);
 			return owner !== null && owner.closest('.ink-content') === null;
 		};
-		editorEl.replaceChildren(...sanitizedNodes(html, document, idTaken));
+		editorEl.replaceChildren(...sanitizedNodes(html, document, idTaken, keptNames));
 		for (const p of Array.from(editorEl.querySelectorAll('p'))) {
 			if (p.childNodes.length === 0) p.appendChild(document.createElement('br'));
 		}
@@ -1914,7 +1932,7 @@
 		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the
 		// scripts out of a paste itself, but leaves a form, an <iframe>, or a block with
 		// position: fixed that covers the page.
-		sanitizeTree(editorEl, (el) => !before.has(el));
+		sanitizeTree(editorEl, (el) => !before.has(el), undefined, keptNames);
 		for (const el of Array.from(editorEl.querySelectorAll<HTMLElement>('*'))) {
 			if (before.has(el)) continue;
 			el.removeAttribute('id');

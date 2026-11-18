@@ -9,7 +9,7 @@
 
 	let ed: ReturnType<typeof InkEditor> | null = $state(null);
 	let rtf = $state('');
-	let params = $state<{ autosave: boolean; content?: string; key?: string; onchange: boolean } | null>(null);
+	let params = $state<{ autosave: boolean; content?: string; key?: string; onchange: boolean; keepAttributes: string[]; keepClasses: string[] } | null>(null);
 
 	onMount(() => {
 		const q = new URLSearchParams(location.search);
@@ -17,7 +17,9 @@
 			autosave: q.get('autosave') === '1',
 			content: q.get('content') ?? undefined,
 			key: q.get('key') ?? undefined,
-			onchange: q.get('onchange') === '1'
+			onchange: q.get('onchange') === '1',
+			keepAttributes: (q.get('keepAttributes') ?? '').split(',').filter(Boolean),
+			keepClasses: (q.get('keepClasses') ?? '').split(',').filter(Boolean)
 		};
 		const w = window as unknown as Harness;
 		w.lib = lib;
@@ -36,6 +38,8 @@
 		autosave={params.autosave}
 		content={params.content}
 		storageKey={params.key}
+		keepAttributes={params.keepAttributes}
+		keepClasses={params.keepClasses}
 		onchange={params.onchange ? () => { (window as unknown as Harness).changes!++; } : undefined}
 	/>
 	<div id="viewer"><RtfViewer content={rtf} /></div>

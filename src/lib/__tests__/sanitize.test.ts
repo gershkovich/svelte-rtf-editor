@@ -325,6 +325,88 @@ describe('InkEditor: every way in goes through sanitizeHtml', () => {
 	});
 });
 
+describe('keepAttributes: an application\'s own marks stay on its documents', () => {
+	let host: HTMLElement | null = null;
+	let component: Record<string, unknown> | null = null;
+	const MARKED =
+		'<p data-section="A" data-case="C-1" data-other="x" onclick="window.__evil = 1" class="heading"><b>A.</b> Invented heading</p><p>Invented text.</p>';
+
+	function open(props: Record<string, unknown>): HTMLElement {
+		host = document.createElement('div');
+		document.body.appendChild(host);
+		component = mount(InkEditor, { target: host, props }) as Record<string, unknown>;
+		flushSync();
+		return host.querySelector('.ink-content') as HTMLElement;
+	}
+
+	afterEach(() => {
+		if (component) unmount(component);
+		host?.remove();
+		component = null;
+		host = null;
+		localStorage.clear();
+	});
+
+	it('with none named, a data- attribute is taken off as before', () => {
+		const out = sanitizeHtml(MARKED);
+		expect(out).not.toContain('data-section');
+		expect(out).not.toContain('data-case');
+		expect(open({ content: MARKED }).querySelector('[data-section]')).toBeNull();
+	});
+
+	it('the ones named stay, and only those', () => {
+		const out = sanitizeHtml(MARKED, { keepAttributes: ['data-section', 'DATA-CASE'] });
+		expect(out).toContain('data-section="A"');
+		expect(out).toContain('data-case="C-1"');
+		expect(out).not.toContain('data-other');
+		expect(out).not.toContain('onclick');
+		expect(out).not.toContain('class=');
+	});
+
+	it('a name that is not a data- attribute is not kept, whoever asks', () => {
+		const html = '<p onclick="window.__evil = 1" class="heading" contenteditable="false" data-section="A">x</p><img src="https://x.test/a.png" srcset="https://x.test/b.png 2x" onerror="window.__evil = 1">';
+		const out = sanitizeHtml(html, { keepAttributes: ['onclick', 'class', 'contenteditable', 'srcset', 'onerror', 'data-', 'data-section'] });
+		expect(out).not.toContain('onclick');
+		expect(out).not.toContain('onerror');
+		expect(out).not.toContain('class=');
+		expect(out).not.toContain('contenteditable');
+		expect(out).not.toContain('srcset');
+		expect(out).toContain('data-section="A"');
+	});
+
+	it('the content prop and setHTML keep them, and getHTML gives them back', () => {
+		const editor = open({ content: MARKED, keepAttributes: ['data-section', 'data-case'] });
+		expect(editor.querySelector('p')!.getAttribute('data-section')).toBe('A');
+		expect(editor.querySelector('p')!.getAttribute('data-case')).toBe('C-1');
+		expect(editor.querySelector('[data-other], [onclick], [class="heading"]')).toBeNull();
+		(component!.setHTML as (html: string) => void)('<p data-section="B">Second</p>');
+		flushSync();
+		expect(editor.querySelector('p')!.getAttribute('data-section')).toBe('B');
+		expect((component!.getHTML as () => string)()).toContain('data-section="B"');
+	});
+
+	it('a class named in keepClasses stays, alone', () => {
+		const html = '<pre class="summary wide">Invented summary</pre><p class="MsoNormal summary-2">x</p>';
+		expect(sanitizeHtml(html)).not.toContain('class=');
+		const out = sanitizeHtml(html, { keepClasses: ['summary', 'not a name', ''] });
+		expect(out).toContain('<pre class="summary">');
+		expect(out).not.toContain('wide');
+		expect(out).not.toContain('MsoNormal');
+		expect(out).not.toContain('summary-2');
+		const editor = open({ content: html, keepClasses: ['summary'] });
+		expect(editor.querySelector('pre')!.className).toBe('summary');
+		expect(editor.querySelector('p')!.hasAttribute('class')).toBe(false);
+	});
+
+	it('the RTF is the same with the marks as without', () => {
+		const withMarks = document.createElement('div');
+		withMarks.innerHTML = sanitizeHtml(MARKED, { keepAttributes: ['data-section', 'data-case'] });
+		const without = document.createElement('div');
+		without.innerHTML = sanitizeHtml(MARKED);
+		expect(htmlToRtf(withMarks)).toBe(htmlToRtf(without));
+	});
+});
+
 describe('InkEditor: drafts and the empty document', () => {
 	let host: HTMLElement | null = null;
 	let component: Record<string, unknown> | null = null;

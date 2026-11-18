@@ -137,6 +137,41 @@ function shownText(el: Element, tag: string): string {
 /** Attributes any element may keep. */
 const GLOBAL_ATTRIBUTES = new Set(['style', 'dir', 'lang', 'title', 'hidden', 'align', 'data-rtf-tab-stops']);
 
+/** What an application asked to have kept on its own documents. */
+export interface KeepOptions {
+	/** `data-` attributes that stay on any element. */
+	keepAttributes?: readonly string[];
+	/** Class names that stay in an element's class list. */
+	keepClasses?: readonly string[];
+}
+
+/** The same, as the sets the sanitizer reads. */
+export interface Kept {
+	attributes: ReadonlySet<string>;
+	classes: ReadonlySet<string>;
+}
+
+/**
+ * What an application asked to have kept (the editor's `keepAttributes` and `keepClasses`), as
+ * the sets the sanitizer reads. Only `data-` attributes can be asked for: they mark an element
+ * and do nothing else, where `onclick`, `src` or `style` asked for here would undo what this
+ * file is for. A class is kept by its name alone; what it looks like is the page's stylesheet,
+ * which is why none is kept unless the application names it. A name that is neither is left out.
+ */
+export function keptMarks(options: KeepOptions | undefined): Kept {
+	const attributes = new Set<string>();
+	for (const name of options?.keepAttributes ?? []) {
+		const lower = String(name).trim().toLowerCase();
+		if (/^data-[a-z0-9_.-]+$/.test(lower)) attributes.add(lower);
+	}
+	const classes = new Set<string>();
+	for (const name of options?.keepClasses ?? []) {
+		const token = String(name).trim();
+		if (/^-?[A-Za-z_][A-Za-z0-9_-]*$/.test(token)) classes.add(token);
+	}
+	return { attributes, classes };
+}
+
 /** Attributes only some elements may keep. */
 const TAG_ATTRIBUTES: Record<string, string[]> = {
 	a: ['href', 'target', 'rel'],
@@ -469,12 +504,13 @@ function namesAGlobal(id: string): boolean {
 	return true;
 }
 
-function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTaken?: (id: string) => boolean): void {
+function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTaken?: (id: string) => boolean, keep?: Kept): void {
 	const own = TAG_ATTRIBUTES[tag];
 	for (const attr of Array.from(el.attributes)) {
 		const name = attr.name.toLowerCase();
 		if (name === 'class') {
-			if (el.classList.contains(KEPT_CLASS)) el.setAttribute('class', KEPT_CLASS);
+			const stay = Array.from(el.classList).filter((token) => token === KEPT_CLASS || keep?.classes.has(token));
+			if (stay.length > 0) el.setAttribute('class', stay.join(' '));
 			else el.removeAttribute(attr.name);
 			continue;
 		}
@@ -490,7 +526,7 @@ function sanitizeAttributes(el: HTMLElement, tag: string, fonts: FontSizes, idTa
 			}
 			continue;
 		}
-		if (!GLOBAL_ATTRIBUTES.has(name) && !own?.includes(name)) el.removeAttribute(attr.name);
+		if (!GLOBAL_ATTRIBUTES.has(name) && !own?.includes(name) && !keep?.attributes.has(name)) el.removeAttribute(attr.name);
 		// width="100000" is a table a hundred thousand pixels wide.
 		else if ((name === 'width' || name === 'height') && !sizeAttributeAllowed(attr.value)) el.removeAttribute(attr.name);
 	}
@@ -526,10 +562,16 @@ function isReadAloudCopy(el: Element): boolean {
 /**
  * Make the elements under `root` safe, in place. With `only`, just the elements it accepts (the
  * ones a paste brought in) are looked at; the rest of the document is left as it is. With
- * `idTaken`, an id it says the page already uses is taken off.
+ * `idTaken`, an id it says the page already uses is taken off. With `keep` (see keptMarks),
+ * the application's own `data-` attributes and classes stay.
  * Returns whether anything was taken out or changed.
  */
-export function sanitizeTree(root: Element, only?: (el: Element) => boolean, idTaken?: (id: string) => boolean): boolean {
+export function sanitizeTree(
+	root: Element,
+	only?: (el: Element) => boolean,
+	idTaken?: (id: string) => boolean,
+	keep?: Kept
+): boolean {
 	let changed = false;
 	const fonts: FontSizes = new Map();
 	/** The words of the last element that left its words, where they are still in the document. */
@@ -566,7 +608,7 @@ export function sanitizeTree(root: Element, only?: (el: Element) => boolean, idT
 			continue;
 		}
 		const before = el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '');
-		sanitizeAttributes(el, tag, fonts, idTaken);
+		sanitizeAttributes(el, tag, fonts, idTaken, keep);
 		if (before !== el.attributes.length + (el.getAttribute('style') ?? '') + (el.getAttribute('href') ?? '') + (el.getAttribute('width') ?? '') + (el.getAttribute('height') ?? '')) changed = true;
 	}
 	return changed;
@@ -576,17 +618,18 @@ export function sanitizeTree(root: Element, only?: (el: Element) => boolean, idT
  * HTML made safe to show and edit: see the top of this file for what is kept. It is parsed in a
  * document of its own, where nothing in it runs or loads, before any of it reaches the page.
  * Where there is no DOM to parse it with (on a server), nothing is returned: HTML that could
- * not be checked is not passed on.
+ * not be checked is not passed on. `keepAttributes` and `keepClasses` name marks of the
+ * application's own to leave on (see keptMarks).
  */
-export function sanitizeHtml(html: string): string {
-	return safeBody(html)?.innerHTML ?? '';
+export function sanitizeHtml(html: string, options?: KeepOptions): string {
+	return safeBody(html, undefined, keptMarks(options))?.innerHTML ?? '';
 }
 
 /** The HTML, read in a document of its own and made safe there; null where it cannot be. */
-function safeBody(html: string, idTaken?: (id: string) => boolean): HTMLElement | null {
+function safeBody(html: string, idTaken?: (id: string) => boolean, keep?: Kept): HTMLElement | null {
 	if (!html || typeof DOMParser === 'undefined') return null;
 	const doc = new DOMParser().parseFromString(`<!DOCTYPE html><html><body>${html}</body></html>`, 'text/html');
-	sanitizeTree(doc.body, undefined, idTaken);
+	sanitizeTree(doc.body, undefined, idTaken, keep);
 	return doc.body;
 }
 
@@ -596,8 +639,8 @@ function safeBody(html: string, idTaken?: (id: string) => boolean): HTMLElement 
  * agree with the first for the check to mean anything, and that is where a sanitizer is got
  * round; it is also a third pass over a document that may hold megabytes of pictures.
  */
-export function sanitizedNodes(html: string, into: Document, idTaken?: (id: string) => boolean): Node[] {
-	const body = safeBody(html, idTaken);
+export function sanitizedNodes(html: string, into: Document, idTaken?: (id: string) => boolean, keep?: Kept): Node[] {
+	const body = safeBody(html, idTaken, keep);
 	if (!body) return [];
 	return Array.from(body.childNodes).map((node) => into.importNode(node, true));
 }

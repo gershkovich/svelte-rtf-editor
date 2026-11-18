@@ -137,6 +137,8 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. See [Fonts](#fonts) |
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
 | `fontSizes`     | `number[]` | `[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36]` | The sizes, in points, the toolbar's size list offers for selected text. The body size is always among them; `[]` takes the list off the toolbar. See [Size of selected text](#size-of-selected-text) |
+| `keepAttributes` | `string[]` | `[]` | `data-` attributes of your own that stay on HTML you set or the user pastes. See [HTML from outside](#html-from-outside) |
+| `keepClasses` | `string[]` | `[]` | Class names of your own that stay the same way |
 
 #### Callback props
 
@@ -185,6 +187,14 @@ Whatever HTML reaches the editor is made safe before it is shown: the `content` 
 | Style text the browser did not read as a property (`width: expression(…)`, a property named twice) | It does nothing here, but it would still be in the HTML for whatever shows it next. Where there is any, the attribute is written again from the properties that were read and kept. An attribute that is all read and kept stays exactly as it was written, `border: 1px solid black` included |
 | `class`; an `id` that names something on `document` or `window`; the `id` of a link; in the editor, an `id` the page already uses for an element outside an editor | They would take on the page's own styles, or answer to a name or an `id` the page's scripts look up. A document's own ids are kept, also when it is shown again while its first showing is still in the editor. They are still names on `window`, as every `id` in a page is: a page whose scripts read settings from `window` by a name they do not define should not show documents from strangers |
 
+**Marks of your own.** An application that marks elements in its documents and reads the marks back (`<p data-section="2">`), or styles one by a class (`<pre class="summary">`), names them in `keepAttributes` and `keepClasses`, and they stay on HTML it sets and on what the user pastes:
+
+```svelte
+<InkEditor content={html} keepAttributes={['data-section', 'data-row']} keepClasses={['summary']} />
+```
+
+Only attribute names that start with `data-` are kept; anything else in the list (`onclick`, `style`, `src`) is ignored, so the list cannot let in what the table above takes out. A kept class is kept by name alone: how it looks is your stylesheet's doing, and a paste that happens to use the same name gets it too. Neither changes the RTF. `sanitizeHtml(html, { keepAttributes, keepClasses })` does the same for HTML you show yourself. Without the settings both are taken off, as since 1.10.0: an application that upgraded from an earlier version and relies on one has to name it.
+
 The editing area also clips what it holds: nothing in a document is drawn outside it, whatever its styles, and a table wider than the area scrolls inside it. The frame around a selected picture stays inside it too. Text that Word marked hidden (`mso-hide: all`) is hidden on screen as it is left out of the RTF, and in a paste it is not pasted. A closed `<details>` is shown open, since what is in it is written to the RTF either way.
 
 `getHTML()` returns what is in the editor, which has been through this. HTML from `rtfToHtml` is safe by construction (see [What `rtfToHtml` may return](#what-rtftohtml-may-return)).
@@ -208,7 +218,7 @@ import {
 | `isSafeLinkUrl(url: string): boolean` | Whether a link address is a web, mail or phone address; `htmlToRtf` and `htmlToMarkdown` write any other link as its text alone, and `rtfToHtml` reads any other as text |
 | `readRtfFile(file: File, options?: { fontSize?, maxBytes? }): Promise<string>` | Read a `.rtf` File object and return HTML. Rejects, without reading it, for a file larger than `maxBytes` |
 | `htmlToMarkdown(el: HTMLElement): string` | Convert a DOM element's content to Markdown. See [Markdown export](#markdown-export) |
-| `sanitizeHtml(html: string): string` | HTML made safe to show and edit. See [HTML from outside](#html-from-outside). Needs a DOM (`DOMParser`); without one it returns `''` |
+| `sanitizeHtml(html: string, options?: { keepAttributes?: string[]; keepClasses?: string[] }): string` | HTML made safe to show and edit. See [HTML from outside](#html-from-outside). Needs a DOM (`DOMParser`); without one it returns `''` |
 | `downloadFile(name, content, mime): void` | Trigger a file download in the browser        |
 
 ---
