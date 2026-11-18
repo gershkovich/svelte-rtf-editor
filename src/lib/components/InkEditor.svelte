@@ -29,6 +29,10 @@
 	 *                   Default: DEFAULT_FONT_FAMILY (rtf-writer.ts).
 	 *   fontSize      — Body text size in points, both on screen and in the RTF.
 	 *                   Headings scale from it. Default: 12.
+	 *   fontSizes     — The sizes, in points, the toolbar's size list offers for the
+	 *                   selected text. The body size is always among them. An empty
+	 *                   list takes the size list off the toolbar.
+	 *                   Default: 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36.
 	 *
 	 * Events (callback props):
 	 *   onchange      — Fires on content change with
@@ -103,10 +107,14 @@
 		maxRtfBytes?: number;
 		fontFamily?: string;
 		fontSize?: number;
+		fontSizes?: number[];
 		onchange?: (payload: ChangePayload) => void;
 		onsave?: (payload: { html: string }) => void;
 		onimport?: (payload: { html: string }) => void;
 	}
+
+	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
+	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 
 	// ── Props ──
 	let {
@@ -124,6 +132,7 @@
 		maxRtfBytes = DEFAULT_MAX_RTF_BYTES,
 		fontFamily = DEFAULT_FONT_FAMILY,
 		fontSize = DEFAULT_FONT_SIZE,
+		fontSizes = DEFAULT_FONT_SIZES,
 		onchange,
 		onsave,
 		onimport
@@ -142,6 +151,8 @@
 	let charCount: number = $state(0);
 	let lastSaved: string = $state('');
 	let currentBlock: string = $state('p');
+	/** The size of the text at the caret, in points, for the toolbar. */
+	let currentFontSize: number | null = $state(null);
 
 	let formatState = $state({
 		bold: false,
@@ -296,6 +307,92 @@
 			sel?.addRange(savedSelection);
 		}
 	}
+
+	// ── Font size ──
+	// The size of the selected text, or of what is typed next, is set with the browser's own
+	// command: it wraps exactly the selection, takes a size already there out of it, and its
+	// steps can be undone with everything else. But it knows only seven sizes and writes them as
+	// <font size="1"> to <font size="7">. So it is asked for size 7, which nothing else in the
+	// editor makes, and each element it marked that way is then given the size meant, in points
+	// (<font style="font-size:14pt">), which is what the RTF writer reads. Only attributes are
+	// changed, never the elements, so the browser's undo still finds what it made.
+	const SIZE_MARK = '7';
+	/** The size chosen and not yet given to an element: a caret has no text to carry it until something is typed. */
+	let pendingSize: number | null = null;
+	/** Elements that were marked size 7 before the command (pasted that way): not ours to change. */
+	let markedBefore = new Set<Element>();
+
+	/** The size of an element's text as the screen shows it, in points to the half-point; null if unknown. */
+	function shownSize(el: Element): number | null {
+		const px = parseFloat(getComputedStyle(el).fontSize);
+		return Number.isFinite(px) && px > 0 ? Math.round(px * 0.75 * 2) / 2 : null;
+	}
+
+	/** Give the elements the command marked the size that was chosen. */
+	function applyPendingSize(): void {
+		if (!editorEl || pendingSize === null) return;
+		for (const font of Array.from(editorEl.querySelectorAll<HTMLElement>(`font[size="${SIZE_MARK}"]`))) {
+			if (markedBefore.has(font)) continue;
+			font.removeAttribute('size');
+			font.style.removeProperty('font-size');
+			// Where the text around it has that size already (body text set back to the body
+			// size, a heading to the heading's), no size is stated: the text then follows the
+			// document's size, as text that was never sized does.
+			if (shownSize(font) !== pendingSize) font.style.fontSize = `${pendingSize}pt`;
+			if (!font.getAttribute('style')) font.removeAttribute('style');
+		}
+	}
+
+	/**
+	 * Set the size, in points, of the selected text; with nothing selected, of what is typed next.
+	 * Also what the toolbar's size list calls.
+	 */
+	export function setFontSize(points: number): void {
+		if (readonly || !editorEl) return;
+		if (typeof points !== 'number' || !Number.isFinite(points) || points <= 0) return;
+		restoreSelection();
+		editorEl.focus();
+		// The document changes outside an input event: earlier indent steps no longer undo.
+		indentUndo = [];
+		markedBefore = new Set(editorEl.querySelectorAll(`font[size="${SIZE_MARK}"]`));
+		pendingSize = normalizeFontSize(points);
+		document.execCommand('fontSize', false, SIZE_MARK);
+		applyPendingSize();
+		// With text selected the size is on it now. At a caret it waits for the typing.
+		const selection = window.getSelection();
+		if (selection && !selection.isCollapsed) pendingSize = null;
+		updateToolbarState();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/** The size of the text at the selection, for the toolbar: null where it starts and ends in different sizes. */
+	function sizeAtSelection(): number | null {
+		if (pendingSize !== null) return pendingSize;
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0) return null;
+		const range = selection.getRangeAt(0);
+		if (!editorEl.contains(range.startContainer)) return null;
+		const holder = (node: Node, offset: number, atEnd: boolean): Element | null => {
+			if (node.nodeType === Node.ELEMENT_NODE) {
+				const child = node.childNodes[atEnd ? offset - 1 : offset];
+				return child?.nodeType === Node.ELEMENT_NODE ? (child as Element) : (node as Element);
+			}
+			return node.parentElement;
+		};
+		const start = holder(range.startContainer, range.startOffset, false);
+		const first = start ? shownSize(start) : null;
+		if (range.collapsed) return first;
+		const end = holder(range.endContainer, range.endOffset, true);
+		return end && shownSize(end) === first ? first : null;
+	}
+
+	/** The sizes the list offers: those asked for, and always the body size. */
+	const sizeChoices = $derived.by(() => {
+		const sizes = fontSizes.map((size) => normalizeFontSize(size));
+		if (sizes.length === 0) return sizes;
+		return Array.from(new Set([...sizes, screenFontSize])).sort((a, b) => a - b);
+	});
 
 	// ── Exec command ──
 	function exec(cmd: string, value: string | null = null): void {
@@ -896,6 +993,7 @@
 		// Snapshot the selection so exec/setBlock can restore it even if focus
 		// temporarily moved to a toolbar element (e.g. colour picker, select).
 		saveSelection();
+		currentFontSize = sizeAtSelection();
 
 		formatState = {
 			bold: document.queryCommandState('bold'),
@@ -910,6 +1008,15 @@
 		currentBlock = map[normalized] || 'p';
 
 		updateCounts();
+	}
+
+	/**
+	 * A click or a key in the text. A size chosen at a caret and not yet typed in is given up: the
+	 * browser drops it when the caret moves, and the toolbar must not go on showing it.
+	 */
+	function caretMoved(): void {
+		pendingSize = null;
+		updateToolbarState();
 	}
 
 	function updateCounts(): void {
@@ -960,6 +1067,9 @@
 			pastedOver = null;
 		}
 		indentUndo = [];
+		// What was typed at a caret after a size was chosen came in marked: give it the size.
+		applyPendingSize();
+		pendingSize = null;
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the
 		// selection here keeps Backspace editing that text instead of deleting a
@@ -1682,6 +1792,9 @@
 			onblock={setBlock}
 			oninsertlink={openLinkModal}
 			oninsertimage={openImageModal}
+			fontSize={currentFontSize}
+			fontSizes={sizeChoices}
+			onfontsize={setFontSize}
 			copyingFormat={copyFormat !== 'off'}
 			oncopyformat={toggleCopyFormat}
 		/>
@@ -1712,8 +1825,8 @@
 			spellcheck="true"
 			bind:this={editorEl}
 			oninput={handleInput}
-			onmouseup={updateToolbarState}
-			onkeyup={updateToolbarState}
+			onmouseup={caretMoved}
+			onkeyup={caretMoved}
 			onkeydown={handleKeydown}
 			onmousedown={() => (tabLeavesEditor = false)}
 			onblur={() => (tabLeavesEditor = false)}

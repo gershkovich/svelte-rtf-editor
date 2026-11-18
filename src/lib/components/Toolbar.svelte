@@ -9,6 +9,11 @@
 		onblock?: (tag: string) => void;
 		oninsertlink?: () => void;
 		oninsertimage?: () => void;
+		/** The size of the text at the caret, in points; null where the selection has more than one. */
+		fontSize?: number | null;
+		/** The sizes offered, in points. */
+		fontSizes?: number[];
+		onfontsize?: (points: number) => void;
 		/** The Copy format brush is in hand: the button shows as pressed. */
 		copyingFormat?: boolean;
 		oncopyformat?: () => void;
@@ -21,9 +26,18 @@
 		onblock,
 		oninsertlink,
 		oninsertimage,
+		fontSize = null,
+		fontSizes = [],
+		onfontsize,
 		copyingFormat = false,
 		oncopyformat
 	}: Props = $props();
+
+	// The size at the caret is shown even when it is not one of the sizes offered (13.5 pt in a
+	// document from elsewhere), so the list never shows a size the text does not have.
+	const sizeChoices = $derived(
+		fontSize !== null && !fontSizes.includes(fontSize) ? [...fontSizes, fontSize].sort((a, b) => a - b) : fontSizes
+	);
 
 	function exec(cmd: string, value: string | null = null) {
 		onexec?.(cmd, value);
@@ -46,6 +60,29 @@
 			<option value="pre">Code Block</option>
 		</select>
 	</div>
+
+	{#if fontSizes.length > 0}
+		<!-- Font size -->
+		<div class="toolbar-group">
+			<select
+				class="tb-select tb-size"
+				title="Font size"
+				aria-label="Font size"
+				value={fontSize === null ? '' : String(fontSize)}
+				onchange={(e) => {
+					const points = Number((e.target as HTMLSelectElement).value);
+					if (points > 0) onfontsize?.(points);
+				}}
+			>
+				{#if fontSize === null}
+					<option value=""></option>
+				{/if}
+				{#each sizeChoices as size (size)}
+					<option value={String(size)}>{size}</option>
+				{/each}
+			</select>
+		</div>
+	{/if}
 
 	<div class="toolbar-divider"></div>
 
@@ -213,6 +250,12 @@
 		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238A7E72' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
 		background-repeat: no-repeat;
 		background-position: right 6px center;
+	}
+
+	/* Two or three digits: narrower than the list of paragraph kinds. */
+	.tb-size {
+		min-width: 52px;
+		padding-left: 8px;
 	}
 
 	.tb-select:hover {

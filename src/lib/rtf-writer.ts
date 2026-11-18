@@ -756,7 +756,8 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 		if (el.style?.color) total += 14 + 25;
 		// (A <font> with a color attribute and a color style names two colors, and both are in the table.)
 		if (tag === 'font' && el.hasAttribute('color')) total += el.style?.color ? 25 : 14 + 25;
-		if (el.style?.fontSize) total += 14 + sizeDigits; // "\fsNNN " on and off, for sizes up to 499 pt
+		// "\fsNNN " on and off, for sizes up to 499 pt
+		if (el.style?.fontSize || (tag === 'font' && el.hasAttribute('size'))) total += 14 + sizeDigits;
 	}
 
 	return total;
@@ -1941,10 +1942,19 @@ function colorIndexOf(el: HTMLElement, ctx: WalkContext): number | null {
 	return ctx.colorIndex.get(colorKey(c)) ?? null;
 }
 
+/**
+ * The sizes of <font size="1"> to <font size="7">, in half-points, as browsers show them
+ * (10, 13, 16, 18, 24, 32 and 48 px). Older pages and mail carry their sizes this way.
+ */
+const FONT_SIZE_ATTRIBUTE = [15, 20, 24, 27, 36, 48, 72];
+
 /** The element's own font size in half-points, or null when it sets none. */
 function sizeOf(el: HTMLElement): number | null {
 	const fs = el.style?.fontSize;
-	if (!fs) return null;
+	if (!fs) {
+		const step = el.tagName === 'FONT' ? /^\s*([1-7])\s*$/.exec(el.getAttribute('size') ?? '') : null;
+		return step ? FONT_SIZE_ATTRIBUTE[Number(step[1]) - 1] : null;
+	}
 	const ptMatch = fs.match(/([\d.]+)\s*pt/);
 	if (ptMatch) return Math.round(parseFloat(ptMatch[1]) * 2);
 	const pxMatch = fs.match(/([\d.]+)\s*px/);

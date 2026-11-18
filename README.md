@@ -134,6 +134,7 @@ Pass an HTML string as `content`. If the content is already RTF, convert it firs
 | `maxImageDisplayWidth` | `number` | `624`                 | Width (px) a newly inserted image is displayed at, unless the column is narrower — 6.5in of page. `0` fills the column |
 | `fontFamily`    | `string`   | `'Segoe UI'`                 | Document font, on screen and in the RTF. See [Fonts](#fonts) |
 | `fontSize`      | `number`   | `12`                         | Body text size in points, on screen and in the RTF        |
+| `fontSizes`     | `number[]` | `[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36]` | The sizes, in points, the toolbar's size list offers for selected text. The body size is always among them; `[]` takes the list off the toolbar. See [Size of selected text](#size-of-selected-text) |
 
 #### Callback props
 
@@ -156,6 +157,7 @@ editor.clear()            // → void    — clear the editor
 editor.focus()            // → void    — focus the editor
 editor.exportFile(format) // → void    — download as 'html' | 'md' | 'rtf'
 editor.importRtf()        // → void    — open the file picker to import .rtf
+editor.setFontSize(14)    // → void    — size, in points, of the selected text, or of what is typed next
 ```
 
 ---
@@ -211,6 +213,17 @@ Segoe UI is installed with Windows. On a system without it (macOS, Linux, a phon
 - `fontFamily` names one font. Given a CSS list such as `'Arial, sans-serif'`, only the first family is used.
 - `fontSize` is rounded to the nearest half-point, which is what RTF measures in, and kept between 1 and 1638 pt.
 - If you show RTF in an editor or viewer set to another size, pass the same `fontSize` to `rtfToHtml`. Text at that size then carries no size of its own, text at any other size keeps it, and headings are recognized by the same ratios the writer uses. `InkEditor`'s RTF import and `RtfViewer` do this themselves. A heading must also be bold, at every body size, as every heading the writer emits is.
+
+### Size of selected text
+
+The toolbar has a list of sizes, next to the list of paragraph kinds. A size chosen there is given to the selected text; with nothing selected, to what is typed next. The list shows the size of the text at the caret, also when it is not one of the sizes offered, and is empty where the selection starts in one size and ends in another.
+
+- The size is written to the RTF as `\fsN` around that text, and read back as that size by `rtfToHtml`.
+- Text set back to the size the text around it has (the body size in a paragraph, the heading's size in a heading) states no size, and follows `fontSize` again like text that was never sized.
+- The sizes offered are `fontSizes`; pass your own list, or `[]` to leave the size list out. `editor.setFontSize(points)` does the same from your own toolbar.
+- The editor uses the browser's own font-size command, so a change of size is undone with everything else. In the HTML the size is on a `<font>` element (`<font style="font-size: 14pt">`).
+- A whole paragraph that is bold and at the size a heading has is read back from RTF as that heading: it looks the same, and the list of paragraph kinds then names it a heading.
+- `htmlToRtf` also reads `<font size="1">` to `<font size="7">`, which is how older pages and mail carry sizes, as the sizes a browser shows them at (7.5, 10, 12, 13.5, 18, 24 and 36 pt). They were shown at those sizes and written at the body size.
 
 The font has to be installed on the machine that displays the document. The RTF names it, and a reader without it substitutes one of its own.
 
