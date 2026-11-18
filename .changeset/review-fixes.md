@@ -20,9 +20,18 @@ Fixes from a review of the editor in a real browser, and two defaults that chang
     or a rule. The editing area clips what it holds, and a table wider than it scrolls inside it.
   - `<button>`, `<textarea>`, `<select>`, `<input>` and `<math>` are taken out and the words they
     showed are kept as text. A formula with a fraction, a power or a root is written `[formula]`.
+    Words that were hidden are not kept, and elements side by side leave their words a space
+    apart.
   - A document's own `id`s are kept, unless the page already uses that `id` outside an editor or
-    it names something on `document` or `window`.
-  - Text Word marked hidden (`mso-hide: all`) is hidden on screen as it is left out of the RTF.
+    it names something on `document` or `window`. A link keeps no `id`.
+  - Text Word marked hidden (`mso-hide: all`) is hidden on screen as it is left out of the RTF,
+    and is not pasted.
+  - Words are not put out of sight: a first line that starts further left than its paragraph is
+    moved in, and a text size under half a pixel, are taken out. A hanging indent stays as written.
+  - A list read from RTF keeps a margin below zero of up to half an inch, which is how it carries
+    an indent smaller than a list's own. It is the one margin below zero that is kept.
+  - A style attribute that is all read and kept stays exactly as it was written
+    (`border: 1px solid black` is not rewritten).
 - `onchange`'s `html`, `text` and `estimatedRtfBytes` are the document as it is when the handler
   first reads them, not a copy made when the change happened. Read them in the handler; a
   payload kept and read after a later edit gives the later document.

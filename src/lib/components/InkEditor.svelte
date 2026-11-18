@@ -62,7 +62,7 @@
 	import Modal from './Modal.svelte';
 	import ImageOverlay from './ImageOverlay.svelte';
 	import { htmlToMarkdown, downloadFile } from '../utils.js';
-	import { sanitizedNodes, sanitizeTree } from '../sanitize.js';
+	import { pasteNotes, removeWordHidden, sanitizedNodes, sanitizeTree, type PasteNotes } from '../sanitize.js';
 	import { readRtfFile, DEFAULT_MAX_RTF_BYTES } from '../rtf-parser.js';
 	import {
 		htmlToRtf,
@@ -315,6 +315,7 @@
 	function documentReplaced(): void {
 		indentUndo = [];
 		pastedOver = null;
+		pastedLoss = null;
 		stopCopyFormat();
 	}
 
@@ -1840,13 +1841,57 @@
 		if (!readonly && editorEl) {
 			const snapshot = new Set(editorEl.querySelectorAll('*'));
 			pastedOver = snapshot;
+			// What the browser's paste may lose (see pasteNotes), and where the paste begins.
+			const notes = pasteNotes(e.clipboardData?.getData('text/html') ?? '');
+			const start = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+			pastedLoss =
+				notes && start && editorEl.contains(start.startContainer)
+					? { notes, from: shownCharsBefore(start.startContainer, start.startOffset) }
+					: null;
 			// A paste that inserts nothing (an empty clipboard, a host that cancels it) raises no
 			// input event. Left set, the snapshot would make the next keystroke treat the whole
 			// document as pasted.
 			setTimeout(() => {
-				if (pastedOver === snapshot) pastedOver = null;
+				if (pastedOver === snapshot) {
+					pastedOver = null;
+					pastedLoss = null;
+				}
 			}, 0);
 		}
+	}
+
+	/** How many characters that are not white space the document has before a place in it. */
+	function shownCharsBefore(node: Node, offset: number): number {
+		if (!editorEl) return 0;
+		const range = document.createRange();
+		range.selectNodeContents(editorEl);
+		range.setEnd(node, offset);
+		return range.toString().replace(/\s/g, '').length;
+	}
+
+	/**
+	 * Set right what the browser's paste changed before it could be looked at: Word's hidden
+	 * text shown as text, and a text box left empty.
+	 */
+	function restorePasteLoss(before: Set<Element>, loss: { notes: PasteNotes; from: number }): void {
+		if (!editorEl) return;
+		const areas = Array.from(editorEl.querySelectorAll('textarea')).filter((area) => !before.has(area));
+		if (areas.length === loss.notes.textareas.length) {
+			areas.forEach((area, i) => {
+				if (area.value === '') area.textContent = loss.notes.textareas[i];
+			});
+		}
+		// After a paste the caret is at its end.
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || !sel.isCollapsed || !editorEl.contains(sel.anchorNode)) return;
+		const caret = sel.getRangeAt(0);
+		const to = shownCharsBefore(caret.startContainer, caret.startOffset);
+		// A pasted element left with nothing in it goes, but not the one the caret is in: that
+		// one becomes an empty line, to type in. (Taken out as well, a paste of hidden text
+		// alone left the caret in no line at all, and the next words typed were in none.)
+		const held = sel.anchorNode instanceof Element ? sel.anchorNode : (sel.anchorNode?.parentElement ?? null);
+		if (!removeWordHidden(editorEl, loss.from, to, loss.notes, (el) => !before.has(el) && !(held !== null && el.contains(held)))) return;
+		if (held && held !== editorEl && held.isConnected && held.childNodes.length === 0) held.appendChild(document.createElement('br'));
 	}
 
 	// ── Pasted formatting ──
@@ -1859,9 +1904,13 @@
 	const PASTED_SPACING = ['margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'text-indent'];
 	/** The elements in the editor just before a paste; what is not in it came from the paste. */
 	let pastedOver: Set<Element> | null = null;
+	/** What the paste under way may lose, and how much text the document had before it. */
+	let pastedLoss: { notes: PasteNotes; from: number } | null = null;
 
 	function tidyPasted(before: Set<Element>): void {
 		if (!editorEl) return;
+		if (pastedLoss) restorePasteLoss(before, pastedLoss);
+		pastedLoss = null;
 		// What the paste brought is made safe as HTML from anywhere else is: a browser takes the
 		// scripts out of a paste itself, but leaves a form, an <iframe>, or a block with
 		// position: fixed that covers the page.
@@ -2288,6 +2337,7 @@
 				bind:this={overlayRef}
 				target={selectedImage}
 				bounds={contentWrapEl}
+				within={editorEl}
 				maxWidth={contentWidth}
 				onchange={handleImageEdited}
 				onremove={removeSelectedImage}

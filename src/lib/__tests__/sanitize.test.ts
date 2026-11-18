@@ -2,8 +2,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
 import InkEditor from '../components/InkEditor.svelte';
-import { sanitizeHtml, sanitizedNodes } from '../sanitize.js';
+import { pasteNotes, removeWordHidden, sanitizeHtml, sanitizedNodes } from '../sanitize.js';
 import { htmlToRtf } from '../rtf-writer.js';
+import { rtfToHtml } from '../rtf-parser.js';
 import { htmlToMarkdown } from '../utils.js';
 
 // happy-dom has none of the editing commands the editor asks the browser about.
@@ -71,8 +72,9 @@ describe('sanitizeHtml: HTML from outside, made safe to show', () => {
 		expect(Array.from(div.querySelectorAll('*')).map((el) => el.tagName.toLowerCase())).toEqual(['p', 'form']);
 		expect(div.querySelector('form')!.attributes.length).toBe(0);
 		// (Was 'keptin a form': the formula's x, the button's Go, the chosen o and the t typed
-		// in the text box were taken out with their elements.)
-		expect(div.textContent).toBe('keptxGootin a form');
+		// in the text box were taken out with their elements. Then 'keptxGootin a form': the
+		// button, the list and the text box stood side by side, and their words ran together.)
+		expect(div.textContent).toBe('keptxGo o tin a form');
 	});
 
 	it('keeps a link only to a web, mail or phone address', () => {
@@ -551,5 +553,302 @@ describe('the writer keeps its numbers in range', () => {
 		at.textContent = 'deep {text}';
 		expect(htmlToRtf(root)).toContain('deep \\{text\\}');
 		expect(htmlToMarkdown(root)).toContain('deep {text}');
+	});
+});
+
+describe('sanitizeHtml: what a second review found', () => {
+	// A review of the fixes above found these. Each line of each test went through as it was.
+	// Invented text.
+	const rtfBody = (html: string) => {
+		const div = document.createElement('div');
+		div.innerHTML = html;
+		const rtf = htmlToRtf(div);
+		return rtf.slice(rtf.indexOf('\\pard'));
+	};
+	const styleOf = (html: string, selector: string) => parsed(html).querySelector(selector)!.getAttribute('style') ?? '';
+
+	describe('words that were hidden are not kept as words', () => {
+		it('a hidden part of a button, and what is in its <script> or <style>, is not its label', () => {
+			expect(sanitizeHtml('<p>Press <button>Sign<span style="display:none">SECRET</span></button></p>')).toBe('<p>Press Sign</p>');
+			expect(sanitizeHtml('<p>Press <button>Sign<span hidden>SECRET</span><b style="visibility: hidden">TOO</b></button></p>')).toBe('<p>Press Sign</p>');
+			expect(sanitizeHtml('<p>Press <button>Sign<script>alert(1)</script><style>.a{color:red}</style></button></p>')).toBe('<p>Press Sign</p>');
+			expect(sanitizeHtml('<p><button>Save<br>draft</button></p>')).toBe('<p>Save draft</p>');
+		});
+
+		it('a button, a text box, a list or a formula that was hidden leaves no words', () => {
+			for (const hidden of [
+				'<button hidden>HIDDEN</button>',
+				'<button style="display: none">HIDDEN</button>',
+				'<button style="color: red; VISIBILITY: hidden">HIDDEN</button>',
+				'<button style="mso-hide: all">HIDDEN</button>',
+				'<input style="display:none" value="HIDDEN">',
+				'<input hidden value="HIDDEN">',
+				'<textarea style="display:none">HIDDEN</textarea>',
+				'<select hidden><option>HIDDEN</option></select>',
+				'<math style="display:none"><mn>42</mn></math>',
+				'<math hidden><mn>42</mn></math>'
+			]) {
+				expect(sanitizeHtml(`<p>a${hidden}b</p>`), hidden).toBe('<p>ab</p>');
+			}
+		});
+
+		it('text written straight into <math>, which no browser draws, is not kept', () => {
+			expect(sanitizeHtml('<p>a<math>30%</math>b</p>')).toBe('<p>ab</p>');
+		});
+
+		it('a hidden element of the page\'s own kind goes with what is in it', () => {
+			expect(sanitizeHtml('<p>a<x-note hidden>SECRET</x-note>b<x-note>shown</x-note></p>')).toBe('<p>abshown</p>');
+			expect(sanitizeHtml('<p>a<x-note style="display:none">SECRET</x-note>b</p>')).toBe('<p>ab</p>');
+		});
+
+		it('what is in a closed <details> is in the RTF, so it is shown open', () => {
+			expect(sanitizeHtml('<details><summary>More</summary><p>the rest</p></details>')).toBe('<details open=""><summary>More</summary><p>the rest</p></details>');
+		});
+	});
+
+	describe('a list read from RTF keeps its indent', () => {
+		it('a list nested by less than half an inch is written back where it was: it came back half an inch further in', () => {
+			const rtf = String.raw`{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}}\f0\fs24 \pard\li720\fi-360\bullet\tab a\par \pard\li1080\fi-360\bullet\tab b\par }`;
+			const html = rtfToHtml(rtf);
+			expect(html).toBe('<ul><li>a<ul style="margin-left:-18pt"><li>b</li></ul></li></ul>');
+			expect(sanitizeHtml(html)).toBe(html);
+			expect(rtfBody(sanitizeHtml(html))).toContain('\\pard\\li1080\\fi-360\\bullet\\tab b\\par');
+		});
+
+		it('so is a list at the left edge', () => {
+			const html = rtfToHtml(String.raw`{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}}\f0\fs24 \pard\li360\fi-360\bullet\tab a\par }`);
+			expect(html).toBe('<ul style="margin-left:-18pt"><li>a</li></ul>');
+			expect(rtfBody(sanitizeHtml(html))).toContain('\\pard\\li360\\fi-360\\bullet\\tab a\\par');
+			const numbered = rtfToHtml(String.raw`{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}}\f0\fs24 \pard\li360\fi-360 1.\tab a\par }`);
+			expect(sanitizeHtml(numbered)).toBe(numbered);
+		});
+
+		it('no other margin below zero is kept, and a list is pulled no further left than its own indent', () => {
+			expect(sanitizeHtml('<ul style="margin-left:-36pt"><li>a</li></ul>')).toContain('margin-left:-36pt');
+			expect(sanitizeHtml('<ul style="margin-left:-37pt"><li>a</li></ul>')).toBe('<ul><li>a</li></ul>');
+			expect(sanitizeHtml('<ol style="margin-left:-5000px"><li>a</li></ol>')).toBe('<ol><li>a</li></ol>');
+			expect(sanitizeHtml('<ul style="margin-top:-18pt"><li>a</li></ul>')).toBe('<ul><li>a</li></ul>');
+			expect(sanitizeHtml('<p style="margin-left:-18pt">a</p>')).toBe('<p>a</p>');
+			expect(sanitizeHtml('<ul style="margin-left:-50%"><li>a</li></ul>')).toBe('<ul><li>a</li></ul>');
+		});
+	});
+
+	describe('an id, in a browser', () => {
+		// A browser gives every element's id as a name on `window`. The test DOM does not, so
+		// that is stood in here; e2e/editor.spec.ts has the same in a real browser.
+		const named: string[] = [];
+		const nameOnWindow = (id: string) => {
+			Object.defineProperty(globalThis, id, { configurable: true, get: () => document.getElementById(id) });
+			named.push(id);
+		};
+		afterEach(() => {
+			for (const id of named.splice(0)) delete (globalThis as Record<string, unknown>)[id];
+			document.getElementById('dx-1')?.remove();
+		});
+
+		it('a document shown a second time keeps its ids: the first showing was taken for something of the page\'s own', () => {
+			document.body.insertAdjacentHTML('beforeend', '<p id="dx-1">first</p>');
+			nameOnWindow('dx-1');
+			expect('dx-1' in globalThis).toBe(true);
+			expect(sanitizeHtml('<p id="dx-1">again</p><p id="dx-2">new</p>')).toBe('<p id="dx-1">again</p><p id="dx-2">new</p>');
+		});
+
+		it('a name the page\'s scripts look up is still not given to an element', () => {
+			(globalThis as Record<string, unknown>).reportSettings = { saveTo: 'https://x.test/' };
+			named.push('reportSettings');
+			expect(sanitizeHtml('<p id="location">a</p><p id="reportSettings">b</p><p id="cookie">c</p>')).toBe('<p>a</p><p>b</p><p>c</p>');
+		});
+
+		it('a link keeps no id: a script that finds a link where it looked up a name reads its address', () => {
+			expect(sanitizeHtml('<a id="appConfig" href="https://evil.test/api">c</a>')).toBe('<a href="https://evil.test/api">c</a>');
+			expect(sanitizeHtml('<a id="note-3">c</a>')).toBe('<a id="note-3">c</a>');
+		});
+	});
+
+	describe('words are not put out of sight', () => {
+		it('a first line does not start left of its paragraph: the editing area cut it off, and the RTF had it', () => {
+			expect(sanitizeHtml('<p style="text-indent:-100%">FIRST LINE</p>')).toBe('<p>FIRST LINE</p>');
+			expect(sanitizeHtml('<p style="text-indent:-2200px; color: red">FIRST LINE</p>')).toBe('<p style="color: red;">FIRST LINE</p>');
+			expect(sanitizeHtml('<p style="margin-left: 24px; text-indent: -48px">FIRST LINE</p>')).toBe('<p style="margin-left: 24px;">FIRST LINE</p>');
+			expect(sanitizeHtml('<li style="text-indent:-18pt">a</li>')).toBe('<li>a</li>');
+		});
+
+		it('a hanging indent, the first line as far left as the paragraph is moved in, stays as written', () => {
+			for (const style of [
+				'margin-left:48px;text-indent:-24px',
+				'margin-left:36pt;text-indent:-36pt',
+				'margin-left: 1.75in; text-indent: -1.75in',
+				'margin: 0in 0in 0in 0.5in; text-indent: -0.25in',
+				'padding-left: 2em; text-indent: -2em',
+				'margin-left: 12pt; padding-left: 12pt; text-indent: -24pt',
+				'text-indent: 24px',
+				'text-indent: 5%'
+			]) {
+				expect(sanitizeHtml(`<p style="${style}">hang</p>`), style).toBe(`<p style="${style}">hang</p>`);
+			}
+			// Written right to left, the room is on the right.
+			expect(sanitizeHtml('<p dir="rtl" style="margin-right: 36pt; text-indent: -36pt">x</p>')).toContain('text-indent: -36pt');
+			expect(sanitizeHtml('<p dir="rtl" style="margin-left: 36pt; text-indent: -36pt">x</p>')).not.toContain('text-indent');
+		});
+
+		it('text of no size is given its size back: it was in the RTF and not on the screen', () => {
+			for (const size of ['0', '0px', '0pt', '0.4px', '0em', '0%', '1%']) {
+				expect(sanitizeHtml(`<p><span style="font-size:${size}">INVISIBLE</span>seen</p>`), size).toBe('<p><span>INVISIBLE</span>seen</p>');
+			}
+			for (const size of ['0.5pt', '1pt', '6pt', '50%', '0.5em', 'small', 'xxx-large', 'larger', 'smaller']) {
+				expect(sanitizeHtml(`<p><span style="font-size:${size}">small</span></p>`), size).toContain(`font-size:${size}`);
+			}
+		});
+	});
+
+	describe('the words of elements side by side are not run together', () => {
+		it('two boxes or two buttons side by side leave their words apart', () => {
+			expect(sanitizeHtml('<p>Size <input value="1"><input value="5"> cm</p>')).toBe('<p>Size 1 5 cm</p>');
+			expect(sanitizeHtml('<div><button>Save</button><button>Cancel</button></div>')).toBe('<div>Save Cancel</div>');
+			expect(sanitizeHtml('<p><input value="a"><input type="checkbox"><input value="b"></p>')).toBe('<p>a b</p>');
+			// One alone is not set apart from the words around it.
+			expect(sanitizeHtml('<p>Press <button>Sign</button>.</p>')).toBe('<p>Press Sign.</p>');
+		});
+
+		it('a space in a formula is a space', () => {
+			expect(sanitizeHtml('<p><math><mn>1</mn><mspace width="1em"></mspace><mn>2</mn></math></p>')).toBe('<p>1 2</p>');
+		});
+
+		it('a button written as an <input>, and an <input> of a kind no browser knows, show their value', () => {
+			expect(sanitizeHtml('<p><input type="submit" value="Send"> or <input type="Button" value="Stop"> <input type="bogus" value="shown"></p>')).toBe('<p>Send or Stop shown</p>');
+			expect(sanitizeHtml('<p>a<input type="submit">b</p>')).toBe('<p>ab</p>');
+		});
+
+		it('a list shown open leaves every entry chosen, and none where none is', () => {
+			expect(sanitizeHtml('<p><select multiple><option selected>one</option><option selected>two</option><option>three</option></select></p>')).toBe('<p>one, two</p>');
+			expect(sanitizeHtml('<p>a<select size="3"><option>one</option><option>two</option></select>b</p>')).toBe('<p>ab</p>');
+			expect(sanitizeHtml('<p><select size="3"><option>one</option><option selected>two</option></select></p>')).toBe('<p>two</p>');
+		});
+
+		it('a formula written twice, once as text and once to be read aloud, is kept once', () => {
+			const katex =
+				'<p>Ki-67 <span class="katex"><span class="katex-mathml"><math><semantics><mrow><mn>30</mn><mi mathvariant="normal">%</mi></mrow>' +
+				'<annotation encoding="application/x-tex">30\\%</annotation></semantics></math></span>' +
+				'<span class="katex-html" aria-hidden="true"><span class="mord">30</span><span class="mord">%</span></span></span> positive</p>';
+			expect(parsed(katex).textContent).toBe('Ki-67 30% positive');
+			// Alone, it is the only writing of the formula there is.
+			expect(parsed('<p>Ki-67 <span class="katex-mathml"><math><mn>30</mn><mo>%</mo></math></span></p>').textContent).toBe('Ki-67 30%');
+		});
+	});
+
+	describe('a size is kept within a page whatever it is counted in', () => {
+		it('a text size counted in the size above it does not grow past a page by being nested', () => {
+			const out = parsed('<a style="font-size:2200px"><span style="font-size:10000%;padding:137em">BIG</span></a>');
+			expect(out.querySelector('span')!.hasAttribute('style')).toBe(false);
+			const nested = parsed('<p>' + '<span style="font-size: 300%">'.repeat(8) + 'x' + '</span>'.repeat(8) + '</p>');
+			// 16 px, three times over at each level: 48, 144, 432, 1296, and no further.
+			expect(Array.from(nested.querySelectorAll('span')).map((span) => span.hasAttribute('style'))).toEqual([true, true, true, true, false, false, false, false]);
+			const larger = parsed('<p>' + '<span style="font-size: larger">'.repeat(40) + 'x' + '</span>'.repeat(40) + '</p>');
+			expect(larger.querySelectorAll('span[style]').length).toBe(27);
+		});
+
+		it('a length counted in ems is as long as the text there is large', () => {
+			expect(styleOf('<div style="font-size: 1000px"><p style="padding-left: 3em">x</p></div>', 'p')).toBe('');
+			expect(styleOf('<div><p style="padding-left: 3em">x</p></div>', 'p')).toBe('padding-left: 3em');
+			expect(styleOf('<p style="font-size: 800px; margin-left: 3em">x</p>', 'p')).toBe('font-size: 800px;');
+		});
+
+		it('a piece of text inside a line has a little padding at most: more moved nothing and covered the lines around it', () => {
+			expect(sanitizeHtml('<p><a href="https://example.com/" style="padding:2200px">link</a></p>')).toBe('<p><a href="https://example.com/">link</a></p>');
+			expect(sanitizeHtml('<p><span style="padding: 40px 0">x</span><b style="padding-top: 10%">y</b></p>')).toBe('<p><span style="padding-right: 0px; padding-left: 0px;">x</span><b>y</b></p>');
+			expect(sanitizeHtml('<p><span style="padding: 2px 4px">chip</span></p>')).toBe('<p><span style="padding: 2px 4px">chip</span></p>');
+			expect(sanitizeHtml('<td style="padding: 40px">cell</td>')).toBe('cell');
+			expect(sanitizeHtml('<table><tbody><tr><td style="padding: 40px">cell</td></tr></tbody></table>')).toContain('padding: 40px');
+		});
+
+		it('a width or height attribute is within a page too: width="100000" was a table that wide', () => {
+			expect(sanitizeHtml('<table width="100000"><tbody><tr><td width="50%" height="99999">x</td></tr></tbody></table>')).toBe('<table><tbody><tr><td width="50%">x</td></tr></tbody></table>');
+			expect(sanitizeHtml('<img src="https://x.test/a.png" width="300" height="200">')).toBe('<img src="https://x.test/a.png" width="300" height="200">');
+			expect(sanitizeHtml('<img src="https://x.test/a.png" width="99999" height="1000%">')).toBe('<img src="https://x.test/a.png">');
+			expect(sanitizeHtml('<table width="100%"><tbody><tr><td>x</td></tr></tbody></table>')).toContain('width="100%"');
+		});
+
+		it('an underline is no thicker than a border may be', () => {
+			expect(sanitizeHtml('<u style="text-decoration-thickness: 5000px">x</u>')).toBe('<u>x</u>');
+			expect(sanitizeHtml('<u style="text-decoration-thickness: 2px">x</u>')).toBe('<u style="text-decoration-thickness: 2px">x</u>');
+		});
+	});
+
+	describe('what a paste loses on the way in', () => {
+		const pasted = (html: string) => {
+			const div = document.createElement('div');
+			div.innerHTML = html;
+			return div;
+		};
+		const count = (text: string) => text.replace(/\s/g, '').length;
+
+		it('reads nothing from a paste with neither hidden text nor a text box', () => {
+			expect(pasteNotes('<p>plain <b>words</b></p>')).toBeNull();
+			expect(pasteNotes('')).toBeNull();
+		});
+
+		it('reads which of a paste\'s words Word hid, and what its text boxes held', () => {
+			const notes = pasteNotes('<p>a<span style="mso-hide:all">SECRET</span>b</p><p>note <textarea>margins clear</textarea></p>')!;
+			expect(notes.pieces.filter((piece) => piece.hidden).map((piece) => piece.text)).toEqual(['SECRET']);
+			expect(notes.pieces.map((piece) => piece.text).join('')).toBe('aSECRETbnote ');
+			expect(notes.textareas).toEqual(['margins clear']);
+		});
+
+		it('reads only what lies between the marks a program put around the part it copied', () => {
+			const notes = pasteNotes('<html><head><title>Doc</title><style>p{color:red}</style></head><body>before<!--StartFragment--><p>Shown <span style="mso-hide:all">hidden</span>text</p><!--EndFragment-->after</body></html>')!;
+			expect(notes.pieces.map((piece) => piece.text).join('')).toBe('Shown hiddentext');
+		});
+
+		it('takes the hidden words out of what the browser pasted as plain text', () => {
+			const notes = pasteNotes('<p>a<span style="mso-hide:all">SECRET</span>b</p>')!;
+			const root = pasted('<p>before </p><p>aSECRETb</p><p>after</p>');
+			expect(removeWordHidden(root, count('before'), count('beforeaSECRETb'), notes)).toBe(true);
+			expect(root.innerHTML).toBe('<p>before </p><p>ab</p><p>after</p>');
+		});
+
+		it('leaves one space where the hidden words stood between two, and takes a paragraph hidden whole', () => {
+			const notes = pasteNotes('<p>one <span style="mso-hide:all">HID ONE</span> two</p><p style="mso-hide:all">whole para</p><p>three</p>')!;
+			const root = pasted('<p>one HID ONE two</p><p>whole para</p><p>three</p>');
+			expect(removeWordHidden(root, 0, count('oneHIDONEtwowholeparathree'), notes, () => true)).toBe(true);
+			expect(root.innerHTML).toBe('<p>one two</p><p>three</p>');
+			// Without leave to take elements out, the emptied one stays.
+			const kept = pasted('<p>one HID ONE two</p><p>whole para</p><p>three</p>');
+			removeWordHidden(kept, 0, count('oneHIDONEtwowholeparathree'), notes);
+			expect(kept.innerHTML).toBe('<p>one two</p><p></p><p>three</p>');
+		});
+
+		it('does nothing where what was pasted is not the paste\'s text, character for character', () => {
+			const notes = pasteNotes('<p>a<span style="mso-hide:all">SECRET</span>b</p>')!;
+			for (const html of ['<p>aSECRETb!</p>', '<p>aSECRET</p>', '<p>SECRET</p>', '<p>ab</p>']) {
+				const root = pasted(html);
+				expect(removeWordHidden(root, 0, count(root.textContent!), notes), html).toBe(false);
+				expect(root.innerHTML, html).toBe(html);
+			}
+		});
+
+		it('finds the paste whether the browser brought along what was not displayed or left it out', () => {
+			const notes = pasteNotes('<p>a<span style="display:none">gone</span><span style="mso-hide:all">SECRET</span>b</p>')!;
+			const without = pasted('<p>aSECRETb</p>');
+			expect(removeWordHidden(without, 0, 8, notes)).toBe(true);
+			expect(without.innerHTML).toBe('<p>ab</p>');
+			const along = pasted('<p>a<span style="display:none">gone</span>SECRETb</p>');
+			expect(removeWordHidden(along, 0, 12, notes)).toBe(true);
+			expect(along.innerHTML).toBe('<p>a<span style="display:none">gone</span>b</p>');
+		});
+
+		it('leaves a caret that stood after the hidden words where it was', () => {
+			const notes = pasteNotes('<span style="mso-hide:all">all hidden</span>')!;
+			const root = pasted('<p>xall hidden</p>');
+			document.body.appendChild(root);
+			const text = root.querySelector('p')!.firstChild as Text;
+			const range = document.createRange();
+			range.setStart(text, text.data.length);
+			range.collapse(true);
+			expect(removeWordHidden(root, 1, 10, notes)).toBe(true);
+			expect(text.data).toBe('x');
+			expect(range.startContainer).toBe(text);
+			expect(range.startOffset).toBe(1);
+			root.remove();
+		});
 	});
 });
