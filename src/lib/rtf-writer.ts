@@ -2,8 +2,8 @@
  * HTML to RTF converter
  *
  * Walks a contenteditable DOM tree and produces a valid RTF 1.x string.
- * Supports: a document font and body size (Arial 12 pt by default, set with
- * RtfWriteOptions), bold, italic, underline, strikethrough, font sizes, headings
+ * Supports: a document font and body size (DEFAULT_FONT_FAMILY at DEFAULT_FONT_SIZE
+ * points by default, set with RtfWriteOptions), bold, italic, underline, strikethrough, font sizes, headings
  * (h1–h6), foreground colors (\cf), paragraphs with their alignment and indents,
  * bullet/numbered lists and lists inside them, blockquotes, code blocks,
  * hyperlinks, tables with merged cells, images (embedded as \pict picture groups
@@ -28,7 +28,7 @@ interface RGB {
 export interface RtfWriteOptions {
 	/**
 	 * Font for the whole document: body text, headings, lists and tables.
-	 * Code keeps a monospace font. Default: Arial.
+	 * Code keeps a monospace font. Default: DEFAULT_FONT_FAMILY.
 	 */
 	fontFamily?: string;
 	/**
@@ -37,8 +37,13 @@ export interface RtfWriteOptions {
 	fontSize?: number;
 }
 
-/** Font used when no fontFamily is given. */
-export const DEFAULT_FONT_FAMILY = 'Arial';
+/**
+ * Font used when no fontFamily is given: what the editor and the viewer show, and what the RTF
+ * names. This is the one place the default is named; the size estimate, the components and the
+ * tests follow it. An application that wants another font does not change this: it passes
+ * `fontFamily` to the editor, to the viewer and to htmlToRtf.
+ */
+export const DEFAULT_FONT_FAMILY = 'Segoe UI';
 
 /** Body text size, in points, used when no fontSize is given. */
 export const DEFAULT_FONT_SIZE = 12;
@@ -497,10 +502,10 @@ function base64ByteLength(base64: string): number {
 }
 
 /**
- * Bytes of RTF header, font table and colour table that precede the body, with
- * the default font. Another font name changes it by the difference in length.
+ * Bytes of RTF header, font table and colour table that precede the body, without
+ * the name of the document font, which is counted by its own length.
  */
-const RTF_PREAMBLE_BYTES = 165;
+const RTF_PREAMBLE_BYTES = 160;
 
 /** Control words wrapping one \pict group. */
 const PICTURE_OVERHEAD_BYTES = 80;
@@ -597,7 +602,7 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 	// \fsN is counted with two digits everywhere; the largest size written is a first-level
 	// heading's, twice the body.
 	const sizeDigits = Math.max(0, String(bodyHalfPoints(options.fontSize) * 2).length - 2);
-	let total = RTF_PREAMBLE_BYTES + Math.max(0, fontName.length - DEFAULT_FONT_FAMILY.length) + fontClass + sizeDigits;
+	let total = RTF_PREAMBLE_BYTES + fontName.length + fontClass + sizeDigits;
 
 	for (const img of Array.from(editorEl.querySelectorAll('img'))) {
 		const src = img.getAttribute('src') || '';
@@ -751,7 +756,8 @@ export function estimateRtfBytes(editorEl: HTMLElement, options: RtfWriteOptions
 		if (el.style?.color) total += 14 + 25;
 		// (A <font> with a color attribute and a color style names two colors, and both are in the table.)
 		if (tag === 'font' && el.hasAttribute('color')) total += el.style?.color ? 25 : 14 + 25;
-		if (el.style?.fontSize) total += 14 + sizeDigits; // "\fsNNN " on and off, for sizes up to 499 pt
+		// "\fsNNN " on and off, for sizes up to 499 pt
+		if (el.style?.fontSize || (tag === 'font' && el.hasAttribute('size'))) total += 14 + sizeDigits;
 	}
 
 	return total;
@@ -1936,10 +1942,19 @@ function colorIndexOf(el: HTMLElement, ctx: WalkContext): number | null {
 	return ctx.colorIndex.get(colorKey(c)) ?? null;
 }
 
+/**
+ * The sizes of <font size="1"> to <font size="7">, in half-points, as browsers show them
+ * (10, 13, 16, 18, 24, 32 and 48 px). Older pages and mail carry their sizes this way.
+ */
+const FONT_SIZE_ATTRIBUTE = [15, 20, 24, 27, 36, 48, 72];
+
 /** The element's own font size in half-points, or null when it sets none. */
 function sizeOf(el: HTMLElement): number | null {
 	const fs = el.style?.fontSize;
-	if (!fs) return null;
+	if (!fs) {
+		const step = el.tagName === 'FONT' ? /^\s*([1-7])\s*$/.exec(el.getAttribute('size') ?? '') : null;
+		return step ? FONT_SIZE_ATTRIBUTE[Number(step[1]) - 1] : null;
+	}
 	const ptMatch = fs.match(/([\d.]+)\s*pt/);
 	if (ptMatch) return Math.round(parseFloat(ptMatch[1]) * 2);
 	const pxMatch = fs.match(/([\d.]+)\s*px/);

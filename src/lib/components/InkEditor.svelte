@@ -26,9 +26,13 @@
 	 *   maxRtfBytes   — The largest RTF file Import reads. Default: 52428800 (50 MB);
 	 *                   0 reads any size.
 	 *   fontFamily    — Font for the document, both on screen and in the RTF.
-	 *                   Default: 'Arial'.
+	 *                   Default: DEFAULT_FONT_FAMILY (rtf-writer.ts).
 	 *   fontSize      — Body text size in points, both on screen and in the RTF.
 	 *                   Headings scale from it. Default: 12.
+	 *   fontSizes     — The sizes, in points, the toolbar's size list offers for the
+	 *                   selected text. The body size is always among them. An empty
+	 *                   list takes the size list off the toolbar.
+	 *                   Default: 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36.
 	 *
 	 * Events (callback props):
 	 *   onchange      — Fires on content change with
@@ -103,10 +107,14 @@
 		maxRtfBytes?: number;
 		fontFamily?: string;
 		fontSize?: number;
+		fontSizes?: number[];
 		onchange?: (payload: ChangePayload) => void;
 		onsave?: (payload: { html: string }) => void;
 		onimport?: (payload: { html: string }) => void;
 	}
+
+	/** The sizes, in points, the toolbar's size list offers unless `fontSizes` says otherwise. */
+	const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36];
 
 	// ── Props ──
 	let {
@@ -124,6 +132,7 @@
 		maxRtfBytes = DEFAULT_MAX_RTF_BYTES,
 		fontFamily = DEFAULT_FONT_FAMILY,
 		fontSize = DEFAULT_FONT_SIZE,
+		fontSizes = DEFAULT_FONT_SIZES,
 		onchange,
 		onsave,
 		onimport
@@ -142,6 +151,8 @@
 	let charCount: number = $state(0);
 	let lastSaved: string = $state('');
 	let currentBlock: string = $state('p');
+	/** The size of the text at the caret, in points, for the toolbar. */
+	let currentFontSize: number | null = $state(null);
 
 	let formatState = $state({
 		bold: false,
@@ -297,6 +308,179 @@
 		}
 	}
 
+	// ── Font size ──
+	// The size of the selected text, or of what is typed next, is set with the browser's own
+	// command: it wraps exactly the selection, takes a size already there out of it, and its
+	// steps can be undone with everything else. But it knows only seven sizes and writes them as
+	// <font size="1"> to <font size="7">. So it is asked for size 7, which nothing else in the
+	// editor makes, and each element it marked that way is then given the size meant, in points
+	// (<font style="font-size:14pt">), which is what the RTF writer reads. Only attributes are
+	// changed, never the elements, so the browser's undo still finds what it made.
+	//
+	// Undo puts back what the browser itself recorded, which is right: the element goes, or gets
+	// back the size it had. Redo is not: the browser does its own step again, the mark for size 7
+	// and nothing after it, and the text came back at 36 pt. So each change of size is remembered
+	// here with the size every element was given, and after a redo the elements that are marked
+	// again are given theirs again.
+	//
+	// And undo is only right where the browser recorded something to put back. It records the
+	// size it takes off an element, not the one given here afterwards. So a <font> element is
+	// never left without a size of its own: where the text is to have the size of the text around
+	// it, the size stated is 1em, which is that size. The writer reads 1em as no size.
+	const SIZE_MARK = '7';
+	/** The size that is the size of the text around: what "no size of its own" is written as. */
+	const SIZE_AROUND = '1em';
+	/** One change of size: the elements it sized, each with the font-size it was given. */
+	type SizeStep = Map<HTMLElement, string>;
+	/** The changes of size made, in order; those from `sizeStepsApplied` on were undone and can be redone. */
+	let sizeSteps: SizeStep[] = [];
+	let sizeStepsApplied = 0;
+	/** Every element this editor has given a size: a mark on one of these is the browser redoing a step. */
+	const sizedHere = new WeakSet<Element>();
+	/** The size chosen and not yet given to an element: a caret has no text to carry it until something is typed. */
+	let pendingSize: number | null = null;
+	/** Elements that were marked size 7 before the command (pasted that way): not ours to change. */
+	let markedBefore = new Set<Element>();
+
+	/** The size of an element's text as the screen shows it, in points to the half-point; null if unknown. */
+	function shownSize(el: Element): number | null {
+		const px = parseFloat(getComputedStyle(el).fontSize);
+		return Number.isFinite(px) && px > 0 ? Math.round(px * 0.75 * 2) / 2 : null;
+	}
+
+	/** Take the mark off an element and state the size it is to have. */
+	function sizeElement(font: HTMLElement, fontSize: string): void {
+		font.removeAttribute('size');
+		font.style.fontSize = fontSize;
+	}
+
+	const markedElements = (): HTMLElement[] =>
+		editorEl ? Array.from(editorEl.querySelectorAll<HTMLElement>(`font[size="${SIZE_MARK}"]`)) : [];
+
+	/** Give the elements the command marked the size that was chosen, and remember the step. */
+	function applyPendingSize(): void {
+		if (!editorEl || pendingSize === null) return;
+		const step: SizeStep = new Map();
+		for (const font of markedElements()) {
+			if (markedBefore.has(font)) continue;
+			sizeElement(font, SIZE_AROUND);
+			// Where the text around it has that size already (body text set back to the body
+			// size, a heading to the heading's), it stays at the size around it: the text then
+			// follows the document's size, as text that was never sized does.
+			if (shownSize(font) !== pendingSize) sizeElement(font, `${pendingSize}pt`);
+			step.set(font, font.style.fontSize);
+			sizedHere.add(font);
+		}
+		if (step.size === 0) return;
+		// A new change: what was undone before it can no longer be redone.
+		sizeSteps = [...sizeSteps.slice(0, sizeStepsApplied), step];
+		sizeStepsApplied = sizeSteps.length;
+	}
+
+	/** Whether a change of size is in the document as it was made: every element there, with its size. */
+	function stepStands(step: SizeStep | undefined): boolean {
+		if (!step) return false;
+		for (const [font, fontSize] of step) {
+			if (!font.isConnected || font.getAttribute('size') === SIZE_MARK || font.style.fontSize !== fontSize) return false;
+		}
+		return true;
+	}
+
+	/** After an undo or a redo: follow which changes of size are in the document, and finish a redone one. */
+	function afterHistory(): void {
+		const next = sizeSteps[sizeStepsApplied];
+		const marked = markedElements().filter((font) => sizedHere.has(font));
+		if (marked.length > 0) {
+			// The browser redid its part of a change of size. (A mark with no step to go with it
+			// should not happen; it is then taken off, and the text has the size around it,
+			// which is better than 36 pt.)
+			for (const font of marked) sizeElement(font, next?.get(font) ?? SIZE_AROUND);
+			if (next) sizeStepsApplied++;
+		} else if (stepStands(next)) {
+			// Redone, and nothing was marked: the step only made elements, which came back as they were.
+			sizeStepsApplied++;
+		} else if (sizeStepsApplied > 0 && !stepStands(sizeSteps[sizeStepsApplied - 1])) {
+			sizeStepsApplied--;
+		}
+	}
+
+	/** Whether all the text selected has this size already. */
+	function selectionHasSize(points: number): boolean {
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
+		const range = selection.getRangeAt(0);
+		const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT);
+		let texts = 0;
+		for (let node = walker.currentNode.nodeType === Node.TEXT_NODE ? walker.currentNode : walker.nextNode(); node; node = walker.nextNode()) {
+			if (!range.intersectsNode(node) || !(node.textContent || '').trim() || !node.parentElement) continue;
+			if (shownSize(node.parentElement) !== points) return false;
+			texts++;
+		}
+		return texts > 0;
+	}
+
+	/**
+	 * Set the size, in points, of the selected text; with nothing selected, of what is typed next.
+	 * Also what the toolbar's size list calls.
+	 */
+	export function setFontSize(points: number): void {
+		if (readonly || !editorEl) return;
+		if (typeof points !== 'number' || !Number.isFinite(points) || points <= 0) return;
+		restoreSelection();
+		editorEl.focus();
+		// The document changes outside an input event: earlier indent steps no longer undo.
+		indentUndo = [];
+		const size = normalizeFontSize(points);
+		// Nothing to change: no step is made that would undo to the same thing.
+		if (selectionHasSize(size)) {
+			updateToolbarState();
+			return;
+		}
+		markedBefore = new Set(markedElements());
+		// The command may use a <font> element that is there already (one pasted with a color),
+		// and undo then puts back only a size the command itself took off it: see SIZE_AROUND.
+		for (const font of Array.from(editorEl.querySelectorAll<HTMLElement>('font'))) {
+			if (!font.style.fontSize && !markedBefore.has(font)) font.style.fontSize = SIZE_AROUND;
+		}
+		pendingSize = size;
+		document.execCommand('fontSize', false, SIZE_MARK);
+		applyPendingSize();
+		// With text selected the size is on it now. At a caret it waits for the typing.
+		const selection = window.getSelection();
+		if (selection && !selection.isCollapsed) pendingSize = null;
+		updateToolbarState();
+		fireChange();
+		if (autosave) scheduleAutoSave();
+	}
+
+	/** The size of the text at the selection, for the toolbar: null where it starts and ends in different sizes. */
+	function sizeAtSelection(): number | null {
+		if (pendingSize !== null) return pendingSize;
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0) return null;
+		const range = selection.getRangeAt(0);
+		if (!editorEl.contains(range.startContainer)) return null;
+		const holder = (node: Node, offset: number, atEnd: boolean): Element | null => {
+			if (node.nodeType === Node.ELEMENT_NODE) {
+				const child = node.childNodes[atEnd ? offset - 1 : offset];
+				return child?.nodeType === Node.ELEMENT_NODE ? (child as Element) : (node as Element);
+			}
+			return node.parentElement;
+		};
+		const start = holder(range.startContainer, range.startOffset, false);
+		const first = start ? shownSize(start) : null;
+		if (range.collapsed) return first;
+		const end = holder(range.endContainer, range.endOffset, true);
+		return end && shownSize(end) === first ? first : null;
+	}
+
+	/** The sizes the list offers: those asked for, and always the body size. */
+	const sizeChoices = $derived.by(() => {
+		const sizes = fontSizes.map((size) => normalizeFontSize(size));
+		if (sizes.length === 0) return sizes;
+		return Array.from(new Set([...sizes, screenFontSize])).sort((a, b) => a - b);
+	});
+
 	// ── Exec command ──
 	function exec(cmd: string, value: string | null = null): void {
 		restoreSelection();
@@ -318,6 +502,7 @@
 		}
 		if (cmd === 'undo' && undoIndent()) return;
 		document.execCommand(cmd, false, value ?? undefined);
+		if (cmd === 'undo' || cmd === 'redo') afterHistory();
 		updateToolbarState();
 	}
 
@@ -896,6 +1081,7 @@
 		// Snapshot the selection so exec/setBlock can restore it even if focus
 		// temporarily moved to a toolbar element (e.g. colour picker, select).
 		saveSelection();
+		currentFontSize = sizeAtSelection();
 
 		formatState = {
 			bold: document.queryCommandState('bold'),
@@ -910,6 +1096,15 @@
 		currentBlock = map[normalized] || 'p';
 
 		updateCounts();
+	}
+
+	/**
+	 * A click or a key in the text. A size chosen at a caret and not yet typed in is given up: the
+	 * browser drops it when the caret moves, and the toolbar must not go on showing it.
+	 */
+	function caretMoved(): void {
+		pendingSize = null;
+		updateToolbarState();
 	}
 
 	function updateCounts(): void {
@@ -953,13 +1148,23 @@
 	}
 
 	// ── Input handler ──
-	function handleInput(): void {
+	function handleInput(e?: Event): void {
 		placeCopySourceBox();
 		if (pastedOver) {
 			tidyPasted(pastedOver);
 			pastedOver = null;
 		}
 		indentUndo = [];
+		const kind = (e as InputEvent | undefined)?.inputType ?? '';
+		if (kind === 'historyUndo' || kind === 'historyRedo') {
+			afterHistory();
+		} else {
+			// An edit: what was undone can no longer be redone.
+			sizeSteps = sizeSteps.slice(0, sizeStepsApplied);
+			// What was typed at a caret after a size was chosen came in marked: give it the size.
+			applyPendingSize();
+		}
+		pendingSize = null;
 		updateToolbarState();
 		// Typing means the user is editing text, not the picture. Dropping the
 		// selection here keeps Backspace editing that text instead of deleting a
@@ -1682,6 +1887,9 @@
 			onblock={setBlock}
 			oninsertlink={openLinkModal}
 			oninsertimage={openImageModal}
+			fontSize={currentFontSize}
+			fontSizes={sizeChoices}
+			onfontsize={setFontSize}
 			copyingFormat={copyFormat !== 'off'}
 			oncopyformat={toggleCopyFormat}
 		/>
@@ -1712,8 +1920,8 @@
 			spellcheck="true"
 			bind:this={editorEl}
 			oninput={handleInput}
-			onmouseup={updateToolbarState}
-			onkeyup={updateToolbarState}
+			onmouseup={caretMoved}
+			onkeyup={caretMoved}
 			onkeydown={handleKeydown}
 			onmousedown={() => (tabLeavesEditor = false)}
 			onblur={() => (tabLeavesEditor = false)}
@@ -1851,7 +2059,7 @@
 		border-radius: var(--radius, 8px);
 		box-shadow: var(--shadow-md, 0 4px 12px rgba(44, 37, 32, 0.08));
 		outline: none;
-		font-family: var(--ink-font-family, Arial, sans-serif);
+		font-family: var(--ink-font-family, sans-serif);
 		font-size: var(--ink-font-size, 12pt);
 		line-height: 1.75;
 		color: var(--text, #2c2520);

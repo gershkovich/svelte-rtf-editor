@@ -31,15 +31,25 @@ function fontTable(rtf: string): string {
 }
 
 describe('htmlToRtf document font', () => {
-	it('defaults to Arial 12 pt', () => {
-		expect(DEFAULT_FONT_FAMILY).toBe('Arial');
+	it('the default is Segoe UI 12 pt', () => {
+		// The one test that names the default. Every other test follows DEFAULT_FONT_FAMILY, so
+		// changing the font again is this line and the constant in rtf-writer.ts.
+		expect(DEFAULT_FONT_FAMILY).toBe('Segoe UI');
 		expect(DEFAULT_FONT_SIZE).toBe(12);
+	});
 
+	it('writes the default font and size when none is given', () => {
 		const rtf = htmlToRtf(htmlEl('<p>Benign prostatic tissue.</p>'));
+		expect(fontTable(rtf)).toBe(`{\\fonttbl{\\f0\\fswiss\\fcharset0 ${DEFAULT_FONT_FAMILY};}{\\f1\\fmodern\\fcharset0 Courier New;}}`);
+		expect(rtf).toContain(`\\pard\\f0\\fs${DEFAULT_FONT_SIZE * 2} `);
+		// No other font is named anywhere in the document.
+		for (const other of ['Arial', 'Helvetica', 'Georgia']) expect(rtf).not.toContain(other);
+	});
+
+	it('a document written before the default changed is still written in the font it is given', () => {
+		const rtf = htmlToRtf(htmlEl('<p>Text</p>'), { fontFamily: 'Arial' });
 		expect(fontTable(rtf)).toContain('{\\f0\\fswiss\\fcharset0 Arial;}');
-		expect(rtf).toContain('\\pard\\f0\\fs24 ');
-		expect(rtf).not.toContain('Helvetica');
-		expect(rtf).not.toContain('Georgia');
+		expect(rtf).not.toContain(DEFAULT_FONT_FAMILY);
 	});
 
 	it('writes the font and size it is given', () => {
@@ -56,7 +66,7 @@ describe('htmlToRtf document font', () => {
 	it('falls back to the default for a missing or nonsense font and size', () => {
 		for (const options of [{ fontFamily: '', fontSize: 0 }, { fontFamily: '  ', fontSize: NaN }, { fontSize: -4 }]) {
 			const rtf = htmlToRtf(htmlEl('<p>Text</p>'), options);
-			expect(fontTable(rtf)).toContain(' Arial;}');
+			expect(fontTable(rtf)).toContain(` ${DEFAULT_FONT_FAMILY};}`);
 			expect(rtf).toContain('\\pard\\f0\\fs24 ');
 		}
 	});
@@ -100,7 +110,8 @@ describe('cssFontFamily', () => {
 		expect(cssFontFamily('Arial')).toBe('"Arial", sans-serif');
 		expect(cssFontFamily('Times New Roman')).toBe('"Times New Roman", serif');
 		expect(cssFontFamily('Courier New')).toBe('"Courier New", monospace');
-		expect(cssFontFamily(undefined)).toBe('"Arial", sans-serif');
+		expect(cssFontFamily(undefined)).toBe(`"${DEFAULT_FONT_FAMILY}", sans-serif`);
+		expect(cssFontFamily('Segoe UI')).toBe('"Segoe UI", sans-serif');
 	});
 });
 
@@ -126,7 +137,7 @@ function mountInto<P extends Record<string, unknown>>(Comp: unknown, props: P) {
 }
 
 describe('InkEditor font', () => {
-	it('shows Arial 12 pt and writes it to the RTF by default', () => {
+	it('shows the default font at 12 pt and writes it to the RTF', () => {
 		const editor = mountInto(InkEditor, {
 			content: '<p>Text</p>',
 			autosave: false,
@@ -134,11 +145,11 @@ describe('InkEditor font', () => {
 		}) as unknown as { getRTF: () => string };
 
 		const root = host!.querySelector('.ink-editor') as HTMLElement;
-		expect(root.style.getPropertyValue('--ink-font-family')).toBe('"Arial", sans-serif');
+		expect(root.style.getPropertyValue('--ink-font-family')).toBe(`"${DEFAULT_FONT_FAMILY}", sans-serif`);
 		expect(root.style.getPropertyValue('--ink-font-size')).toBe('12pt');
 
 		const rtf = editor.getRTF();
-		expect(rtf).toContain(' Arial;}');
+		expect(rtf).toContain(` ${DEFAULT_FONT_FAMILY};}`);
 		expect(rtf).toContain('\\pard\\f0\\fs24 ');
 	});
 
@@ -163,10 +174,10 @@ describe('InkEditor font', () => {
 });
 
 describe('RtfViewer font', () => {
-	it('shows Arial 12 pt by default', () => {
+	it('shows the default font at 12 pt', () => {
 		mountInto(RtfViewer, { content: '{\\rtf1\\ansi Text}' });
 		const viewer = host!.querySelector('.rtf-viewer') as HTMLElement;
-		expect(viewer.style.fontFamily).toContain('Arial');
+		expect(viewer.style.fontFamily).toContain(DEFAULT_FONT_FAMILY);
 		expect(viewer.style.fontSize).toBe('12pt');
 	});
 
