@@ -1,5 +1,278 @@
 # svelte-rtf-editor
 
+## 1.10.0
+
+### Minor Changes
+
+- 1467371: The editor's toolbar has a font size list. A size chosen there is given to the selected text, or,
+  with nothing selected, to what is typed next. It is written to the RTF as `\fsN` and read back.
+
+  - `fontSizes` sets the sizes offered (default 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28 and 36 pt;
+    the body size is always among them; `[]` leaves the list out). `editor.setFontSize(points)` does
+    the same from a host's own toolbar.
+  - The list shows the size at the caret. Text set back to the size of the text around it follows
+    `fontSize` again.
+  - A change of size is undone and redone like any other edit.
+  - `htmlToRtf` reads `<font size="1">` to `<font size="7">` as the sizes a browser shows them at.
+    Pasted from an older page or from mail, such text was shown at its size and written at the body
+    size.
+
+- 888e965: Fixes for what a review of 1.9.0 against outside readers and outside input found (#21, items 1 to 29;
+  item 30 is the image cap). Most are places where text changed meaning, was lost, or was shown when it
+  should not be. Three things change for documents that already work, and are listed first.
+
+  **Changes to existing behaviour**
+
+  - **A heading must be bold as well as large, at every body size.** At 12 pt, size alone used to make
+    a heading, so a report set in 14 pt throughout was read as nothing but headings and saved all bold.
+    Large text that is not bold is now a paragraph at that size. Headings this library wrote are bold
+    and are read as before.
+  - **Table cells are written `…\cell}` with no `\par`, and a table's last row carries `\lastrow`.**
+    With `\par}\cell`, Apple's reader (TextEdit, Pages, Mail) showed an empty second paragraph in every
+    cell. RTF written by earlier versions is read as before.
+  - **Alignment is read as RTF defines it: it holds until `\pard`.** Word and TextEdit state `\qc` once
+    for a run of paragraphs or cells; only the first used to be centered.
+
+  **Reading RTF**
+
+  - Text a tracked change deleted (`\deleted`) is not shown. Hidden text (`\v`) and index and contents
+    entries (`\xe`, `\tc`) are not shown, and neither is a footnote that sits in hidden or deleted text.
+  - Text in the Symbol font is read as the characters it shows (`m` is μ, so "5 mg" is no longer read
+    for "5 μg"), including Word's U+F0xx form and `SYMBOL` fields.
+  - A footnote no longer splits its sentence or takes a table cell out of its table: notes go to the
+    end, numbered. Text boxes, pictures with text wrapped around them and the shown result of an
+    embedded object are read; they were dropped.
+  - `\binN` picture data is stepped over. A brace among its bytes used to end the document.
+  - U+2028 (TextEdit's Shift-Return) is a line break and U+2029 a paragraph mark; a tab character in
+    the file is a tab. Other control characters in the file are dropped, whether written as themselves
+    or as `\'xx` or `\uN`.
+  - `\lastrow` ends a table, so two tables in a row are two. A bottom border with a width or a color
+    is a drawn line, not a header cell.
+  - A paragraph of two pictures keeps both through a save. A picture resized in Word (`\picscalex`) is
+    shown at that size. A caption with `$` in it is no longer corrupted.
+  - A byte-order mark or blank lines before `{\rtf1` no longer lose the color and font tables.
+  - A rule (`<hr>`) is read as one when a space stands before its line of dashes; a pasted document
+    with one used to need two saves to settle.
+  - A long run of spaces, a paragraph of very many tabs and a wide row of merged cells no longer take
+    seconds to read. A file of more than five million parts is refused with a `RangeError`
+    ("too complex to show") instead of exhausting memory.
+
+  **Writing RTF**
+
+  - Bold, italic, underline, strikethrough, superscript and subscript set by a style are written, and
+    `<b style="font-weight:normal">` (the wrapper of a Google Docs paste) is not bold. `color` on a
+    heading, a list item and a table cell is written.
+  - What the screen does not show is not written: `<style>`, `<script>`, `<template>`, `hidden`,
+    `display:none`, `visibility:hidden`, `mso-hide:all`.
+  - A table's `<caption>` is written, as a centered paragraph before the table. Text typed in a figure
+    beside its picture, and a second picture in a figure, are written.
+  - `<dl>`, `<section>`, `<article>`, `<address>`, `<details>`, `<center>` and the other blocks of a
+    pasted page each end their line; their text used to be run together.
+  - Alignment on a `<div>` or `<center>` around paragraphs is passed to them. A new line in
+    `white-space: pre-wrap` text is a line break. Column widths in px, pt, `width="120"` and `<col>`
+    are used.
+  - Control characters never reach the RTF (0x0B and 0x1C frame an HL7 message). A picture that cannot
+    be embedded and has no description is written as `[Image: image]`, not as its data URL.
+  - Loose text after a table starts a plain paragraph. Text typed before a pasted wrapper (the `<b>`
+    around a Google Docs paste, a `<span>` around a list) ends its line before the wrapper's first
+    block; it used to be run into it ("Diagnosis:Benign nevus").
+
+  **Size estimate**
+
+  - `estimateRtfBytes` takes the options `htmlToRtf` does (`fontFamily`, `fontSize`), and is no longer
+    below the real size for paragraphs in a quotation, lists nested deeper than one level, or many
+    distinct colors.
+
+  **Markdown**
+
+  - A list written straight inside a list is kept. `<sup>`, `<sub>` and `<del>` are kept. Loose text
+    before a block, and each `<div>`, is its own paragraph. A `<br>` is a hard break. A quotation of
+    several paragraphs stays one quotation. `**bold **` with the space inside is written so that it
+    renders. `- ` and `1. ` at the start of a list item, and `&copy;` typed as text, are escaped. A
+    table's caption, text in a figure, and the blocks of a pasted page are written; hidden elements
+    are not.
+  - With the rule that code stays code (the changeset beside this one), three things are written
+    differently from what that changeset says. A code block inside a heading is a code span on the
+    heading's line, and inside bold text or a link it is the block alone, with no marks around it.
+    Underline around a quotation, a list or a table is written on the text inside, not dropped. An
+    empty line in a paragraph is a `<br>` at the end of the line before it, so no tag stands alone
+    on a line; `<ins>`, `<sup>` and `<sub>` go around the text itself as `<u>` does.
+  - Found by rendering the export with an outside Markdown reader. In each of these a line of the
+    document could come out as HTML in a viewer that allows it; the first three were so in 1.9.0.
+    - Code right after code is one code span. Two spans back to back ran their backticks together
+      (`` `a``b` ``); RTF makes that of code text that changes color.
+    - A `|` is escaped in all text, not only in a table cell. Two typed lines such as
+      `Stain | Result` and `--- | ---` were a table to a viewer that knows tables, which dropped
+      text that did not fit its columns and cut a code span at its `|`.
+    - A numbered list starts no lower than 0 and ends no higher than 999999999. `start="-3"` was
+      written as `-3.`, which is no list marker.
+    - A line that holds white space alone (a no-break space, a tab) is written as `&nbsp;`, so the
+      `<br>` after it is not first on its line. A tab at the start of a line is written as `&#9;`:
+      as a tab it made the line a code block.
+
+- c860ea5: Fixes from a review of the editor in a real browser, and two defaults that change.
+
+  **Changed defaults**
+
+  - `autosave` is now **off** unless asked for. With it on by default and one `storageKey` for
+    every document, a draft left in the browser was shown in place of the `content` given: the
+    last report edited, where the next one should be. To keep auto-save, pass `autosave` and give
+    each document its own `storageKey`.
+  - HTML from outside is made safe before it is shown: the `content` prop, `setHTML()`, a draft
+    restored from `localStorage` and what a paste brings. Scripts, event handlers, `<iframe>`,
+    `<svg>`, `javascript:` links, `class`, and styles such as `position: fixed` are taken out.
+    `sanitizeHtml` is exported. If you relied on any of those surviving `setHTML`, they no longer
+    do.
+    - Sizes that would put an element outside the page go too: a margin below zero, a margin,
+      padding or width over 2200 px, a width or height on anything but a picture, a table, its cells
+      or a rule. The editing area clips what it holds, and a table wider than it scrolls inside it.
+    - `<button>`, `<textarea>`, `<select>`, `<input>` and `<math>` are taken out and the words they
+      showed are kept as text. A formula with a fraction, a power or a root is written `[formula]`.
+      Words that were hidden are not kept, and elements side by side leave their words a space
+      apart.
+    - A document's own `id`s are kept, unless the page already uses that `id` outside an editor or
+      it names something on `document` or `window`. A link keeps no `id`.
+    - Text Word marked hidden (`mso-hide: all`) is hidden on screen as it is left out of the RTF,
+      and is not pasted.
+    - Words are not put out of sight: a first line that starts further left than its paragraph is
+      moved in, and a text size under half a pixel, are taken out. A hanging indent stays as written.
+    - A list read from RTF keeps a margin below zero of up to half an inch, which is how it carries
+      an indent smaller than a list's own. It is the one margin below zero that is kept.
+    - A style attribute that is all read and kept stays exactly as it was written
+      (`border: 1px solid black` is not rewritten).
+  - `onchange`'s `html`, `text` and `estimatedRtfBytes` are the document as it is when the handler
+    first reads them, not a copy made when the change happened. Read them in the handler; a
+    payload kept and read after a later edit gives the later document.
+  - The empty document is `<p><br></p>`, where it was `<p></p>`, and an empty `<p>` in what is
+    given gets its line break. It still counts no words and no characters.
+
+  **Fixed**
+
+  - The link dialog did not take the keyboard: after Ctrl+K the address was typed into the
+    document, over the selected text. And Enter in its address field made the link and then
+    replaced the linked text with a new line. Both dialogs now take focus, keep Tab inside, give
+    focus back on Escape, and are announced as dialogs.
+  - In a new document the first words typed landed outside the empty paragraph, and the RTF
+    carried that paragraph as a blank line the screen did not show.
+  - The writer wrote numbers no reader accepts: `\blueNaN` for `<font color="#abcd">`, `\red999`,
+    `\fs199998`, and indents and picture sizes of ten digits and more. Colors are 0 to 255, a size
+    is at most 1638 pt, and a length at most 22 inches.
+  - `htmlToRtf` and `htmlToMarkdown` ran out of stack on elements nested a few thousand deep,
+    lists straight inside lists among them.
+  - `rtfToHtml` reads a picture's type from its bytes where they say it, and shows no picture wider
+    than 22 inches.
+  - A picture fetched from an address is given up at 25 MB as it arrives, where the whole of it
+    was read first when the server did not say its size.
+  - The viewer's Copy button no longer says "Copied" when the clipboard refused.
+
+  **Faster**
+
+  - `onchange`'s `html`, `text` and `estimatedRtfBytes` are worked out when the handler reads
+    them. With eight pictures in a document a keystroke took 116 ms; it takes a few.
+  - `estimateRtfBytes` no longer escapes the whole data URL of a picture that has no description.
+
+  **Accessibility**
+
+  - The editing area is a labelled multi-line text box (`ariaLabel`, default "Document"), the
+    toolbar a toolbar, the buttons that are on or off (Bold, Italic, Underline, Strikethrough, Copy
+    format) say which, and the error message is an alert.
+
+  **Tooling** (nothing in the published package changes)
+
+  - SvelteKit 3, Vite 8, TypeScript 6 and happy-dom 21, which clears the advisories `npm audit`
+    reported against the older ones. CI runs on Node 22 with its actions pinned to commits, holds
+    coverage to a floor, and runs browser tests (`npm run test:e2e`).
+
+- 4b00447: The default font is **Segoe UI** 12 pt, where it was Arial 12 pt. It is what the editor and the
+  viewer show and what `htmlToRtf` names in the RTF when no `fontFamily` is given.
+
+  - To keep Arial, pass `fontFamily="Arial"` to `InkEditor` and `RtfViewer`, and
+    `{ fontFamily: 'Arial' }` to `htmlToRtf` and `estimateRtfBytes` where you call them yourself.
+  - A document is written in the font of the editor that saves it. A report saved in Arial, opened
+    and saved again by an editor left at the default, comes out in Segoe UI.
+  - On a system without Segoe UI the screen shows the system's sans-serif font; the RTF names
+    Segoe UI all the same.
+
+  The default is named in one place, `DEFAULT_FONT_FAMILY`. The size estimate counted the font name
+  as a difference from the length of "Arial"; it now counts the name itself, so it holds whatever
+  the default is.
+
+### Patch Changes
+
+- cc93a43: `maxImageBytes` is a ceiling: no picture goes into the document over it (#21, item 30). Through
+  1.9.0 the steps that shrink a picture stopped at half size, and a picture that still did not fit was
+  inserted anyway with nothing said. A 4000×3000 photograph under a limit of 20 KB went in at 36 KB,
+  and a PNG with transparency under the default 512 KB went in at 1022 KB, which is 2 MB of RTF.
+
+  - A picture over the limit is now made smaller until it fits, each step sized from how far over the
+    last one was, down to 16 px on its longest edge. The same photograph is 14 KB under a 20 KB limit.
+  - A picture with transparency that does not fit as a PNG at half size or more is laid on white and
+    written as a JPEG at full size. It was never tried as a JPEG. One that fits as a PNG keeps its
+    transparency, as before.
+  - A picture that cannot be brought under the limit is not inserted, and the editor says so. That
+    takes a limit of a few hundred bytes, or a picture the browser cannot redraw. Picture data pasted
+    with text that cannot be brought under it is taken out of the paste, with a message.
+  - Pictures within the limit, and the first four steps, are handled exactly as before.
+
+  Found in review of the above:
+
+  - With `maxImageEdge={0}`, a picture with more pixels than the browser's canvas holds (268 million
+    in Chromium, about 16.7 million in Safari on a phone) came back as an empty picture: the canvas
+    answers `data:,` instead of failing, and that passed as fitting any limit. This was so in 1.9.0
+    too. Such a picture is now brought down to a size the canvas holds, half the area at a time, and
+    an answer that is not a PNG or JPEG is never returned.
+  - A picture the browser cannot open (a TIFF, a damaged file) was refused as too large when it was
+    over the limit, and inserted as a broken picture when under it. It is now never inserted, and
+    the editor says that it could not be opened, for a file, for picture data in the dialog and for
+    picture data pasted with text.
+  - A pasted picture that is left out takes its figure and caption with it, and the link, paragraph
+    or list item that held nothing else. The caption and an empty paragraph used to stay, and went
+    into the RTF. Text that shared its paragraph stays. That covers the caption Chromium leaves in a
+    figure of its own when it moves the picture into the line before it; a caption Chromium has
+    turned into ordinary text of a line stays, since it cannot be told from the words around it. The
+    picture also stops being the selected picture, and the caret is left in a line it can type in.
+    A caption goes with its picture also where Chromium left it inside the wrapper the figure came
+    in, and stays while another picture pasted with it is still there. An empty line that the paste
+    took the place of is put back when nothing of the paste is left.
+  - One paste with a picture left out and a picture that will export as a placeholder now says both.
+    A message that says more than one thing stays up longer than four seconds.
+
+  Where there is no canvas (SSR, a test DOM), a picture over `maxImageBytes` is now refused instead of
+  passed through; one within it is passed through as before.
+
+- 626d7fc: In the Markdown export, code stays code. `htmlToMarkdown` escapes text and writes code as it is, so
+  code is safe only inside its code span or its fenced block. Through 1.9.0 there were shapes that put
+  it outside, where a Markdown viewer that allows HTML would read a line such as
+  `<img src=x onerror=…>` as HTML and a `[text](javascript:…)` as a link. One of them can be made by
+  an RTF file alone; the others need pasted HTML or HTML from the host. On screen, in `RtfViewer` and
+  in the editor, the same text was always escaped: this is the export only.
+
+  - A line break in a code span is written as a space. An empty line used to end the paragraph, and
+    the span with it. RTF can put one there (`\'0a`, `\u10`) in a run set in a code font.
+  - A code block starts a line of its own whatever is around it. Inside a heading, bold text, a link,
+    or after text that an element around it wrote (`<div>See<span><pre>`), its fence used to follow
+    other text on the line and was not a fence.
+  - Every line of a quotation carries its `>`. Only the first did, so the second paragraph of a
+    quotation, and the body of a code block in one, were outside it. A quotation after text starts a
+    line of its own (`Note<blockquote>` was `Note> …`).
+  - `<u>` is written around the text itself, with a line break at either end outside it: a tag alone
+    on a line opens a block of HTML, in which `\<` is no escape. It is not written around a code
+    block, a quotation, a list or a table.
+  - `-`, `>` and `1.` at the start of a line are escaped in the text of a paragraph, not in what a
+    list or a quotation inside the same `<div>` wrote. A list in a `<div>` used to come out as
+    `\- item`, and a quotation as `\> …`, which also took a code block out of it.
+  - A lone carriage return in a code block is a line break like any other.
+
+  `rtfToHtml`: a figure's caption that holds `$&` or `` $` `` is read as those characters. The caption
+  was put in with `String.replace` and a replacement string, so `$&` wrote `</figure>` into it and
+  `` $` `` wrote the figure a second time, inside a link's address if that is where it stood.
+
+- b97ddfd: **Tooling** (nothing in the published package changes)
+
+  - Vitest 5 and `@changesets/cli` 3, the tools that run the tests and write this changelog. The
+    files in `dist/` are byte for byte what the older tools built. TypeScript stays at 6: SvelteKit,
+    `svelte-check` and `svelte-package` do not run with TypeScript 7 yet.
+
 ## 1.9.0
 
 ### Minor Changes
