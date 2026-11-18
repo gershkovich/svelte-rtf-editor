@@ -595,6 +595,210 @@ describe('InkEditor: a pasted picture that is left out takes what was only there
 		});
 	});
 
+	describe('what a second review found, in the shapes Chromium 156 makes', () => {
+		const CAPTION_ALONE = '<figure><figcaption>Figure 1. The scan</figcaption></figure>';
+		const KEPT = '<img src="https://x.test/chart.png" alt="chart">';
+		const offline = () =>
+			vi.stubGlobal('fetch', async () => {
+				throw new TypeError('Failed to fetch');
+			});
+		/** The pictures of a figure moved into the line the caret was in, and what was left of the figure after it. */
+		const intoBody = (pictures: string, rest: string) =>
+			paste(() => {
+				contentEl().querySelector('p')!.insertAdjacentHTML('beforeend', pictures);
+				contentEl().insertAdjacentHTML('beforeend', rest);
+			});
+
+		it('a caption left alone inside the wrapper its figure came in goes with the picture, and the wrapper too', async () => {
+			// The wrapper stood between the picture and its caption, and the caption stayed.
+			for (const [open, close] of [['<div>', '</div>'], ['<section>', '</section>'], ['<a href="https://x.test/">', '</a>'], ['<section><div>', '</div></section>']]) {
+				editor.setHTML('<p>Report body</p>');
+				flushSync();
+				intoBody(IMG, `${open}${CAPTION_ALONE}${close}`);
+				await settle();
+				expect(contentEl().innerHTML, open).toBe('<p>Report body</p>');
+			}
+		});
+
+		it('a comment between the picture and its caption does not hide the caption', async () => {
+			intoBody(IMG, `<!--StartFragment-->${CAPTION_ALONE}`);
+			await settle();
+
+			expect(contentEl().querySelector('figure')).toBeNull();
+			expect(contentEl().textContent).toBe('Report body');
+		});
+
+		it('a wrapper that holds words beside the caption stays whole', async () => {
+			intoBody(IMG, `<div>${CAPTION_ALONE}<p>Other words</p></div>`);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe(`<p>Report body</p><div>${CAPTION_ALONE}<p>Other words</p></div>`);
+		});
+
+		it('a pasted wrapper around a picture and its caption alone goes whole', async () => {
+			pasteHtml(`<div><p>${IMG}</p>${CAPTION_ALONE}</div>`);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe('<p>Report body</p>');
+		});
+
+		it('the caption stays while a picture pasted with it is still there before it', async () => {
+			// Both pictures of one figure are moved into the line. The caption went with the
+			// second although the first stayed.
+			offline();
+			intoBody(`${KEPT}${IMG}`, CAPTION_ALONE);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe(`<p>Report body${KEPT}</p>${CAPTION_ALONE}`);
+		});
+
+		it('and while one is still there after it', async () => {
+			offline();
+			intoBody(`${IMG}${KEPT}`, CAPTION_ALONE);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe(`<p>Report body${KEPT}</p>${CAPTION_ALONE}`);
+		});
+
+		it('with both pictures gone, the caption goes', async () => {
+			intoBody(`${IMG}${IMG}`, CAPTION_ALONE);
+			await settle();
+
+			expect(contentEl().innerHTML).toBe('<p>Report body</p>');
+		});
+
+		describe('an empty line the paste took the place of', () => {
+			// Chromium puts a pasted block in the place of the empty line the caret was in: the
+			// line itself is gone. With the picture taken out, a blank line of the report was lost.
+			const replaceLine = (html: string): Element => {
+				const line = contentEl().querySelectorAll('p')[1];
+				paste(() => {
+					const holder = document.createElement('div');
+					holder.innerHTML = html;
+					line.replaceWith(...Array.from(holder.childNodes));
+				});
+				return line;
+			};
+
+			beforeEach(() => {
+				editor.setHTML('<p>A</p><p><br></p><p>B</p>');
+				flushSync();
+			});
+
+			it('is put back when nothing of the paste is left: the same line, where it was', async () => {
+				for (const pasted of [`<figure>${IMG}<figcaption>Figure 1</figcaption></figure>`, `<p>${IMG}</p>`]) {
+					editor.setHTML('<p>A</p><p><br></p><p>B</p>');
+					flushSync();
+					const line = replaceLine(pasted);
+					await settle();
+
+					expect(contentEl().innerHTML, pasted).toBe('<p>A</p><p><br></p><p>B</p>');
+					expect(contentEl().querySelectorAll('p')[1], pasted).toBe(line);
+					expect(editor.getRTF(), pasted).toContain('A\\par \\par ');
+				}
+			});
+
+			it('is put back where the paste stood when the paste goes in more than one step', async () => {
+				// The first picture goes with its paragraph, then the block around both with the second.
+				const line = replaceLine(`<div><p>${IMG}</p><p>${IMG}</p></div>`);
+				await settle();
+
+				expect(contentEl().innerHTML).toBe('<p>A</p><p><br></p><p>B</p>');
+				expect(contentEl().querySelectorAll('p')[1]).toBe(line);
+			});
+
+			it('takes the caret, when the caret was in what went', async () => {
+				const line = replaceLine(`<p>${IMG}</p>`);
+				caretIn(contentEl().querySelectorAll('p')[1], 1);
+				await settle();
+
+				expect(line.contains(window.getSelection()!.anchorNode)).toBe(true);
+			});
+
+			it('takes the caret from the line after it, where Chromium leaves it when it pastes a block', async () => {
+				const line = replaceLine(`<figure>${IMG}<figcaption>Figure 1</figcaption></figure>`);
+				caretIn(contentEl().querySelectorAll('p')[1], 0);
+				await settle();
+
+				expect(line.contains(window.getSelection()!.anchorNode)).toBe(true);
+			});
+
+			it('gets its line break again: Chromium takes that out of the line before it takes the line out', async () => {
+				const line = contentEl().querySelectorAll('p')[1];
+				line.innerHTML = '';
+				paste(() => {
+					const pasted = document.createElement('p');
+					pasted.innerHTML = IMG;
+					line.replaceWith(pasted);
+				});
+				await settle();
+
+				expect(contentEl().innerHTML).toBe('<p>A</p><p><br></p><p>B</p>');
+			});
+
+			it('is not put back when the paste left words: they stand where it was', async () => {
+				replaceLine(`<p>${IMG}</p><p>Tail</p>`);
+				await settle();
+
+				expect(contentEl().innerHTML).toBe('<p>A</p><p>Tail</p><p>B</p>');
+			});
+
+			it('is not put back when a picture of the paste stayed', async () => {
+				offline();
+				replaceLine(`<p>${IMG}</p><p>${KEPT}</p>`);
+				await settle();
+
+				expect(contentEl().innerHTML).toBe(`<p>A</p><p>${KEPT}</p><p>B</p>`);
+			});
+
+			it('in a quotation it is put back inside the quotation', async () => {
+				editor.setHTML('<blockquote><p>Quoted</p><p><br></p></blockquote><p>B</p>');
+				flushSync();
+				replaceLine(`<p>${IMG}</p>`);
+				await settle();
+
+				expect(contentEl().innerHTML).toBe('<blockquote><p>Quoted</p><p><br></p></blockquote><p>B</p>');
+			});
+		});
+
+		describe('the caret', () => {
+			it('inside a line that stays, is left where the picture was, not moved to the end of the line', async () => {
+				pasteHtml(`<p>before <a href="https://x.test/">${IMG}</a> after</p>`);
+				const line = contentEl().querySelectorAll('p')[1];
+				caretIn(line.querySelector('a')!, 1);
+				await settle();
+
+				expect(line.innerHTML).toBe('before  after');
+				const selection = window.getSelection()!;
+				expect(selection.anchorNode).toBe(line);
+				expect(selection.anchorOffset).toBe(1);
+			});
+
+			it('is not put inside a picture that stands before it: an empty line is left for it', async () => {
+				offline();
+				editor.setHTML('');
+				flushSync();
+				pasteHtml(`${KEPT}<p>${IMG}</p>`);
+				caretIn(contentEl().querySelector('p')!, 1);
+				await settle();
+
+				expect(contentEl().innerHTML).toBe(`${KEPT}<p><br></p>`);
+				expect(contentEl().querySelector('p')!.contains(window.getSelection()!.anchorNode)).toBe(true);
+			});
+		});
+
+		it('no line break is put into bold text or a link that was there before and is empty again', async () => {
+			editor.setHTML('<p>Report <b></b>body</p>');
+			flushSync();
+			const bold = contentEl().querySelector('b')!;
+			paste(() => (bold.innerHTML = IMG));
+			await settle();
+
+			expect(contentEl().innerHTML).toBe('<p>Report <b></b>body</p>');
+			expect(editor.getRTF()).not.toContain('\\line');
+		});
+	});
+
 	it('text that shared its paragraph stays, and so does the paragraph', async () => {
 		pasteHtml(`<p>Margin ${IMG} is clear.</p><p>${IMG}Second line</p>`);
 		await settle();

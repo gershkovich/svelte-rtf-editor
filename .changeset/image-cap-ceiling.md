@@ -34,6 +34,9 @@ Found in review of the above:
   figure of its own when it moves the picture into the line before it; a caption Chromium has
   turned into ordinary text of a line stays, since it cannot be told from the words around it. The
   picture also stops being the selected picture, and the caret is left in a line it can type in.
+  A caption goes with its picture also where Chromium left it inside the wrapper the figure came
+  in, and stays while another picture pasted with it is still there. An empty line that the paste
+  took the place of is put back when nothing of the paste is left.
 - One paste with a picture left out and a picture that will export as a placeholder now says both.
   A message that says more than one thing stays up longer than four seconds.
 
